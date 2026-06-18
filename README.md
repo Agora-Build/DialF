@@ -66,7 +66,7 @@ The ONNX model loads via `$TEN_VAD_MODEL` at runtime (defaults to the submodule'
 Auto-detected via `PATH`; override the exact command in the config (`audio.capture_cmd` /
 `audio.playback_cmd`). Capture must emit raw little-endian s16 mono PCM on stdout.
 
-## Status — M1 complete
+## Status — M1 + M2 complete
 Done & tested: workspace; protocol + control-API types; config; YAML job schema + runner;
 VAD turn-detector; 16 kHz resampler; external-tool detection/templating; subprocess +
 WAV audio backends; audio engine; **ten-vad FFI** (build-from-source default + `prebuilt`
@@ -74,7 +74,12 @@ opt-in, both verified); **dialfd daemon** with control socket, device registry, 
 phone; full `dialf` CLI (`devices`/`call`/`pickup`/`hangup`/`sms`/`run`/`play`). The full
 audio pipeline (WAV → resample → ten-vad) and the loopback call flow run end-to-end.
 
-Run the loopback demo:
+**M2** adds the real phone control plane: WebSocket server + shared-key auth, mDNS
+advertisement (`_dialfd._tcp`), device registry, command/ack with timeout, **auto-pickup**
+of allow-listed numbers, and phone-driven jobs — all verified end-to-end with a built-in
+mock phone.
+
+Run the loopback demo (no hardware):
 ```sh
 cargo run -- daemon --dry-audio &      # dry = simulate audio (no card needed)
 cargo run -- devices
@@ -82,6 +87,15 @@ cargo run -- call loopback 5551234
 cargo run -- run jobs/sample.yaml
 ```
 
-Next: **M2** — phone WebSocket server + shared-key auth + mDNS advertiser (real phones
-replace the loopback). Then **M3** (Android app), **M4** (packaging + service).
+Try the phone plane with the mock client:
+```sh
+cargo run -- daemon --dry-audio &
+cargo run -- mock-phone --id phone1 --ring 5551234 &   # connects over WS
+cargo run -- devices                                   # shows loopback + phone1
+cargo run -- call phone1 5559999
+cargo run -- run jobs/sample.yaml --device phone1
+```
+
+Next: **M3** (Android app — Flutter UI + Kotlin Telecom/InCallService implementing this
+same protocol), then **M4** (packaging + background service).
 ```

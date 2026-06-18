@@ -104,12 +104,18 @@ pub enum ServerToPhone {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
-    /// Answer a ringing call.
-    Pickup { call_id: CallId },
+    /// Answer a ringing call. `call_id` omitted ⇒ the phone answers the ringing call.
+    Pickup {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<CallId>,
+    },
     /// Place an outbound call.
     Dial { number: String },
-    /// End a call leg.
-    Hangup { call_id: CallId },
+    /// End a call leg. `call_id` omitted ⇒ the phone ends the active call.
+    Hangup {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<CallId>,
+    },
     /// Send a text message.
     SendSms { to: String, body: String },
     /// Request the inbox (optionally since a timestamp).

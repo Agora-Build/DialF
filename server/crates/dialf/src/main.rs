@@ -7,11 +7,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio_tungstenite::tungstenite::Message;
 
 use dialf::config::Config;
-use dialf::protocol::{ControlOp, ControlRequest, ControlResponse};
+use dialf::protocol::{
+    CallState, ControlOp, ControlRequest, ControlResponse, Direction, PhoneToServer, ServerToPhone,
+};
 
 #[derive(Parser)]
 #[command(name = "dialf", version, about = "Drive a phone's calls via dialfd")]
@@ -55,6 +59,25 @@ enum Command {
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
+    /// (testing) Run a mock phone that connects to dialfd and acks commands.
+    #[command(hide = true)]
+    MockPhone {
+        /// dialfd phone WS address (host:port).
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        server: String,
+        /// Shared key (defaults to the config's shared_key).
+        #[arg(long)]
+        key: Option<String>,
+        /// Device id to register as.
+        #[arg(long, default_value = "mock-phone")]
+        id: String,
+        /// Friendly device name.
+        #[arg(long, default_value = "Mock Phone")]
+        name: String,
+        /// Emit an inbound ringing call from this number on connect (tests auto-pickup).
+        #[arg(long)]
+        ring: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,7 +157,74 @@ async fn main() -> anyhow::Result<()> {
             print_response(&resp);
             ok_or_err(resp)
         }
+        Command::MockPhone {
+            server,
+            key,
+            id,
+            name,
+            ring,
+        } => {
+            let key = key.unwrap_or_else(|| config.shared_key.clone());
+            mock_phone(server, key, id, name, ring).await
+        }
     }
+}
+
+/// A minimal phone: connect, hello, optionally ring, then ack every command.
+async fn mock_phone(
+    server: String,
+    key: String,
+    id: String,
+    name: String,
+    ring: Option<String>,
+) -> anyhow::Result<()> {
+    let url = format!("ws://{server}");
+    let (ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .with_context(|| format!("connect {url}"))?;
+    let (mut sink, mut stream) = ws.split();
+
+    let hello = PhoneToServer::Hello {
+        device_id: id.clone(),
+        name,
+        key,
+        caps: vec!["call".into(), "sms".into()],
+        app_version: Some("mock".into()),
+    };
+    sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
+        .await?;
+    println!("[mock {id}] connected to {server}");
+
+    if let Some(number) = ring {
+        let cs = PhoneToServer::CallState {
+            call_id: "ring-1".into(),
+            state: CallState::Ringing,
+            number: Some(number.clone()),
+            direction: Direction::In,
+        };
+        sink.send(Message::Text(serde_json::to_string(&cs)?.into()))
+            .await?;
+        println!("[mock {id}] ringing from {number}");
+    }
+
+    while let Some(msg) = stream.next().await {
+        let msg = msg?;
+        if msg.is_close() {
+            break;
+        }
+        let Ok(text) = msg.to_text() else { continue };
+        if text.is_empty() {
+            continue;
+        }
+        if let Ok(ServerToPhone::Cmd { cmd_id, action }) = serde_json::from_str(text) {
+            println!("[mock {id}] cmd: {action:?}");
+            let ack = PhoneToServer::Ack { cmd_id, ok: true };
+            sink.send(Message::Text(serde_json::to_string(&ack)?.into()))
+                .await?;
+        }
+    }
+    println!("[mock {id}] disconnected");
+    Ok(())
 }
 
 /// Send one control request and read one response line.
