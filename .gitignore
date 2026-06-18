@@ -1,0 +1,23 @@
+# Rust
+/server/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Vendored native libs (large; fetch per vendor/README.md)
+/server/crates/ten-vad-sys/vendor/lib/
+
+# Recordings / scratch audio
+/recordings/
+*.wav.tmp
+
+# OS
+.DS_Store
+
+# Local Claude settings (personal)
+.claude/settings.local.json
+
+# Flutter (added in M3)
+/app/.dart_tool/
+/app/build/
+/app/.flutter-plugins
+/app/.flutter-plugins-dependencies

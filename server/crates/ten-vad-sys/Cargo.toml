@@ -1,0 +1,23 @@
+[package]
+name = "ten-vad-sys"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Low-level FFI bindings to the ten-vad C library"
+build = "build.rs"
+# Declares the native lib so rpath dirs propagate to dependents via DEP_TEN_VAD_RPATH.
+links = "ten_vad"
+
+[features]
+# Default is build-from-source (the ONNX variant, all architectures). Enable `prebuilt`
+# to instead link a prebuilt ten-vad lib from vendor/lib (or TEN_VAD_LIB_DIR) — faster
+# and no onnxruntime, but only for platforms ten-vad ships a lib for.
+prebuilt = []
+
+[dependencies]
+
+[dev-dependencies]
+hound = "3"
+
+[build-dependencies]
+cc = "1"

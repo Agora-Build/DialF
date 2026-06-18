@@ -1,0 +1,27 @@
+# Sample DialF job — answer the call, then run a two-turn scripted exchange.
+# Audio plays out the host's sound card; audio.wait_for_speech uses ten-vad to
+# detect when the human finishes each turn.
+
+- type: call.pickup
+  description: answer the inbound call
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_question_short1.wav
+  description: RSP_BASIC-001 question
+- type: audio.wait_for_speech
+  end_timeout_ms: 45000
+  silence_duration_ms: 3000
+  description: RSP_BASIC-001 response
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_question_short2.wav
+  description: RSP_BASIC-002 question
+- type: audio.wait_for_speech
+  end_timeout_ms: 45000
+  silence_duration_ms: 3000
+  description: RSP_BASIC-002 response
+
+- type: log
+  message: scripted exchange complete
+- type: call.hangup
+  description: end the call

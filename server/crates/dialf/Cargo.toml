@@ -1,0 +1,36 @@
+[package]
+name = "dialf"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "DialF — CLI + daemon to drive a mobile phone's calls via a control plane and a sound-card audio plane"
+
+[features]
+# Default builds ten-vad from source (ONNX variant). Enable `prebuilt` to link a
+# prebuilt ten-vad lib instead (see README).
+prebuilt = ["ten-vad-sys/prebuilt"]
+
+[[bin]]
+name = "dialf"
+path = "src/main.rs"
+
+[lib]
+name = "dialf"
+path = "src/lib.rs"
+
+[dependencies]
+ten-vad-sys = { path = "../ten-vad-sys" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+clap = { workspace = true }
+mdns-sd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hound = { workspace = true }
+which = { workspace = true }
