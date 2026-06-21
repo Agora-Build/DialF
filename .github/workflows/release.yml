@@ -1,0 +1,115 @@
+# Tag-driven release: push vX.Y.Z -> build per-target binaries (with the ten-vad lib
+# bundled + rpath fixed), publish a GitHub Release, then publish the npm wrapper.
+#
+# Covered targets use the prebuilt ten-vad lib (--features prebuilt): macOS arm64/x86_64
+# and Linux x86_64. Linux aarch64 (Raspberry Pi) has no prebuilt ten-vad; build it from
+# source on-device (`cargo build --release`, ONNX path) — see README.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: darwin-aarch64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            artifact: darwin-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          perl -0pi -e "s/^version = \"[^\"]+\"/version = \"$VERSION\"/m" server/Cargo.toml || true
+
+      - name: Select ten-vad prebuilt lib dir
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            echo "TEN_VAD_LIB_DIR=$PWD/third_party/ten-vad/lib/macOS" >> "$GITHUB_ENV"
+          else
+            echo "TEN_VAD_LIB_DIR=$PWD/third_party/ten-vad/lib/Linux/x64" >> "$GITHUB_ENV"
+            sudo apt-get update && sudo apt-get install -y patchelf
+          fi
+
+      - name: Build
+        working-directory: server
+        run: cargo build --release --features prebuilt --target ${{ matrix.target }}
+
+      - name: Stage + bundle lib + fix rpath
+        shell: bash
+        run: |
+          stage="dialf-${VERSION}-${{ matrix.artifact }}"
+          mkdir -p "$stage"
+          cp "server/target/${{ matrix.target }}/release/dialf" "$stage/dialf"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp -R third_party/ten-vad/lib/macOS/ten_vad.framework "$stage/"
+            strip "$stage/dialf" || true
+            install_name_tool -add_rpath @loader_path "$stage/dialf"
+          else
+            cp third_party/ten-vad/lib/Linux/x64/libten_vad.so "$stage/"
+            strip "$stage/dialf" || true
+            patchelf --set-rpath '$ORIGIN' "$stage/dialf"
+          fi
+          tar -czf "${stage}.tar.gz" "$stage"
+          echo "staged ${stage}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dialf-${{ matrix.artifact }}
+          path: dialf-*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/dialf-*.tar.gz
+
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Set npm version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const f='npm/package.json',p=require('./'+f);p.version='$VERSION';require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+      - name: Publish
+        working-directory: npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

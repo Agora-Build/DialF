@@ -59,6 +59,14 @@ enum Command {
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
+    /// Install/manage dialfd as an OS background service (launchd/systemd).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+        /// Install for the current user (login) instead of system-wide (boot).
+        #[arg(long, global = true)]
+        user: bool,
+    },
     /// (testing) Run a mock phone that connects to dialfd and acks commands.
     #[command(hide = true)]
     MockPhone {
@@ -78,6 +86,24 @@ enum Command {
         #[arg(long)]
         ring: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Write + load the service unit (auto-starts; system scope needs sudo).
+    Install {
+        /// Config file path baked into the service command.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Stop + remove the service unit.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the running service.
+    Stop,
+    /// Show service status.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -156,6 +182,21 @@ async fn main() -> anyhow::Result<()> {
             let resp = call(&socket, op).await?;
             print_response(&resp);
             ok_or_err(resp)
+        }
+        Command::Service { action, user } => {
+            let scope = if user {
+                dialf::service::Scope::User
+            } else {
+                dialf::service::Scope::System
+            };
+            let (act, config) = match action {
+                ServiceAction::Install { config } => (dialf::service::Action::Install, config),
+                ServiceAction::Uninstall => (dialf::service::Action::Uninstall, None),
+                ServiceAction::Start => (dialf::service::Action::Start, None),
+                ServiceAction::Stop => (dialf::service::Action::Stop, None),
+                ServiceAction::Status => (dialf::service::Action::Status, None),
+            };
+            dialf::service::run(act, scope, config)
         }
         Command::MockPhone {
             server,

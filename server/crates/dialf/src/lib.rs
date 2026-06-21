@@ -15,6 +15,7 @@ pub mod loopback;
 pub mod phone;
 pub mod protocol;
 pub mod registry;
+pub mod service;
 pub mod transport;
 
 /// Whether the build is linked against the real ten-vad library (vs. the stub).

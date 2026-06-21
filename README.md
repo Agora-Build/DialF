@@ -66,7 +66,39 @@ The ONNX model loads via `$TEN_VAD_MODEL` at runtime (defaults to the submodule'
 Auto-detected via `PATH`; override the exact command in the config (`audio.capture_cmd` /
 `audio.playback_cmd`). Capture must emit raw little-endian s16 mono PCM on stdout.
 
-## Status — M1 + M2 complete
+## Install (daemon as a service)
+
+Prebuilt binaries (macOS arm64/x86_64, Linux x86_64) ship on GitHub Releases. Both
+installers fetch the binary (with the ten-vad lib bundled) and can register `dialfd` as a
+background service.
+
+```sh
+# curl — installs the binary and starts dialfd as a boot service (prompts for sudo)
+curl -fsSL https://dl.agora.build/dialf/install.sh | bash
+
+# npm — installs the CLI; then enable the service explicitly
+npm install -g @agora-build/dialf
+sudo dialf service install            # boot service (launchd/systemd)
+# or, no sudo, runs at login:
+dialf service install --user
+```
+
+Service management (writes a launchd LaunchDaemon on macOS / systemd unit on Linux;
+`RunAtLoad`/`enable` + keep-alive restart):
+
+```sh
+dialf service install [--user] [--config <path>]   # system scope needs sudo
+dialf service status  [--user]
+dialf service stop|start|uninstall [--user]
+```
+
+Linux **aarch64** (Raspberry Pi) has no prebuilt ten-vad — build from source on-device
+(`cd server && cargo build --release`, the default ONNX path), then `dialf service install`.
+
+Packaging lives in `scripts/install.sh`, `npm/`, and `.github/workflows/release.yml`
+(tag `vX.Y.Z` via `scripts/release.sh` → builds binaries + publishes the Release and npm).
+
+## Status — M1–M4 (M3 verified on a real Pixel; M4 service verified)
 Done & tested: workspace; protocol + control-API types; config; YAML job schema + runner;
 VAD turn-detector; 16 kHz resampler; external-tool detection/templating; subprocess +
 WAV audio backends; audio engine; **ten-vad FFI** (build-from-source default + `prebuilt`
@@ -96,6 +128,15 @@ cargo run -- call phone1 5559999
 cargo run -- run jobs/sample.yaml --device phone1
 ```
 
-Next: **M3** (Android app — Flutter UI + Kotlin Telecom/InCallService implementing this
-same protocol), then **M4** (packaging + background service).
+**M3** (Android app) is built and **verified on a real Pixel 9 Pro**: auto-discovers
+`dialfd` over WiFi (mDNS), connects with the shared key, registers in `dialf devices`,
+default-dialer granted, command round-trip confirmed. See `app/`.
+
+**M4** packaging: `dialf service` installs dialfd as a launchd/systemd service (verified
+in user scope); curl + npm installers and a tag-driven release workflow are in place (see
+Install above).
+
+Remaining for production: real outbound call / SMS / auto-pickup on a live call, and the
+USB sound-card audio bridge (a scripted call through ten-vad) — these need the audio
+hardware cabled to the phone.
 ```
