@@ -92,11 +92,24 @@ dialf service status  [--user]
 dialf service stop|start|uninstall [--user]
 ```
 
-Linux **aarch64** (Raspberry Pi) has no prebuilt ten-vad — build from source on-device
-(`cd server && cargo build --release`, the default ONNX path), then `dialf service install`.
+### Build from source (any platform/arch)
 
-Packaging lives in `scripts/install.sh`, `npm/`, and `.github/workflows/release.yml`
-(tag `vX.Y.Z` via `scripts/release.sh` → builds binaries + publishes the Release and npm).
+Prebuilt covers macOS arm64/x86_64 + Linux x86_64. For anything else (e.g. Linux
+**aarch64** / Raspberry Pi), `install.sh` **auto-falls back** to an on-device source build;
+you can also run it directly:
+
+```sh
+curl -fsSL  | bash
+```
+
+It installs Rust + build deps (apt/dnf/pacman/brew), clones with submodules, and runs
+`cargo build --release` (the default ONNX path — `build.rs` auto-downloads the matching
+onnxruntime for the device's OS/arch: darwin arm64/x86_64, linux x64/aarch64), then
+installs the service. Works on **mac/linux × arm64/x86_64**.
+
+Packaging lives in `scripts/install.sh`, `scripts/`, `npm/`, and
+`.github/workflows/release.yml` (tag `vX.Y.Z` via `scripts/release.sh` → builds binaries +
+publishes the Release and npm).
 
 ## Status — M1–M4 (M3 verified on a real Pixel; M4 service verified)
 Done & tested: workspace; protocol + control-API types; config; YAML job schema + runner;
