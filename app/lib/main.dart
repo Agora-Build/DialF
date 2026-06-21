@@ -147,6 +147,7 @@ class _HomePageState extends State<HomePage> {
             TextField(controller: _key, decoration: const InputDecoration(labelText: 'Shared key')),
             TextField(
               controller: _addr,
+              onChanged: (_) => setState(() {}),
               decoration: const InputDecoration(
                 labelText: 'dialfd address (optional, host:port)',
                 hintText: 'leave blank to auto-discover',
@@ -169,10 +170,14 @@ class _HomePageState extends State<HomePage> {
               ? null
               : () {
                   _applyIdentity();
-                  final addr = _addr.text.trim();
+                  // Tolerate full-width colon (CJK IMEs) and stray spaces.
+                  final addr = _addr.text.trim().replaceAll('：', ':');
                   if (addr.contains(':')) {
                     final parts = addr.split(':');
-                    client.connect(parts[0], int.tryParse(parts[1]) ?? 8765);
+                    client.connect(
+                      parts[0].trim(),
+                      int.tryParse(parts[1].trim()) ?? 8765,
+                    );
                   } else {
                     client.autoConnect();
                   }
