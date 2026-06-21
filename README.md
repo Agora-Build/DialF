@@ -23,9 +23,10 @@ See `.../plans/mellow-spinning-candy.md` for the full design.
 
 - `server/` — Rust workspace
   - `crates/dialf/` — the `dialf` binary + library (CLI, protocol, audio engine, jobs)
-  - `crates/ten-vad-sys/` — FFI bindings to the prebuilt ten-vad C library
-  - `jobs/sample.yaml` — example scripted call
-- `app/` — Flutter + Kotlin app (M3, not yet started)
+  - `crates/ten-vad-sys/` — FFI bindings to ten-vad (built from source)
+  - `jobs/sample.yaml` — minimal two-turn exchange
+  - `jobs/end-to-end-call.yaml` — full outbound call (dial → greet → Q&A → SMS → hangup)
+- `app/` — Flutter + Kotlin app (M3)
 - `corpus/` — audio assets referenced by jobs
 
 ## Build

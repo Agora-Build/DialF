@@ -1,0 +1,71 @@
+# DialF — end-to-end outbound call (a short scripted survey).
+#
+# Flow: place a call -> wait for the callee to be connected -> greet -> ask two
+# questions, each followed by a VAD-gated wait for the answer -> say goodbye ->
+# text a confirmation -> hang up.
+#
+# Run it against a connected phone:
+#   dialf run jobs/end-to-end-call.yaml --device phone1
+#
+# Audio is bridged through the host's USB sound card (see config audio.*). If
+# `audio.record_dir` is set, the whole call is recorded to <job>-rx/tx/mix.wav.
+# Replace the corpus/*.wav paths with your own prompts (any WAV; resampled to 16k).
+#
+# Step reference:
+#   call.dial {number}        place an outbound call
+#   call.pickup               answer the ringing call (use this for inbound jobs)
+#   call.hangup               end the call
+#   audio.play {file}         inject a WAV into the call (-> callee hears it)
+#   audio.wait_for_speech {end_timeout_ms, silence_duration_ms}
+#                             record the callee until they stop talking (ten-vad);
+#                             ends after silence_duration_ms of quiet, or end_timeout_ms cap
+#   sms.send {to, body}       send a text
+#   wait {ms}                 pause
+#   log {message}             emit a log line
+
+- type: call.dial
+  number: "+15555550123"
+  description: place the outbound call
+
+- type: wait
+  ms: 6000
+  description: allow time for the callee to pick up
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_greeting.wav
+  description: greeting
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_question_short1.wav
+  description: RSP_BASIC-001 question
+- type: audio.wait_for_speech
+  end_timeout_ms: 45000
+  silence_duration_ms: 3000
+  description: RSP_BASIC-001 response
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_question_short2.wav
+  description: RSP_BASIC-002 question
+- type: audio.wait_for_speech
+  end_timeout_ms: 45000
+  silence_duration_ms: 3000
+  description: RSP_BASIC-002 response
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/en_goodbye.wav
+  description: closing
+
+- type: wait
+  ms: 800
+  description: let the closing audio finish playing out the card
+
+- type: sms.send
+  to: "+15555550123"
+  body: "Thanks for completing the DialF survey!"
+  description: confirmation text
+
+- type: call.hangup
+  description: end the call
+
+- type: log
+  message: end-to-end call complete
