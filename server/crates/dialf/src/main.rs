@@ -85,6 +85,9 @@ enum Command {
         /// Emit an inbound ringing call from this number on connect (tests auto-pickup).
         #[arg(long)]
         ring: Option<String>,
+        /// Emit an inbound SMS on connect, formatted "from:body" (tests receive).
+        #[arg(long)]
+        incoming_sms: Option<String>,
     },
 }
 
@@ -206,20 +209,22 @@ async fn main() -> anyhow::Result<()> {
             id,
             name,
             ring,
+            incoming_sms,
         } => {
             let key = key.unwrap_or_else(|| config.shared_key.clone());
-            mock_phone(server, key, id, name, ring).await
+            mock_phone(server, key, id, name, ring, incoming_sms).await
         }
     }
 }
 
-/// A minimal phone: connect, hello, optionally ring, then ack every command.
+/// A minimal phone: connect, hello, optionally ring / deliver an SMS, then ack commands.
 async fn mock_phone(
     server: String,
     key: String,
     id: String,
     name: String,
     ring: Option<String>,
+    incoming_sms: Option<String>,
 ) -> anyhow::Result<()> {
     let url = format!("ws://{server}");
     let (ws, _) = tokio_tungstenite::connect_async(&url)
@@ -248,6 +253,20 @@ async fn mock_phone(
         sink.send(Message::Text(serde_json::to_string(&cs)?.into()))
             .await?;
         println!("[mock {id}] ringing from {number}");
+    }
+
+    if let Some(s) = incoming_sms {
+        let (from, body) = s.split_once(':').unwrap_or(("unknown", s.as_str()));
+        let sms = PhoneToServer::Sms {
+            direction: Direction::In,
+            from: Some(from.to_string()),
+            to: None,
+            body: body.to_string(),
+            ts: 0,
+        };
+        sink.send(Message::Text(serde_json::to_string(&sms)?.into()))
+            .await?;
+        println!("[mock {id}] incoming sms from {from}");
     }
 
     while let Some(msg) = stream.next().await {

@@ -4,9 +4,10 @@
 //! A loopback device is always registered for hardware-free testing; real phones register
 //! dynamically over WebSocket.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use serde_json::json;
@@ -20,8 +21,11 @@ use crate::jobs::{runner, schema};
 use crate::loopback::{LoopbackJobIo, LOOPBACK_ID};
 use crate::phone::PhoneJobIo;
 use crate::protocol::{Action, ControlOp, ControlRequest, ControlResponse};
-use crate::registry::{DeviceInfo, DeviceKind, Registry};
+use crate::registry::{DeviceInfo, DeviceKind, Registry, SmsRecord};
 use crate::transport::{control_server, discovery, phone_server};
+
+/// Most recent SMS kept per device.
+const INBOX_CAP: usize = 200;
 
 /// Shared daemon state. Cheap to clone (everything is `Arc`).
 #[derive(Clone)]
@@ -30,8 +34,23 @@ pub struct DaemonState {
     pub engine: Arc<AudioEngine>,
     pub hub: Arc<Hub>,
     pub config: Arc<Config>,
+    /// Recently received/sent SMS, per device id.
+    pub inbox: Arc<Mutex<HashMap<String, Vec<SmsRecord>>>>,
     /// When true, audio steps are simulated (no sound card / ten-vad needed).
     pub dry_audio: bool,
+}
+
+impl DaemonState {
+    /// Append an SMS to a device's inbox (capped to the most recent [`INBOX_CAP`]).
+    pub fn record_sms(&self, device_id: &str, rec: SmsRecord) {
+        let mut inbox = self.inbox.lock().unwrap();
+        let v = inbox.entry(device_id.to_string()).or_default();
+        v.push(rec);
+        let len = v.len();
+        if len > INBOX_CAP {
+            v.drain(0..len - INBOX_CAP);
+        }
+    }
 }
 
 /// Milliseconds since the Unix epoch.
@@ -61,6 +80,7 @@ pub async fn run(config: Config, dry_audio: bool) -> anyhow::Result<()> {
         engine,
         hub: Arc::new(Hub::new()),
         config: Arc::new(config),
+        inbox: Arc::new(Mutex::new(HashMap::new())),
         dry_audio,
     };
 
@@ -153,9 +173,21 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             Ok(ok_msg(&id))
         }
         ControlOp::SmsList { device } => {
-            let _dev = resolve_device(state, Some(device))?;
-            // No inbox cache yet; returns empty.
-            Ok(ok_data(&id, json!({ "messages": [] })))
+            let dev = resolve_device(state, Some(device))?;
+            // For a real phone, ask it to report its inbox, then give responses a moment
+            // to arrive (they come back as `sms` frames the reader loop records).
+            if matches!(device_kind(state, &dev)?, DeviceKind::Phone) {
+                let _ = state.hub.fire(&dev, Action::ListSms { since: None }).await;
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+            let msgs = state
+                .inbox
+                .lock()
+                .unwrap()
+                .get(&dev)
+                .cloned()
+                .unwrap_or_default();
+            Ok(ok_data(&id, json!({ "messages": msgs })))
         }
         ControlOp::AudioPlay { file, device: _ } => {
             let engine = state.engine.clone();

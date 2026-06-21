@@ -1,9 +1,9 @@
-//! In-process loopback phone for hardware-free M1 runs.
+//! In-process loopback phone — the hardware-free test device (always registered
+//! alongside any real phones).
 //!
 //! Implements [`JobIo`] by driving the [`AudioEngine`] for audio steps and updating the
 //! [`Registry`]'s call state for call/SMS steps. With `dry_audio = true`, audio steps are
-//! logged and skipped — useful before a sound card / the ten-vad native lib are present.
-//! M2 replaces this with a real phone over WebSocket.
+//! logged and skipped — useful with no sound card present.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};

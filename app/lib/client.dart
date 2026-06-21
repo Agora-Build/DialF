@@ -174,6 +174,17 @@ class DialfClient extends ChangeNotifier {
         });
         _log('call ${e['state']} ${e['number'] ?? ''}');
         break;
+      case 'sms':
+        _send({
+          'type': 'sms',
+          'direction': e['direction'] ?? 'in',
+          'from': e['from'],
+          'to': e['to'],
+          'body': e['body'],
+          'ts': e['ts'] ?? DateTime.now().millisecondsSinceEpoch,
+        });
+        _log('sms in from ${e['from']}');
+        break;
       case 'dialer_role':
         _log('dialer role granted: ${e['granted']}');
         break;

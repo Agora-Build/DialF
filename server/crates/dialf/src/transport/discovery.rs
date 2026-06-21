@@ -17,7 +17,6 @@ use crate::config::{Config, DEFAULT_SERVICE_TYPE};
 /// Holds the native mDNS registration process; unregisters on drop.
 pub struct Advertiser {
     child: Child,
-    tool: &'static str,
 }
 
 impl Drop for Advertiser {
@@ -68,12 +67,5 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         via = tool,
         "advertising via mDNS"
     );
-    Ok(Advertiser { child, tool })
-}
-
-impl Advertiser {
-    /// The tool used for advertisement (for diagnostics).
-    pub fn tool(&self) -> &'static str {
-        self.tool
-    }
+    Ok(Advertiser { child })
 }

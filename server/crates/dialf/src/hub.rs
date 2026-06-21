@@ -57,11 +57,6 @@ impl Hub {
         }
     }
 
-    /// Whether a device is currently connected.
-    pub fn is_connected(&self, device_id: &str) -> bool {
-        self.conns.lock().unwrap().contains_key(device_id)
-    }
-
     /// Resolve a pending command ack (called from the phone read loop).
     pub fn resolve_ack(&self, device_id: &str, cmd_id: &str, ok: bool) {
         let conn = self.conns.lock().unwrap().get(device_id).cloned();

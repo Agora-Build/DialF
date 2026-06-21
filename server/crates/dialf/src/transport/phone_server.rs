@@ -167,10 +167,21 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
         PhoneToServer::Sms {
             direction,
             from,
+            to,
             body,
-            ..
+            ts,
         } => {
             tracing::info!(%device_id, ?direction, ?from, len = body.len(), "sms");
+            state.record_sms(
+                device_id,
+                crate::registry::SmsRecord {
+                    direction,
+                    from,
+                    to,
+                    body,
+                    ts,
+                },
+            );
         }
         PhoneToServer::Ack { cmd_id, ok } => state.hub.resolve_ack(device_id, &cmd_id, ok),
         PhoneToServer::Error { cmd_id, msg } => {

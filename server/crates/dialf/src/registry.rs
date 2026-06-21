@@ -28,6 +28,16 @@ pub struct CallInfo {
     pub direction: Direction,
 }
 
+/// A text message seen by a device (received, or echoed on send).
+#[derive(Debug, Clone, Serialize)]
+pub struct SmsRecord {
+    pub direction: Direction,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub body: String,
+    pub ts: i64,
+}
+
 /// A registered device.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
@@ -75,16 +85,6 @@ impl Registry {
         let mut v: Vec<DeviceInfo> = self.devices.values().cloned().collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
-    }
-
-    /// Number of registered devices.
-    pub fn len(&self) -> usize {
-        self.devices.len()
-    }
-
-    /// Whether the registry is empty.
-    pub fn is_empty(&self) -> bool {
-        self.devices.is_empty()
     }
 
     /// Pick the sole device id if exactly one is registered (for `--device`-less calls).

@@ -19,8 +19,6 @@ use std::fmt;
 
 /// 16 ms hop at 16 kHz — ten-vad's recommended frame size.
 pub const HOP_256: usize = 256;
-/// 10 ms hop at 16 kHz.
-pub const HOP_160: usize = 160;
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,7 +58,7 @@ pub struct VadFrame {
 
 #[cfg(ten_vad_linked)]
 mod ffi {
-    use std::os::raw::{c_char, c_int};
+    use std::os::raw::c_int;
 
     pub type Handle = *mut std::ffi::c_void;
 
@@ -74,7 +72,6 @@ mod ffi {
             out_flag: *mut c_int,
         ) -> c_int;
         pub fn ten_vad_destroy(handle: *mut Handle) -> c_int;
-        pub fn ten_vad_get_version() -> *const c_char;
     }
 }
 
@@ -160,20 +157,4 @@ impl Drop for TenVad {
 /// Whether this build is linked against the real ten-vad library.
 pub const fn is_linked() -> bool {
     cfg!(ten_vad_linked)
-}
-
-/// The native library version string, or `None` in stub builds.
-pub fn version() -> Option<String> {
-    #[cfg(ten_vad_linked)]
-    unsafe {
-        let p = ffi::ten_vad_get_version();
-        if p.is_null() {
-            return None;
-        }
-        Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
-    }
-    #[cfg(not(ten_vad_linked))]
-    {
-        None
-    }
 }
