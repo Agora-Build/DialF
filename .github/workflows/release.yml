@@ -1,9 +1,9 @@
-# Tag-driven release: push vX.Y.Z -> build per-target binaries (with the ten-vad lib
-# bundled + rpath fixed), publish a GitHub Release, then publish the npm wrapper.
+# Tag-driven release: push vX.Y.Z -> build prebuilt dialf binaries (ten-vad compiled from
+# source, onnxruntime + model bundled + rpath fixed), publish a GitHub Release, then the
+# npm wrapper.
 #
-# Covered targets use the prebuilt ten-vad lib (--features prebuilt): macOS arm64/x86_64
-# and Linux x86_64. Linux aarch64 (Raspberry Pi) has no prebuilt ten-vad; build it from
-# source on-device (`cargo build --release`, ONNX path) — see README.
+# dialf/dialfd ARE shipped as prebuilt binaries; ten-vad inside them is always compiled
+# from source (ONNX path). Linux aarch64 (no runner here) builds from source on-device.
 name: release
 
 on:
@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  ORT_VERSION: "1.17.1"
 
 jobs:
   build:
@@ -22,12 +25,15 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: darwin-aarch64
+            ort_plat: osx-arm64
           - os: macos-14
             target: x86_64-apple-darwin
             artifact: darwin-x86_64
+            ort_plat: osx-x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: linux-x86_64
+            ort_plat: linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -45,33 +51,28 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           perl -0pi -e "s/^version = \"[^\"]+\"/version = \"$VERSION\"/m" server/Cargo.toml || true
 
-      - name: Select ten-vad prebuilt lib dir
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            echo "TEN_VAD_LIB_DIR=$PWD/third_party/ten-vad/lib/macOS" >> "$GITHUB_ENV"
-          else
-            echo "TEN_VAD_LIB_DIR=$PWD/third_party/ten-vad/lib/Linux/x64" >> "$GITHUB_ENV"
-            sudo apt-get update && sudo apt-get install -y patchelf
-          fi
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y patchelf
 
-      - name: Build
+      - name: Build (ten-vad from source; auto-downloads onnxruntime for the target)
         working-directory: server
-        run: cargo build --release --features prebuilt --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Stage + bundle lib + fix rpath
+      - name: Stage + bundle onnxruntime + model + fix rpath
         shell: bash
         run: |
           stage="dialf-${VERSION}-${{ matrix.artifact }}"
+          ortlib="$HOME/.cargo/ten-vad-ort/${ORT_VERSION}/onnxruntime-${{ matrix.ort_plat }}-${ORT_VERSION}/lib"
           mkdir -p "$stage"
           cp "server/target/${{ matrix.target }}/release/dialf" "$stage/dialf"
+          cp third_party/ten-vad/src/onnx_model/ten-vad.onnx "$stage/ten-vad.onnx"
+          strip "$stage/dialf" || true
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cp -R third_party/ten-vad/lib/macOS/ten_vad.framework "$stage/"
-            strip "$stage/dialf" || true
+            cp -a "$ortlib"/libonnxruntime*.dylib "$stage/"
             install_name_tool -add_rpath @loader_path "$stage/dialf"
           else
-            cp third_party/ten-vad/lib/Linux/x64/libten_vad.so "$stage/"
-            strip "$stage/dialf" || true
+            cp -a "$ortlib"/libonnxruntime.so* "$stage/"
             patchelf --set-rpath '$ORIGIN' "$stage/dialf"
           fi
           tar -czf "${stage}.tar.gz" "$stage"

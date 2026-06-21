@@ -42,21 +42,17 @@ ten-vad is a git **submodule** at `third_party/ten-vad`. After cloning:
 git submodule update --init --recursive
 ```
 
-**Default = build from source** (the open-source ONNX variant) — works on **any
+ten-vad is **always compiled from source** (the open-source ONNX variant) — works on **any
 architecture**, incl. Linux aarch64 / Raspberry Pi. `build.rs` auto-downloads the matching
-**onnxruntime** release for your host into `$CARGO_HOME/ten-vad-ort/` (one-time, needs
-network). To use your own onnxruntime (offline / CI), set `ORT_ROOT` to a dir with
-`include/` + `lib/`.
+**onnxruntime** for the target into `$CARGO_HOME/ten-vad-ort/` (one-time, needs network);
+set `ORT_ROOT` (a dir with `include/` + `lib/`) to use your own / build offline.
 
-**Opt-in `prebuilt`** links ten-vad's prebuilt lib instead (faster, no onnxruntime, but
-only for shipped platforms: macOS, Linux x64, Android, iOS, Windows):
-```sh
-# vendor the lib once (see server/crates/ten-vad-sys/vendor/README.md), then:
-cargo build --features prebuilt
-```
+The ONNX model loads via `$TEN_VAD_MODEL` at runtime — defaults to the submodule's
+`src/onnx_model/ten-vad.onnx` (baked in for source builds). Prebuilt `dialf` release
+binaries bundle `ten-vad.onnx` next to the executable and auto-set `$TEN_VAD_MODEL`.
 
-The ONNX model loads via `$TEN_VAD_MODEL` at runtime (defaults to the submodule's
-`src/onnx_model/ten-vad.onnx`, baked in at build time).
+> dialf/dialfd themselves are shipped as **prebuilt binaries** (with onnxruntime + the
+> model bundled); only ten-vad is compiled from source (in CI for releases, or on-device).
 
 ## Audio tools (external, configurable)
 `dialfd` shells out to whatever audio tool is available — no bound audio library:

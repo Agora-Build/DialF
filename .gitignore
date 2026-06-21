@@ -3,9 +3,6 @@
 **/*.rs.bk
 Cargo.lock.orig
 
-# Vendored native libs (large; fetch per vendor/README.md)
-/server/crates/ten-vad-sys/vendor/lib/
-
 # Recordings / scratch audio
 /recordings/
 *.wav.tmp

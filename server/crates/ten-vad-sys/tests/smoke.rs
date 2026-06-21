@@ -1,9 +1,9 @@
 //! Smoke test for the real ten-vad library.
 //!
 //! Skips automatically when the crate was built without a linked lib (stub mode), so it
-//! stays green on a clean checkout. When linked (vendor/lib present or TEN_VAD_LIB_DIR
-//! set), it runs VAD over a real 16 kHz speech clip and asserts a sane mix of voiced and
-//! non-voiced frames.
+//! stays green if the native lib somehow isn't linked. Normally ten-vad is compiled from
+//! source, so this runs VAD over a real 16 kHz speech clip and asserts a sane mix of
+//! voiced and non-voiced frames.
 
 #[test]
 fn smoke_detects_speech_and_silence() {

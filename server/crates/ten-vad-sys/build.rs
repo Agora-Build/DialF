@@ -1,17 +1,13 @@
 //! Build script for ten-vad-sys.
 //!
-//! Default: **build from source** (the open-source ONNX variant) from the
+//! ten-vad is **always built from source** (the open-source ONNX variant) from the
 //! `third_party/ten-vad` submodule — works on any architecture. onnxruntime is
-//! auto-provisioned for the host (downloaded from the official releases) unless `ORT_ROOT`
-//! is set. The model's hardcoded relative path is patched to honor `TEN_VAD_MODEL`
-//! (default = the submodule's model).
+//! auto-provisioned for the target (downloaded from the official releases) unless
+//! `ORT_ROOT` is set. The model's hardcoded relative path is patched to honor
+//! `TEN_VAD_MODEL` (default = the submodule's model).
 //!
-//! Opt-in feature `prebuilt`: link a prebuilt ten-vad lib from `vendor/lib` (or
-//! `TEN_VAD_LIB_DIR`) instead of compiling — faster, no onnxruntime, but only for the
-//! platforms ten-vad ships (macOS, Linux x64, Android, iOS, Windows).
-//!
-//! Either way the script emits `--cfg ten_vad_linked`. The `links = "ten_vad"` key plus
-//! `cargo:rpath=...` propagate runtime rpath dirs to dependents (see dialf/build.rs).
+//! Emits `--cfg ten_vad_linked`. The `links = "ten_vad"` key plus `cargo:rpath=...`
+//! propagate runtime rpath dirs to dependents (see dialf/build.rs).
 
 use std::env;
 use std::fs;
@@ -23,17 +19,11 @@ const ORT_VERSION: &str = "1.17.1";
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(ten_vad_linked)");
-    println!("cargo:rerun-if-env-changed=TEN_VAD_LIB_DIR");
     println!("cargo:rerun-if-env-changed=TEN_VAD_SRC");
     println!("cargo:rerun-if-env-changed=ORT_ROOT");
 
     let mut rpaths: Vec<String> = Vec::new();
-
-    if env::var_os("CARGO_FEATURE_PREBUILT").is_some() {
-        link_prebuilt(&mut rpaths);
-    } else {
-        build_from_source(&mut rpaths);
-    }
+    build_from_source(&mut rpaths);
 
     for r in &rpaths {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{r}");
@@ -42,39 +32,6 @@ fn main() {
         // Joined with ';' (paths don't contain it); split by dependents.
         println!("cargo:rpath={}", rpaths.join(";"));
     }
-}
-
-/// Link a prebuilt ten-vad lib (framework on macOS, dylib elsewhere).
-fn link_prebuilt(rpaths: &mut Vec<String>) {
-    let lib_dir = match env::var_os("TEN_VAD_LIB_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let default = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/lib");
-            if default.exists() {
-                default
-            } else {
-                panic!(
-                    "feature `prebuilt` set but no lib found at {}; set TEN_VAD_LIB_DIR \
-                     or vendor a lib (see crates/ten-vad-sys/vendor/README.md)",
-                    default.display()
-                );
-            }
-        }
-    };
-
-    let abs = fs::canonicalize(&lib_dir).unwrap_or(lib_dir);
-    let abs = abs.display().to_string();
-
-    println!("cargo:rustc-cfg=ten_vad_linked");
-    println!("cargo:rustc-link-search=native={abs}");
-
-    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
-        println!("cargo:rustc-link-search=framework={abs}");
-        println!("cargo:rustc-link-lib=framework=ten_vad");
-    } else {
-        println!("cargo:rustc-link-lib=dylib=ten_vad");
-    }
-    rpaths.push(abs);
 }
 
 /// Compile the ONNX variant from the submodule and link onnxruntime.
@@ -89,7 +46,7 @@ fn build_from_source(rpaths: &mut Vec<String>) {
     if !src_dir.join("ten_vad.cc").exists() {
         panic!(
             "ten-vad source not found at {} — run `git submodule update --init --recursive` \
-             (or set TEN_VAD_SRC, or build with --features prebuilt)",
+             (or set TEN_VAD_SRC)",
             src_dir.display()
         );
     }

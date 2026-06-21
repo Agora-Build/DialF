@@ -5,11 +5,6 @@ version.workspace = true
 license.workspace = true
 description = "DialF — CLI + daemon to drive a mobile phone's calls via a control plane and a sound-card audio plane"
 
-[features]
-# Default builds ten-vad from source (ONNX variant). Enable `prebuilt` to link a
-# prebuilt ten-vad lib instead (see README).
-prebuilt = ["ten-vad-sys/prebuilt"]
-
 [[bin]]
 name = "dialf"
 path = "src/main.rs"

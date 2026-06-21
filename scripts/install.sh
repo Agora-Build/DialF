@@ -3,7 +3,8 @@
 #
 #   curl -fsSL https://dl.agora.build/dialf/install.sh | bash
 #
-# Downloads the prebuilt `dialf` binary (+ bundled ten-vad lib) for this OS/arch,
+# Downloads the prebuilt `dialf` binary (with onnxruntime + ten-vad model bundled) for
+# this OS/arch,
 # installs it under /opt/dialf with a symlink in /usr/local/bin, and (unless
 # DIALF_NO_SERVICE=1) installs dialfd as a boot service via `dialf service install`.
 #

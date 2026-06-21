@@ -10,10 +10,10 @@
 //! const char *ten_vad_get_version(void);
 //! ```
 //!
-//! TODO(verify): confirm these signatures against the vendored `include/ten_vad.h`
-//! before shipping — they are encoded from the documented C API and exercised by the
-//! smoke test in `tests/`. When `TEN_VAD_LIB_DIR` is unset the crate compiles a stub
-//! (see `build.rs`) whose `TenVad::new` returns `Error::NotLinked`.
+//! Signatures match the submodule's `include/ten_vad.h` and are exercised by the smoke
+//! test in `tests/`. ten-vad is always compiled from source (see `build.rs`), which emits
+//! `--cfg ten_vad_linked`; the `not(ten_vad_linked)` stub remains only as a compile
+//! fallback (its `TenVad::new` returns `Error::NotLinked`).
 
 use std::fmt;
 
@@ -37,7 +37,7 @@ impl fmt::Display for Error {
         match self {
             Error::NotLinked => write!(
                 f,
-                "ten-vad library not linked (set TEN_VAD_LIB_DIR and rebuild; see vendor/README.md)"
+                "ten-vad not linked — build from source (git submodule update --init --recursive)"
             ),
             Error::Native(code) => write!(f, "ten-vad native call failed (code {code})"),
             Error::BadFrameLen { expected, got } => {

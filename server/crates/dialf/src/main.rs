@@ -127,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    ensure_model_env();
+
     let cli = Cli::parse();
     let config_path = cli.config.clone().unwrap_or_else(Config::default_path);
     let config = Config::load(&config_path)?;
@@ -266,6 +268,23 @@ async fn mock_phone(
     }
     println!("[mock {id}] disconnected");
     Ok(())
+}
+
+/// For prebuilt distributions: if `TEN_VAD_MODEL` is unset and a `ten-vad.onnx` sits next
+/// to the executable (bundled in the release tarball), point ten-vad at it. Source builds
+/// leave it unset and use the path baked in at compile time.
+fn ensure_model_env() {
+    if std::env::var_os("TEN_VAD_MODEL").is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let model = dir.join("ten-vad.onnx");
+            if model.exists() {
+                std::env::set_var("TEN_VAD_MODEL", model);
+            }
+        }
+    }
 }
 
 /// Send one control request and read one response line.
