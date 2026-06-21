@@ -93,10 +93,12 @@ pub async fn run(config: Config, dry_audio: bool) -> anyhow::Result<()> {
         }
     };
 
+    let ten_vad = ten_vad_sys::version().unwrap_or_else(|| "stub (not linked)".to_string());
     tracing::info!(
         dry_audio,
         ws = %state.config.ws_bind,
         socket = %state.config.control_socket.display(),
+        ten_vad,
         "dialfd ready (loopback + phone WS plane)"
     );
 

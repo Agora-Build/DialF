@@ -23,3 +23,8 @@ pub mod transport;
 pub fn vad_linked() -> bool {
     ten_vad_sys::is_linked()
 }
+
+/// The linked ten-vad version, or `None` in a stub build.
+pub fn vad_version() -> Option<String> {
+    ten_vad_sys::version()
+}
