@@ -62,6 +62,27 @@ binaries bundle `ten-vad.onnx` next to the executable and auto-set `$TEN_VAD_MOD
 Auto-detected via `PATH`; override the exact command in the config (`audio.capture_cmd` /
 `audio.playback_cmd`). Capture must emit raw little-endian s16 mono PCM on stdout.
 
+### Sound-card bridge + recording
+A USB sound card bridges the phone and the host: card **output → phone mic** (we inject
+prompts), card **input ← phone earpiece** (we capture the far end). Pick the card with
+`audio.capture_device` / `audio.playback_device` (`plughw:1,0` on Linux via `arecord -l`;
+the CoreAudio device name on macOS).
+
+Set `audio.record_dir` to record each call. A job run writes time-aligned 16 kHz WAVs:
+- `<job>-rx.wav` — captured from the card (the phone/far end)
+- `<job>-tx.wav` — audio injected into the card (our prompts)
+- `<job>-mix.wav` — the two summed (when `audio.mix_recording: true`)
+
+```yaml
+audio:
+  capture_device: "plughw:1,0"   # mac: "USB Audio Device"
+  playback_device: "plughw:1,0"
+  record_dir: /var/lib/dialf/recordings
+  mix_recording: true
+```
+`dialf run job.yaml` returns the written paths. (macOS note: capturing needs Microphone
+permission for the host app; Linux/ALSA has no such gate.)
+
 ## Install (daemon as a service)
 
 Prebuilt binaries (macOS arm64/x86_64, Linux x86_64) ship on GitHub Releases. Both

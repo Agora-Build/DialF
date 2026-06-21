@@ -12,6 +12,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use crate::audio::engine::AudioEngine;
+use crate::audio::record::{RecordOutput, Recorder};
 use crate::config::Config;
 use crate::hub::Hub;
 use crate::jobs::runner::JobIo as _;
@@ -164,7 +165,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                     tracing::info!(%file, "audio.play (dry): skipped");
                     Ok(())
                 } else {
-                    engine.play_file(Path::new(&file))
+                    engine.play_file(Path::new(&file), None)
                 }
             })
             .await??;
@@ -189,26 +190,40 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let engine = state.engine.clone();
             let dry = state.dry_audio;
 
-            let outcomes = match kind {
+            // Record the call when configured (real audio only).
+            let recorder = match (dry, state.config.audio.record_dir.clone()) {
+                (false, Some(dir)) => Some(Recorder::new(
+                    dir,
+                    format!("job-{}", now_ms()),
+                    state.config.audio.mix_recording,
+                )?),
+                _ => None,
+            };
+
+            type JobResult = anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)>;
+            let (outcomes, recording) = match kind {
                 DeviceKind::Loopback => {
                     let registry = state.registry.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let mut io = LoopbackJobIo::new(engine, registry, device_id, dry);
-                        runner::run_job(&job, &mut io)
+                    tokio::task::spawn_blocking(move || -> JobResult {
+                        let mut io = LoopbackJobIo::new(engine, registry, device_id, dry, recorder);
+                        let outcomes = runner::run_job(&job, &mut io)?;
+                        Ok((outcomes, io.finish()?))
                     })
                     .await??
                 }
                 DeviceKind::Phone => {
                     let hub = state.hub.clone();
                     let rt = tokio::runtime::Handle::current();
-                    tokio::task::spawn_blocking(move || {
-                        let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry);
-                        runner::run_job(&job, &mut io)
+                    tokio::task::spawn_blocking(move || -> JobResult {
+                        let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry, recorder);
+                        let outcomes = runner::run_job(&job, &mut io)?;
+                        Ok((outcomes, io.finish()?))
                     })
                     .await??
                 }
             };
-            Ok(ok_data(&id, json!({ "steps": outcomes })))
+            let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
+            Ok(ok_data(&id, json!({ "steps": outcomes, "recording": recording })))
         }
         ControlOp::JobStatus { job_id } => {
             anyhow::bail!("job.status not tracked yet (job_id={job_id})")
@@ -222,6 +237,7 @@ fn loop_io(state: &DaemonState, device_id: String) -> LoopbackJobIo {
         state.registry.clone(),
         device_id,
         state.dry_audio,
+        None, // one-off call/SMS ops never record
     )
 }
 

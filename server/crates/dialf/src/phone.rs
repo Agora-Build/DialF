@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 
 use crate::audio::engine::AudioEngine;
+use crate::audio::record::{RecordOutput, Recorder};
 use crate::audio::vad::{EndReason, TurnConfig};
 use crate::hub::Hub;
 use crate::jobs::runner::JobIo;
@@ -23,6 +24,7 @@ pub struct PhoneJobIo {
     rt: Handle,
     device_id: String,
     dry_audio: bool,
+    recorder: Option<Recorder>,
 }
 
 impl PhoneJobIo {
@@ -34,6 +36,7 @@ impl PhoneJobIo {
         rt: Handle,
         device_id: impl Into<String>,
         dry_audio: bool,
+        recorder: Option<Recorder>,
     ) -> Self {
         Self {
             hub,
@@ -41,6 +44,15 @@ impl PhoneJobIo {
             rt,
             device_id: device_id.into(),
             dry_audio,
+            recorder,
+        }
+    }
+
+    /// Finalize any recording, returning the written file paths.
+    pub fn finish(self) -> anyhow::Result<Option<RecordOutput>> {
+        match self.recorder {
+            Some(r) => Ok(Some(r.finish()?)),
+            None => Ok(None),
         }
     }
 
@@ -57,7 +69,7 @@ impl JobIo for PhoneJobIo {
             tracing::info!(file, "audio.play (dry): skipped");
             return Ok(());
         }
-        self.engine.play_file(Path::new(file))
+        self.engine.play_file(Path::new(file), self.recorder.as_mut())
     }
 
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason> {
@@ -65,7 +77,7 @@ impl JobIo for PhoneJobIo {
             tracing::info!("audio.wait_for_speech (dry): returning Silence immediately");
             return Ok(EndReason::Silence);
         }
-        self.engine.wait_for_speech(turn)
+        self.engine.wait_for_speech(turn, self.recorder.as_mut())
     }
 
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {

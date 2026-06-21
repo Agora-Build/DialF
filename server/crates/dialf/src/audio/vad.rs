@@ -152,6 +152,9 @@ pub struct Segmenter {
     vad: TenVad,
     detector: TurnDetector,
     cfg: TurnConfig,
+    total_hops: usize,
+    voiced_hops: usize,
+    prob_sum: f32,
 }
 
 impl Segmenter {
@@ -159,7 +162,24 @@ impl Segmenter {
     pub fn new(cfg: TurnConfig) -> Result<Self, ten_vad_sys::Error> {
         let vad = TenVad::new(cfg.hop_size, cfg.threshold)?;
         let detector = TurnDetector::new(&cfg);
-        Ok(Self { vad, detector, cfg })
+        Ok(Self {
+            vad,
+            detector,
+            cfg,
+            total_hops: 0,
+            voiced_hops: 0,
+            prob_sum: 0.0,
+        })
+    }
+
+    /// (total hops, voiced hops, mean probability) seen so far — for diagnostics.
+    pub fn stats(&self) -> (usize, usize, f32) {
+        let mean = if self.total_hops > 0 {
+            self.prob_sum / self.total_hops as f32
+        } else {
+            0.0
+        };
+        (self.total_hops, self.voiced_hops, mean)
     }
 
     /// The hop size this segmenter expects.
@@ -169,7 +189,12 @@ impl Segmenter {
 
     /// Process one hop of exactly `hop_size` i16 samples (16 kHz mono).
     pub fn push_hop(&mut self, hop: &[i16]) -> Result<Option<TurnEvent>, ten_vad_sys::Error> {
-        let VadFrame { voiced, .. } = self.vad.process(hop)?;
+        let VadFrame { voiced, probability } = self.vad.process(hop)?;
+        self.total_hops += 1;
+        self.prob_sum += probability;
+        if voiced {
+            self.voiced_hops += 1;
+        }
         Ok(self.detector.push(voiced))
     }
 

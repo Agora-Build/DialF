@@ -134,19 +134,20 @@ fn capture_candidates(os: Os) -> Vec<Candidate> {
             },
         ],
         Os::MacOs => vec![
+            // Preferred: sox selects the CoreAudio device by name ({ca_dev}).
+            Candidate {
+                bin: "sox",
+                template: s(&[
+                    "sox", "-q", "{ca_dev}", "-t", "raw", "-b", "16", "-e", "signed-integer",
+                    "-r", "{rate}", "-c", "{channels}", "-",
+                ]),
+            },
             Candidate {
                 bin: "ffmpeg",
                 template: s(&[
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
                     "-i", "{device|:0}", "-ac", "{channels}", "-ar", "{rate}", "-f", "s16le",
                     "-",
-                ]),
-            },
-            Candidate {
-                bin: "rec",
-                template: s(&[
-                    "rec", "-q", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r",
-                    "{rate}", "-c", "{channels}", "-",
                 ]),
             },
         ],
@@ -173,6 +174,12 @@ fn playback_candidates(os: Os) -> Vec<Candidate> {
             },
         ],
         Os::MacOs => vec![
+            // Preferred: sox plays the file to the CoreAudio device by name ({ca_dev}).
+            Candidate {
+                bin: "sox",
+                template: s(&["sox", "-q", "-V1", "{file}", "{ca_dev}"]),
+            },
+            // afplay/ffplay go to the default output only (no device selection).
             Candidate {
                 bin: "afplay",
                 template: s(&["afplay", "{file}"]),
@@ -182,10 +189,6 @@ fn playback_candidates(os: Os) -> Vec<Candidate> {
                 template: s(&[
                     "ffplay", "-autoexit", "-nodisp", "-loglevel", "error", "{file}",
                 ]),
-            },
-            Candidate {
-                bin: "play",
-                template: s(&["play", "-q", "{file}"]),
             },
         ],
         Os::Other => vec![],
@@ -203,6 +206,7 @@ fn tool_present(bin: &str) -> bool {
 /// - `{file}` -> the audio file path (dropped if `file` is None)
 /// - `{device|DEFAULT}` -> device value, or DEFAULT if no device set
 /// - `{device:-D}` -> expands to two args `["-D", <device>]` if a device is set, else drops
+/// - `{ca_dev}` -> sox CoreAudio device: `["-t","coreaudio",<device>]` if set, else `["-d"]`
 fn fill(template: &[String], p: &AudioParams, file: Option<&str>) -> Vec<String> {
     let mut out = Vec::with_capacity(template.len());
     for tok in template {
@@ -214,6 +218,14 @@ fn fill(template: &[String], p: &AudioParams, file: Option<&str>) -> Vec<String>
                     out.push(f.to_string());
                 }
             }
+            "{ca_dev}" => match &p.device {
+                Some(dev) => {
+                    out.push("-t".to_string());
+                    out.push("coreaudio".to_string());
+                    out.push(dev.clone());
+                }
+                None => out.push("-d".to_string()),
+            },
             t if t == "{device:-D}" => {
                 if let Some(dev) = &p.device {
                     out.push("-D".to_string());

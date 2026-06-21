@@ -93,6 +93,14 @@ impl WavFileSink {
             writer: hound::WavWriter::create(path, spec)?,
         })
     }
+
+    /// Finalize the WAV (writes the correct header lengths). Required before reading the
+    /// file back; `hound` does not finalize on drop.
+    pub fn finalize(self) -> io::Result<()> {
+        self.writer
+            .finalize()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
 }
 
 impl PlaybackSink for WavFileSink {

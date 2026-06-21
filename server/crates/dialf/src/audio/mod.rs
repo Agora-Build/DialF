@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod command_backend;
 pub mod engine;
+pub mod record;
 pub mod resample;
 pub mod tool_detect;
 pub mod vad;
