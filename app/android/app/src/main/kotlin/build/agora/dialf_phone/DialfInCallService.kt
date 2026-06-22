@@ -4,22 +4,12 @@ import android.telecom.Call
 import android.telecom.InCallService
 
 /**
- * Bound by the system while this app is the default dialer. Tracks each [Call], reports
- * state changes to Dart via [Dialf], and is the handle through which we answer/hang up.
+ * Bound by the system while this app is the default dialer. Tracks each [Call] in [Dialf],
+ * reports state changes, and is the handle through which we answer/hang up.
  */
 class DialfInCallService : InCallService() {
 
     private val callbacks = HashMap<Call, Call.Callback>()
-
-    override fun onCreate() {
-        super.onCreate()
-        Dialf.inCallService = this
-    }
-
-    override fun onDestroy() {
-        Dialf.inCallService = null
-        super.onDestroy()
-    }
 
     override fun onCallAdded(call: Call) {
         val cb = object : Call.Callback() {

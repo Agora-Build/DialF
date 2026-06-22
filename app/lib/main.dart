@@ -1,7 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import 'client.dart';
 import 'telecom.dart';
 
 void main() {
@@ -29,39 +30,79 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final client = DialfClient();
   final _id = TextEditingController(text: 'phone1');
   final _name = TextEditingController(text: 'DialF Phone');
   final _key = TextEditingController(text: 'change-me');
-  final _addr = TextEditingController(); // optional host:port override
+  final _addr = TextEditingController();
+
   bool _isDefaultDialer = false;
+  bool _connected = false;
+  String? _server;
+  bool _running = false;
+  final List<String> _log = [];
+  StreamSubscription<Map<String, dynamic>>? _sub;
 
   @override
   void initState() {
     super.initState();
+    _sub = Native.events().listen(_onEvent);
     _bootstrap();
   }
 
   Future<void> _bootstrap() async {
     await [Permission.phone, Permission.sms, Permission.notification].request();
-    _isDefaultDialer = await Telecom.isDefaultDialer();
+    _isDefaultDialer = await Native.isDefaultDialer();
     if (mounted) setState(() {});
   }
 
-  void _applyIdentity() {
-    client.deviceId = _id.text.trim();
-    client.deviceName = _name.text.trim();
-    client.key = _key.text;
+  void _onEvent(Map<String, dynamic> e) {
+    switch (e['type']) {
+      case 'status':
+        _connected = e['connected'] == true;
+        _server = e['server'] as String?;
+        _logLine(_connected ? 'connected ${_server ?? ''}' : 'disconnected');
+        break;
+      case 'call_state':
+        _logLine('call ${e['state']} ${e['number'] ?? ''}');
+        break;
+      case 'sms':
+        _logLine('sms ${e['direction']} ${e['from'] ?? ''}');
+        break;
+      case 'dialer_role':
+        _isDefaultDialer = e['granted'] == true;
+        _logLine('dialer role: ${e['granted']}');
+        break;
+    }
+    if (mounted) setState(() {});
   }
 
-  Future<void> _refreshDialer() async {
-    _isDefaultDialer = await Telecom.isDefaultDialer();
-    if (mounted) setState(() {});
+  void _logLine(String m) {
+    _log.insert(0, m);
+    if (_log.length > 50) _log.removeLast();
+  }
+
+  Future<void> _start() async {
+    await Native.saveConfig(
+      deviceId: _id.text.trim(),
+      name: _name.text.trim(),
+      key: _key.text,
+      server: _addr.text.trim(),
+    );
+    await Native.startService();
+    setState(() => _running = true);
+  }
+
+  Future<void> _stop() async {
+    await Native.stopService();
+    setState(() {
+      _running = false;
+      _connected = false;
+    });
   }
 
   @override
   void dispose() {
-    client.dispose();
+    _sub?.cancel();
     _id.dispose();
     _name.dispose();
     _key.dispose();
@@ -73,44 +114,34 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('DialF Phone')),
-      body: ListenableBuilder(
-        listenable: client,
-        builder: (context, _) {
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              _statusCard(),
-              const SizedBox(height: 12),
-              _dialerCard(),
-              const SizedBox(height: 12),
-              _identityCard(),
-              const SizedBox(height: 12),
-              _connectButtons(),
-              const SizedBox(height: 12),
-              _logCard(),
-            ],
-          );
-        },
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _statusCard(),
+          const SizedBox(height: 12),
+          _dialerCard(),
+          const SizedBox(height: 12),
+          _configCard(),
+          const SizedBox(height: 12),
+          _buttons(),
+          const SizedBox(height: 12),
+          _logCard(),
+        ],
       ),
     );
   }
 
   Widget _statusCard() {
-    final s = client.status;
-    final (label, color) = switch (s) {
-      ConnStatus.connected => (
-          'Connected${client.serverInfo != null ? " · ${client.serverInfo}" : ""}',
-          Colors.green
-        ),
-      ConnStatus.connecting => ('Connecting…', Colors.orange),
-      ConnStatus.discovering => ('Discovering dialfd…', Colors.blue),
-      ConnStatus.disconnected => ('Disconnected', Colors.grey),
-    };
+    final (label, color) = _connected
+        ? ('Connected${_server != null ? " · $_server" : ""}', Colors.green)
+        : _running
+            ? ('Service running — discovering…', Colors.orange)
+            : ('Stopped', Colors.grey);
     return Card(
       child: ListTile(
         leading: Icon(Icons.circle, color: color, size: 16),
         title: Text(label),
-        subtitle: Text('device: ${client.deviceId}'),
+        subtitle: const Text('control plane runs in a background service (works locked)'),
       ),
     );
   }
@@ -126,9 +157,10 @@ class _HomePageState extends State<HomePage> {
         subtitle: const Text('Required to answer/place calls programmatically'),
         trailing: TextButton(
           onPressed: () async {
-            await Telecom.requestDialerRole();
+            await Native.requestDialerRole();
             await Future.delayed(const Duration(seconds: 1));
-            await _refreshDialer();
+            _isDefaultDialer = await Native.isDefaultDialer();
+            if (mounted) setState(() {});
           },
           child: const Text('Set'),
         ),
@@ -136,7 +168,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _identityCard() {
+  Widget _configCard() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -147,10 +179,9 @@ class _HomePageState extends State<HomePage> {
             TextField(controller: _key, decoration: const InputDecoration(labelText: 'Shared key')),
             TextField(
               controller: _addr,
-              onChanged: (_) => setState(() {}),
               decoration: const InputDecoration(
                 labelText: 'dialfd address (optional, host:port)',
-                hintText: 'leave blank to auto-discover',
+                hintText: 'leave blank to auto-discover (mDNS)',
               ),
             ),
           ],
@@ -159,36 +190,20 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _connectButtons() {
-    final connected = client.status == ConnStatus.connected;
+  Widget _buttons() {
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
         FilledButton.icon(
-          onPressed: connected
-              ? null
-              : () {
-                  _applyIdentity();
-                  // Tolerate full-width colon (CJK IMEs) and stray spaces.
-                  final addr = _addr.text.trim().replaceAll('：', ':');
-                  if (addr.contains(':')) {
-                    final parts = addr.split(':');
-                    client.connect(
-                      parts[0].trim(),
-                      int.tryParse(parts[1].trim()) ?? 8765,
-                    );
-                  } else {
-                    client.autoConnect();
-                  }
-                },
-          icon: const Icon(Icons.link),
-          label: Text(_addr.text.trim().isEmpty ? 'Auto-connect' : 'Connect'),
+          onPressed: _running ? null : _start,
+          icon: const Icon(Icons.play_arrow),
+          label: const Text('Start service'),
         ),
         OutlinedButton.icon(
-          onPressed: connected ? () => client.disconnect() : null,
-          icon: const Icon(Icons.link_off),
-          label: const Text('Disconnect'),
+          onPressed: _running ? _stop : null,
+          icon: const Icon(Icons.stop),
+          label: const Text('Stop'),
         ),
       ],
     );
@@ -203,12 +218,11 @@ class _HomePageState extends State<HomePage> {
           children: [
             const Text('Activity', style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            if (client.log.isEmpty)
+            if (_log.isEmpty)
               const Text('—', style: TextStyle(color: Colors.grey))
             else
-              ...client.log.take(30).map(
-                    (l) => Text(l,
-                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+              ..._log.take(30).map(
+                    (l) => Text(l, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
                   ),
           ],
         ),

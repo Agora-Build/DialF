@@ -12,13 +12,14 @@ import io.flutter.plugin.common.EventChannel
 object Dialf {
     private val main = Handler(Looper.getMainLooper())
 
-    /** Event sink to Dart (set by MainActivity's EventChannel). */
+    /** Event sink to Dart (set by MainActivity's EventChannel; UI status only). */
     @Volatile
     var eventSink: EventChannel.EventSink? = null
 
-    /** The bound InCallService, if any (set while the system has us as default dialer). */
+    /** Listener for the headless foreground service (forwards events over WS). Runs
+     *  independent of the UI, so call/SMS events reach dialfd even when locked. */
     @Volatile
-    var inCallService: DialfInCallService? = null
+    var serviceListener: ((Map<String, Any?>) -> Unit)? = null
 
     private var seq = 1
     private val idToCall = HashMap<String, Call>()
@@ -50,9 +51,10 @@ object Dialf {
     fun ringingCall(): Call? =
         idToCall.values.firstOrNull { it.state == Call.STATE_RINGING }
 
-    /** Emit a JSON-ish map event to Dart on the main thread. */
+    /** Emit an event to the Dart UI (if alive) and the headless service (if running). */
     fun emit(event: Map<String, Any?>) {
         main.post { eventSink?.success(event) }
+        serviceListener?.invoke(event)
     }
 
     fun emitCallState(call: Call) {

@@ -1,13 +1,14 @@
 import 'package:flutter/services.dart';
 
-/// Thin wrapper over the native Telecom MethodChannel + event EventChannel
-/// (implemented in MainActivity.kt / Dialf.kt).
-class Telecom {
+/// Bridge to the native side. The control plane (WebSocket + telephony) runs in the
+/// Android foreground service; this just configures it, controls start/stop, requests the
+/// dialer role, and receives status/events for display.
+class Native {
   static const MethodChannel _m = MethodChannel('dialf/telecom');
   static const EventChannel _e = EventChannel('dialf/events');
   static Stream<Map<String, dynamic>>? _events;
 
-  /// Broadcast stream of native events (call_state, dialer_role).
+  /// Status + call/SMS/dialer-role events emitted by the native side.
   static Stream<Map<String, dynamic>> events() {
     _events ??= _e
         .receiveBroadcastStream()
@@ -20,22 +21,23 @@ class Telecom {
 
   static Future<void> requestDialerRole() => _m.invokeMethod('requestDialerRole');
 
-  static Future<void> placeCall(String number) =>
-      _m.invokeMethod('placeCall', {'number': number});
+  /// Persist the service config (device id / name / shared key / optional host:port).
+  static Future<void> saveConfig({
+    required String deviceId,
+    required String name,
+    required String key,
+    String server = '',
+  }) =>
+      _m.invokeMethod('saveConfig', {
+        'device_id': deviceId,
+        'name': name,
+        'key': key,
+        'server': server,
+      });
 
-  static Future<void> answer(String? callId) =>
-      _m.invokeMethod('answer', {'call_id': callId});
-
-  static Future<void> hangup(String? callId) =>
-      _m.invokeMethod('hangup', {'call_id': callId});
-
-  static Future<void> sendSms(String to, String body) =>
-      _m.invokeMethod('sendSms', {'to': to, 'body': body});
-
-  static Future<List<dynamic>> listSms([int limit = 20]) async =>
-      (await _m.invokeMethod('listSms', {'limit': limit})) as List<dynamic>? ?? [];
-
+  /// Start the headless control-plane service (auto-discovers dialfd, runs locked).
   static Future<void> startService() => _m.invokeMethod('startService');
 
+  /// Stop the control-plane service.
   static Future<void> stopService() => _m.invokeMethod('stopService');
 }

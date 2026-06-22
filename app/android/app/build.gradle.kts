@@ -42,3 +42,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Native WebSocket client for the headless control-plane service.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
