@@ -174,10 +174,30 @@ object Telecom {
     }
 
     /**
-     * Run an MMI/USSD code (e.g. call-forwarding) on a SIM and deliver the network reply
-     * via [onResult]. Headless — no dialer UI, the response is captured programmatically.
+     * Enable/disable carrier voicemail on a SIM. The host only sends the intent
+     * (`enabled`/optional `number`); mapping it to the platform mechanism is the device's
+     * job. On Android that's GSM supplementary-service MMI codes for conditional
+     * call-forwarding (all conditions, SC 004):
+     *   - disable:  `#004#`   (caller no longer forwarded to voicemail)
+     *   - enable:   `**004*<number>#` to (re)register a target, else `*004#` to reactivate
      */
-    fun sendMmi(ctx: Context, code: String, simSubId: Int?, onResult: (Boolean, String?) -> Unit) {
+    fun setVoicemail(
+        ctx: Context,
+        enabled: Boolean,
+        number: String?,
+        simSubId: Int?,
+        onResult: (Boolean, String?) -> Unit,
+    ) {
+        val code = when {
+            !enabled -> "#004#"
+            number != null -> "**004*$number#"
+            else -> "*004#"
+        }
+        sendMmi(ctx, code, simSubId, onResult)
+    }
+
+    /** Low-level: run an MMI/USSD code on a SIM and deliver the network reply via [onResult]. */
+    private fun sendMmi(ctx: Context, code: String, simSubId: Int?, onResult: (Boolean, String?) -> Unit) {
         var tm = ctx.getSystemService(TelephonyManager::class.java)
             ?: return onResult(false, "no telephony service")
         val sub = simSubId ?: SubscriptionManager.getDefaultVoiceSubscriptionId()

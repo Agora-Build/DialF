@@ -231,27 +231,21 @@ async fn main() -> anyhow::Result<()> {
             ok_or_err(resp)
         }
         Command::Voicemail { action } => {
-            // GSM supplementary-service codes for all conditional call-forwarding:
-            //   #004#  deactivate (caller no longer forwarded to voicemail)
-            //   *004#  reactivate
-            let (device, sim, code) = match action {
-                VoicemailAction::Off { device, sim } => (device, sim, "#004#".to_string()),
+            // Express intent only; the device maps it to its platform mechanism.
+            let (device, enabled, number, sim) = match action {
+                VoicemailAction::Off { device, sim } => (device, false, None, sim),
                 VoicemailAction::On {
                     device,
-                    number: Some(n),
+                    number,
                     sim,
-                } => (device, sim, format!("**004*{n}#")),
-                VoicemailAction::On {
-                    device,
-                    number: None,
-                    sim,
-                } => (device, sim, "*004#".to_string()),
+                } => (device, true, number, sim),
             };
             let resp = call(
                 &socket,
-                ControlOp::Mmi {
+                ControlOp::VoicemailSet {
                     device,
-                    code,
+                    enabled,
+                    number,
                     sim_sub_id: sim,
                 },
             )

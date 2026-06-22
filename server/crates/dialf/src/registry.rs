@@ -73,14 +73,16 @@ pub struct SimInfo {
     pub is_default: bool,
 }
 
-/// The network's reply to an MMI / USSD request.
+/// The result of a voicemail enable/disable request, as reported by the device.
+/// How the change is applied is the device's concern (Android dials GSM MMI codes;
+/// other platforms may do something else) — the host only expresses the intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MmiResult {
-    /// The code that was sent (e.g. `#004#`).
-    pub code: String,
-    /// Whether the network accepted the request.
+pub struct VoicemailResult {
+    /// The requested state (true = voicemail enabled).
+    pub enabled: bool,
+    /// Whether the device applied it successfully.
     pub success: bool,
-    /// The network's human-readable response, if any.
+    /// A human-readable detail from the device/network, if any.
     #[serde(default)]
     pub response: Option<String>,
 }

@@ -229,11 +229,12 @@ class ConnForegroundService : Service() {
                     Telecom.listSims(this).forEach { arr.put(JSONObject(it)) }
                     ws?.send(JSONObject().put("type", "sims").put("entries", arr).toString())
                 }
-                "mmi" -> {
-                    val code = msg.getString("code")
+                "set_voicemail" -> {
+                    val enabled = msg.getBoolean("enabled")
+                    val number = if (msg.has("number") && !msg.isNull("number")) msg.getString("number") else null
                     val sim = if (msg.has("sim_sub_id") && !msg.isNull("sim_sub_id")) msg.getInt("sim_sub_id") else null
-                    Telecom.sendMmi(this, code, sim) { ok, resp ->
-                        val o = JSONObject().put("type", "mmi_result").put("code", code).put("success", ok)
+                    Telecom.setVoicemail(this, enabled, number, sim) { ok, resp ->
+                        val o = JSONObject().put("type", "voicemail_result").put("enabled", enabled).put("success", ok)
                         if (resp != null) o.put("response", resp)
                         ws?.send(o.toString())
                     }

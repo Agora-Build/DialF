@@ -22,7 +22,7 @@ use crate::loopback::{LoopbackJobIo, LOOPBACK_ID};
 use crate::phone::PhoneJobIo;
 use crate::protocol::{Action, ControlOp, ControlRequest, ControlResponse};
 use crate::registry::{
-    CallRecord, DeviceInfo, DeviceKind, MmiResult, Registry, SimInfo, SmsRecord,
+    CallRecord, DeviceInfo, DeviceKind, Registry, SimInfo, SmsRecord, VoicemailResult,
 };
 use crate::transport::{control_server, discovery, phone_server};
 
@@ -42,8 +42,8 @@ pub struct DaemonState {
     pub call_log: Arc<Mutex<HashMap<String, Vec<CallRecord>>>>,
     /// Most recent SIM list, per device id (replaced on each `sims.list`).
     pub sims: Arc<Mutex<HashMap<String, Vec<SimInfo>>>>,
-    /// Most recent MMI/USSD network reply, per device id.
-    pub mmi_results: Arc<Mutex<HashMap<String, MmiResult>>>,
+    /// Most recent voicemail enable/disable result, per device id.
+    pub voicemail_results: Arc<Mutex<HashMap<String, VoicemailResult>>>,
     /// When true, audio steps are simulated (no sound card / ten-vad needed).
     pub dry_audio: bool,
 }
@@ -76,9 +76,9 @@ impl DaemonState {
             .insert(device_id.to_string(), entries);
     }
 
-    /// Record the latest MMI/USSD reply from a device.
-    pub fn set_mmi_result(&self, device_id: &str, result: MmiResult) {
-        self.mmi_results
+    /// Record the latest voicemail enable/disable result from a device.
+    pub fn set_voicemail_result(&self, device_id: &str, result: VoicemailResult) {
+        self.voicemail_results
             .lock()
             .unwrap()
             .insert(device_id.to_string(), result);
@@ -116,7 +116,7 @@ pub async fn run(config: Config, dry_audio: bool, with_loopback: bool) -> anyhow
         inbox: Arc::new(Mutex::new(HashMap::new())),
         call_log: Arc::new(Mutex::new(HashMap::new())),
         sims: Arc::new(Mutex::new(HashMap::new())),
-        mmi_results: Arc::new(Mutex::new(HashMap::new())),
+        voicemail_results: Arc::new(Mutex::new(HashMap::new())),
         dry_audio,
     };
 
@@ -280,24 +280,26 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 .unwrap_or_default();
             Ok(ok_data(&id, json!({ "sims": sims })))
         }
-        ControlOp::Mmi {
+        ControlOp::VoicemailSet {
             device,
-            code,
+            enabled,
+            number,
             sim_sub_id,
         } => {
             let dev = resolve_device(state, Some(device))?;
             if !matches!(device_kind(state, &dev)?, DeviceKind::Phone) {
-                anyhow::bail!("MMI is only supported on real phones");
+                anyhow::bail!("voicemail control is only supported on real phones");
             }
-            // Drop any stale reply, ask the phone to run the code, then wait for the
-            // network response (USSD round-trips can take several seconds).
-            state.mmi_results.lock().unwrap().remove(&dev);
+            // Drop any stale reply, ask the device to apply it, then wait for the result
+            // (the device may need a network round-trip that takes several seconds).
+            state.voicemail_results.lock().unwrap().remove(&dev);
             let _ = state
                 .hub
                 .fire(
                     &dev,
-                    Action::Mmi {
-                        code: code.clone(),
+                    Action::SetVoicemail {
+                        enabled,
+                        number,
                         sim_sub_id,
                     },
                 )
@@ -305,14 +307,14 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let mut result = None;
             for _ in 0..30 {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                if let Some(r) = state.mmi_results.lock().unwrap().get(&dev).cloned() {
+                if let Some(r) = state.voicemail_results.lock().unwrap().get(&dev).cloned() {
                     result = Some(r);
                     break;
                 }
             }
             match result {
                 Some(r) => Ok(ok_data(&id, json!(r))),
-                None => anyhow::bail!("no MMI response from phone (timed out after 15s)"),
+                None => anyhow::bail!("no voicemail response from device (timed out after 15s)"),
             }
         }
         ControlOp::AudioPlay { file, device: _ } => {

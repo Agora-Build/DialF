@@ -82,9 +82,9 @@ pub enum PhoneToServer {
     Sims {
         entries: Vec<crate::registry::SimInfo>,
     },
-    /// The network's reply to an `mmi` request.
-    MmiResult {
-        code: String,
+    /// The result of a `set_voicemail` request.
+    VoicemailResult {
+        enabled: bool,
         success: bool,
         #[serde(default)]
         response: Option<String>,
@@ -151,9 +151,12 @@ pub enum Action {
     ListCalls {},
     /// Request the list of active SIMs.
     ListSims {},
-    /// Run an MMI / USSD code (e.g. call-forwarding) on a SIM; reply is an `mmi_result`.
-    Mmi {
-        code: String,
+    /// Enable/disable carrier voicemail (the device picks the platform mechanism); reply
+    /// is a `voicemail_result`. `number` is an optional voicemail target some carriers need.
+    SetVoicemail {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sim_sub_id: Option<i32>,
     },
@@ -213,11 +216,13 @@ pub enum ControlOp {
     /// List the active SIMs on `device`.
     #[serde(rename = "sims.list")]
     SimsList { device: String },
-    /// Run an MMI / USSD code on `device` (optionally on a specific SIM).
-    #[serde(rename = "mmi.send")]
-    Mmi {
+    /// Enable/disable carrier voicemail on `device` (optionally a specific SIM/number).
+    #[serde(rename = "voicemail.set")]
+    VoicemailSet {
         device: String,
-        code: String,
+        enabled: bool,
+        #[serde(default)]
+        number: Option<String>,
         #[serde(default)]
         sim_sub_id: Option<i32>,
     },
@@ -376,40 +381,43 @@ mod tests {
     }
 
     #[test]
-    fn mmi_op_action_and_result() {
+    fn voicemail_op_action_and_result() {
         let req = ControlRequest {
             id: "1".into(),
-            op: ControlOp::Mmi {
+            op: ControlOp::VoicemailSet {
                 device: "phone1".into(),
-                code: "#004#".into(),
+                enabled: false,
+                number: None,
                 sim_sub_id: Some(9),
             },
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(v["op"], "mmi.send");
-        assert_eq!(v["code"], "#004#");
+        assert_eq!(v["op"], "voicemail.set");
+        assert_eq!(v["enabled"], false);
         assert_eq!(v["sim_sub_id"], 9);
 
         let cmd = ServerToPhone::Cmd {
             cmd_id: "c1".into(),
-            action: Action::Mmi {
-                code: "*004#".into(),
+            action: Action::SetVoicemail {
+                enabled: true,
+                number: Some("+15550000".into()),
                 sim_sub_id: None,
             },
         };
         let cv: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
-        assert_eq!(cv["action"], "mmi");
-        assert_eq!(cv["code"], "*004#");
+        assert_eq!(cv["action"], "set_voicemail");
+        assert_eq!(cv["enabled"], true);
+        assert_eq!(cv["number"], "+15550000");
         assert!(cv.get("sim_sub_id").is_none());
 
-        let frame = r##"{"type":"mmi_result","code":"#004#","success":true,"response":"Erasure was successful"}"##;
+        let frame = r#"{"type":"voicemail_result","enabled":false,"success":true,"response":"Service has been disabled."}"#;
         match serde_json::from_str::<PhoneToServer>(frame).unwrap() {
-            PhoneToServer::MmiResult { code, success, response } => {
-                assert_eq!(code, "#004#");
+            PhoneToServer::VoicemailResult { enabled, success, response } => {
+                assert!(!enabled);
                 assert!(success);
-                assert_eq!(response.as_deref(), Some("Erasure was successful"));
+                assert_eq!(response.as_deref(), Some("Service has been disabled."));
             }
-            other => panic!("expected MmiResult, got {other:?}"),
+            other => panic!("expected VoicemailResult, got {other:?}"),
         }
     }
 
