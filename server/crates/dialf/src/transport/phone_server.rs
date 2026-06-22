@@ -183,6 +183,10 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
                 },
             );
         }
+        PhoneToServer::Calls { entries } => {
+            tracing::info!(%device_id, count = entries.len(), "call log");
+            state.set_call_log(device_id, entries);
+        }
         PhoneToServer::Ack { cmd_id, ok } => state.hub.resolve_ack(device_id, &cmd_id, ok),
         PhoneToServer::Error { cmd_id, msg } => {
             if let Some(id) = cmd_id {

@@ -52,6 +52,11 @@ enum Command {
         #[command(subcommand)]
         action: SmsAction,
     },
+    /// Read the call log.
+    Calls {
+        #[command(subcommand)]
+        action: CallsAction,
+    },
     /// Run a YAML job against a device.
     Run {
         /// Path to the YAML job file.
@@ -124,6 +129,12 @@ enum SmsAction {
     List { device: String },
 }
 
+#[derive(Subcommand)]
+enum CallsAction {
+    /// List the recent call log: dialf calls list <device>.
+    List { device: String },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -170,6 +181,14 @@ async fn main() -> anyhow::Result<()> {
             let op = match action {
                 SmsAction::Send { device, to, body } => ControlOp::SmsSend { device, to, body },
                 SmsAction::List { device } => ControlOp::SmsList { device },
+            };
+            let resp = call(&socket, op).await?;
+            print_response(&resp);
+            ok_or_err(resp)
+        }
+        Command::Calls { action } => {
+            let op = match action {
+                CallsAction::List { device } => ControlOp::CallsList { device },
             };
             let resp = call(&socket, op).await?;
             print_response(&resp);

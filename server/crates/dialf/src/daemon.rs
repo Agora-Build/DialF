@@ -21,7 +21,7 @@ use crate::jobs::{runner, schema};
 use crate::loopback::{LoopbackJobIo, LOOPBACK_ID};
 use crate::phone::PhoneJobIo;
 use crate::protocol::{Action, ControlOp, ControlRequest, ControlResponse};
-use crate::registry::{DeviceInfo, DeviceKind, Registry, SmsRecord};
+use crate::registry::{CallRecord, DeviceInfo, DeviceKind, Registry, SmsRecord};
 use crate::transport::{control_server, discovery, phone_server};
 
 /// Most recent SMS kept per device.
@@ -36,6 +36,8 @@ pub struct DaemonState {
     pub config: Arc<Config>,
     /// Recently received/sent SMS, per device id.
     pub inbox: Arc<Mutex<HashMap<String, Vec<SmsRecord>>>>,
+    /// Most recent call-log snapshot, per device id (replaced on each `calls.list`).
+    pub call_log: Arc<Mutex<HashMap<String, Vec<CallRecord>>>>,
     /// When true, audio steps are simulated (no sound card / ten-vad needed).
     pub dry_audio: bool,
 }
@@ -50,6 +52,14 @@ impl DaemonState {
         if len > INBOX_CAP {
             v.drain(0..len - INBOX_CAP);
         }
+    }
+
+    /// Replace a device's cached call log with a fresh snapshot from the phone.
+    pub fn set_call_log(&self, device_id: &str, entries: Vec<CallRecord>) {
+        self.call_log
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), entries);
     }
 }
 
@@ -82,6 +92,7 @@ pub async fn run(config: Config, dry_audio: bool, with_loopback: bool) -> anyhow
         hub: Arc::new(Hub::new()),
         config: Arc::new(config),
         inbox: Arc::new(Mutex::new(HashMap::new())),
+        call_log: Arc::new(Mutex::new(HashMap::new())),
         dry_audio,
     };
 
@@ -192,6 +203,23 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 .cloned()
                 .unwrap_or_default();
             Ok(ok_data(&id, json!({ "messages": msgs })))
+        }
+        ControlOp::CallsList { device } => {
+            let dev = resolve_device(state, Some(device))?;
+            // Ask a real phone to report its call log, then give the reply a moment to
+            // arrive (it comes back as a `calls` frame the reader records).
+            if matches!(device_kind(state, &dev)?, DeviceKind::Phone) {
+                let _ = state.hub.fire(&dev, Action::ListCalls {}).await;
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+            let calls = state
+                .call_log
+                .lock()
+                .unwrap()
+                .get(&dev)
+                .cloned()
+                .unwrap_or_default();
+            Ok(ok_data(&id, json!({ "calls": calls })))
         }
         ControlOp::AudioPlay { file, device: _ } => {
             let engine = state.engine.clone();

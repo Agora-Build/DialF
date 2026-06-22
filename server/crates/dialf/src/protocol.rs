@@ -74,6 +74,10 @@ pub enum PhoneToServer {
         body: String,
         ts: i64,
     },
+    /// Snapshot of the phone's call log (reply to `list_calls`).
+    Calls {
+        entries: Vec<crate::registry::CallRecord>,
+    },
     /// Acknowledges a [`ServerToPhone::Cmd`].
     Ack { cmd_id: CmdId, ok: bool },
     /// Reports a failure, optionally tied to a command.
@@ -123,6 +127,8 @@ pub enum Action {
         #[serde(default)]
         since: Option<i64>,
     },
+    /// Request the call log.
+    ListCalls {},
     /// Replace the phone's local auto-pickup number list.
     SetAutopickup { numbers: Vec<String> },
 }
@@ -165,6 +171,9 @@ pub enum ControlOp {
     /// List recent SMS on `device`.
     #[serde(rename = "sms.list")]
     SmsList { device: String },
+    /// List the recent call log on `device`.
+    #[serde(rename = "calls.list")]
+    CallsList { device: String },
     /// Play an audio file out the sound card (optionally tied to a device's call).
     #[serde(rename = "audio.play")]
     AudioPlay {

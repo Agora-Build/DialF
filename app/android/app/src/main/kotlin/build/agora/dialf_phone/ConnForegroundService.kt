@@ -214,6 +214,11 @@ class ConnForegroundService : Service() {
                     m.putIfAbsent("direction", "in")
                     send(m)
                 }
+                "list_calls" -> {
+                    val arr = org.json.JSONArray()
+                    Telecom.listCallLog(this, 50).forEach { arr.put(JSONObject(it)) }
+                    ws?.send(JSONObject().put("type", "calls").put("entries", arr).toString())
+                }
                 "set_autopickup" -> {} // dialfd owns the picklist
                 else -> {
                     sendError(cmdId, "unknown action $action")

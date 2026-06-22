@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::protocol::{CallState, Direction};
 
@@ -13,9 +13,9 @@ use crate::protocol::{CallState, Direction};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
-    /// In-process fake phone (M1, no hardware).
+    /// In-process fake phone (no hardware).
     Loopback,
-    /// Real phone over WebSocket (M2+).
+    /// Real phone over WebSocket.
     Phone,
 }
 
@@ -36,6 +36,20 @@ pub struct SmsRecord {
     pub to: Option<String>,
     pub body: String,
     pub ts: i64,
+}
+
+/// A call-log entry reported by a device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallRecord {
+    /// The other party's number, if known.
+    #[serde(default)]
+    pub number: Option<String>,
+    /// incoming | outgoing | missed | rejected | voicemail | blocked | unknown.
+    pub kind: String,
+    /// Epoch milliseconds.
+    pub ts: i64,
+    /// Call duration in seconds.
+    pub duration: i64,
 }
 
 /// A registered device.

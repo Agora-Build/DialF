@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.CallLog
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
@@ -77,6 +78,49 @@ object Telecom {
                         "body" to c.getString(bi),
                         "ts" to c.getLong(di),
                         "direction" to if (sent) "out" else "in",
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    /** Read the recent call log from the provider (newest first). */
+    fun listCallLog(ctx: Context, limit: Int): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        val proj = arrayOf(
+            CallLog.Calls.NUMBER,
+            CallLog.Calls.TYPE,
+            CallLog.Calls.DATE,
+            CallLog.Calls.DURATION,
+        )
+        ctx.contentResolver.query(
+            CallLog.Calls.CONTENT_URI,
+            proj,
+            null,
+            null,
+            "${CallLog.Calls.DATE} DESC LIMIT $limit",
+        )?.use { c ->
+            val ni = c.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
+            val ti = c.getColumnIndexOrThrow(CallLog.Calls.TYPE)
+            val di = c.getColumnIndexOrThrow(CallLog.Calls.DATE)
+            val ui = c.getColumnIndexOrThrow(CallLog.Calls.DURATION)
+            while (c.moveToNext()) {
+                val kind = when (c.getInt(ti)) {
+                    CallLog.Calls.INCOMING_TYPE -> "incoming"
+                    CallLog.Calls.OUTGOING_TYPE -> "outgoing"
+                    CallLog.Calls.MISSED_TYPE -> "missed"
+                    CallLog.Calls.VOICEMAIL_TYPE -> "voicemail"
+                    CallLog.Calls.REJECTED_TYPE -> "rejected"
+                    CallLog.Calls.BLOCKED_TYPE -> "blocked"
+                    else -> "unknown"
+                }
+                out.add(
+                    mapOf(
+                        "number" to c.getString(ni),
+                        "kind" to kind,
+                        "ts" to c.getLong(di),
+                        "duration" to c.getLong(ui),
                     )
                 )
             }

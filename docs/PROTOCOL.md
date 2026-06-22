@@ -24,6 +24,7 @@ closed.
 | `heartbeat`  | `ts`, `battery?` — sent ~every 30s                                     |
 | `call_state` | `call_id`, `state` (`ringing`/`active`/`ended`), `number?`, `direction` (`in`/`out`) |
 | `sms`        | `direction` (`in`/`out`), `from?`, `to?`, `body`, `ts`                 |
+| `calls`      | `entries[]` of `{number?, kind, ts, duration}` — reply to `list_calls` |
 | `ack`        | `cmd_id`, `ok` — acknowledges a command                               |
 | `error`      | `cmd_id?`, `msg`                                                       |
 
@@ -38,6 +39,7 @@ A single frame, `cmd`, carrying `cmd_id` plus a flattened **action**:
 | `hangup`        | `call_id?`       | end the active call (or the given leg)          |
 | `send_sms`      | `to`, `body`     | send a text                                     |
 | `list_sms`      | `since?`         | report the inbox (replies as `sms` frames)      |
+| `list_calls`    | —                | report the call log (replies as one `calls` frame) |
 | `set_autopickup`| `numbers[]`      | replace the phone's local auto-pickup list      |
 
 **Auto-pickup:** `dialfd` owns the allow-list (config `autopickup`). On an inbound
@@ -59,6 +61,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `call.hangup`  | `device`                        | ok                                     |
 | `sms.send`     | `device`, `to`, `body`          | ok                                     |
 | `sms.list`     | `device`                        | `{messages:[...]}`                     |
+| `calls.list`   | `device`                        | `{calls:[...]}`                        |
 | `audio.play`   | `file`, `device?`               | ok                                     |
 | `job.run`      | `path?` \| `steps?`, `device?`  | `{steps:[...], recording:{rx,tx,mix}}` |
 | `job.status`   | `job_id`                        | (not tracked yet)                      |
@@ -78,6 +81,7 @@ dialf pickup <device>                           answer the ringing call
 dialf hangup <device>                           end the active call
 dialf sms send <device> <to> <body>            send a text
 dialf sms list <device>                         read recent texts (JSON)
+dialf calls list <device>                       read the call log (JSON)
 dialf run  <job.yaml> [--device <id>]          run a YAML job
 dialf play <file>                              inject audio out the sound card
 dialf service install|uninstall|start|stop|status [--user] [--config <path>]

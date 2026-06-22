@@ -94,6 +94,7 @@ dialf hangup <device>              # end the active call
 
 dialf sms send <device> <to> <body>   # send a text
 dialf sms list <device>               # read recent texts (JSON)
+dialf calls list <device>             # read the call log (JSON)
 
 dialf run  <job.yaml> [--device <id>] # run a scripted job
 dialf play <file>                     # inject audio out the sound card now
