@@ -59,28 +59,16 @@ ver_no_v="${VERSION#v}"
 asset="dialf-${ver_no_v}-${target}.tar.gz"
 url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
 
-# Fall back to an on-device source build (covers any platform/arch, incl. linux-aarch64).
-from_source() {
-  say "building from source for $target"
-  src_url="${DIALF_SRC_SCRIPT:-}"
-  curl -fsSL "$src_url" | DIALF_REPO="$REPO" bash
-  exit $?
-}
-
-# Prebuilt binaries exist for these targets; everything else builds from source.
+# Prebuilt binaries exist for these targets only.
 case "$target" in
   darwin-aarch64|darwin-x86_64|linux-x86_64) : ;;
-  *) say "no prebuilt for $target"; from_source ;;
+  *) die "no prebuilt binary for $target — build from source (see README)" ;;
 esac
-[ "${DIALF_FROM_SOURCE:-0}" = "1" ] && from_source
 
 # --- download + extract ---
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 say "downloading $url"
-if ! curl -fSL -o "$tmp/$asset" "$url"; then
-  say "prebuilt download failed; falling back to source build"
-  from_source
-fi
+curl -fSL -o "$tmp/$asset" "$url" || die "download failed: $url"
 tar -xzf "$tmp/$asset" -C "$tmp"
 
 # Tarball layout: dialf-<ver>-<target>/{dialf, lib/...}

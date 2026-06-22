@@ -54,12 +54,8 @@ sudo dialf service install            # boot service (launchd/systemd)
 dialf service install --user          # or, no sudo, runs at login
 ```
 
-For unsupported targets (e.g. Linux **aarch64** / Raspberry Pi), `install.sh` auto-falls
-back to an on-device source build; you can also run it directly:
-
-```sh
-curl -fsSL  | bash
-```
+For unsupported targets (e.g. Linux **aarch64** / Raspberry Pi), build from source — see
+[Build from source](#build-from-source) below.
 
 Manage the service (launchd LaunchDaemon on macOS / systemd unit on Linux):
 
@@ -187,5 +183,5 @@ The model loads via `$TEN_VAD_MODEL`, defaulting to the submodule's
 To install the CLI locally: `cargo install --path server/crates/dialf` (puts `dialf` in
 `~/.cargo/bin`).
 
-Packaging lives in `scripts/install.sh`, `scripts/`, `npm/`, and
-`.github/workflows/release.yml` (tag `vX.Y.Z` via `scripts/release.sh`).
+Packaging lives in `scripts/install.sh`, `npm/`, and `.github/workflows/release.yml`
+(tag `vX.Y.Z` via `scripts/release.sh`).
