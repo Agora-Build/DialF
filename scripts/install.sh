@@ -61,7 +61,7 @@ url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
 
 # Prebuilt binaries exist for these targets only.
 case "$target" in
-  darwin-aarch64|darwin-x86_64|linux-x86_64) : ;;
+  darwin-aarch64|darwin-x86_64|linux-x86_64|linux-aarch64) : ;;
   *) die "no prebuilt binary for $target — build from source (see README)" ;;
 esac
 

@@ -40,7 +40,7 @@ See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol + local control
 
 ## Install
 
-Prebuilt binaries (macOS arm64/x86_64, Linux x86_64) ship on GitHub Releases. Both
+Prebuilt binaries (macOS arm64/x86_64, Linux x86_64/aarch64) ship on GitHub Releases. Both
 installers fetch the binary (with onnxruntime + the ten-vad model bundled) and can register
 `dialfd` as a background service.
 
@@ -54,7 +54,7 @@ sudo dialf service install            # boot service (launchd/systemd)
 dialf service install --user          # or, no sudo, runs at login
 ```
 
-For unsupported targets (e.g. Linux **aarch64** / Raspberry Pi), build from source — see
+For targets without a prebuilt binary, build from source — see
 [Build from source](#build-from-source) below.
 
 Manage the service (launchd LaunchDaemon on macOS / systemd unit on Linux):
