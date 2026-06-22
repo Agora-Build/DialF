@@ -30,11 +30,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the dialfd daemon (control socket + audio engine; loopback device for M1).
+    /// Run the dialfd daemon (control socket + audio engine + phone WS plane).
     Daemon {
         /// Simulate audio steps (no sound card / ten-vad needed).
         #[arg(long)]
         dry_audio: bool,
+        /// Also register the in-process simulated phone (off by default; real phones only).
+        #[arg(long)]
+        with_loopback: bool,
     },
     /// List connected phones.
     Devices,
@@ -138,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
     let socket = config.control_socket.clone();
 
     match cli.command {
-        Command::Daemon { dry_audio } => dialf::daemon::run(config, dry_audio).await,
+        Command::Daemon {
+            dry_audio,
+            with_loopback,
+        } => dialf::daemon::run(config, dry_audio, with_loopback).await,
 
         Command::Devices => {
             let resp = call(&socket, ControlOp::DevicesList).await?;

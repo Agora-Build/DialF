@@ -1,8 +1,8 @@
 //! `dialfd` orchestrator: shared state + the control-API dispatcher.
 //!
 //! Serves the local control socket, the phone WebSocket plane, and the mDNS advertisement.
-//! A loopback device is always registered for hardware-free testing; real phones register
-//! dynamically over WebSocket.
+//! Real phones register dynamically over WebSocket; an in-process loopback test device is
+//! registered only when `--with-loopback` is passed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -62,10 +62,11 @@ pub fn now_ms() -> i64 {
 }
 
 /// Run the daemon: set up state and serve the control socket + phone WS plane + mDNS.
-pub async fn run(config: Config, dry_audio: bool) -> anyhow::Result<()> {
+/// `with_loopback` registers the in-process simulated test phone (off by default).
+pub async fn run(config: Config, dry_audio: bool, with_loopback: bool) -> anyhow::Result<()> {
     let engine = Arc::new(AudioEngine::new(config.audio.clone()));
     let registry = Arc::new(Mutex::new(Registry::new()));
-    {
+    if with_loopback {
         let mut reg = registry.lock().expect("registry lock");
         reg.upsert(DeviceInfo {
             id: LOOPBACK_ID.to_string(),
@@ -99,7 +100,8 @@ pub async fn run(config: Config, dry_audio: bool) -> anyhow::Result<()> {
         ws = %state.config.ws_bind,
         socket = %state.config.control_socket.display(),
         ten_vad,
-        "dialfd ready (loopback + phone WS plane)"
+        with_loopback,
+        "dialfd ready (phone WS plane)"
     );
 
     tokio::try_join!(

@@ -142,9 +142,10 @@ advertisement (`_dialfd._tcp`), device registry, command/ack with timeout, **aut
 of allow-listed numbers, and phone-driven jobs — all verified end-to-end with a built-in
 mock phone.
 
-Run the loopback demo (no hardware):
+Run the loopback demo (no hardware). `--with-loopback` registers the in-process simulated
+phone; without it the daemon shows real phones only:
 ```sh
-cargo run -- daemon --dry-audio &      # dry = simulate audio (no card needed)
+cargo run -- daemon --dry-audio --with-loopback &   # dry = simulate audio (no card needed)
 cargo run -- devices
 cargo run -- call loopback 5551234
 cargo run -- run jobs/sample.yaml
@@ -152,7 +153,7 @@ cargo run -- run jobs/sample.yaml
 
 Try the phone plane with the mock client:
 ```sh
-cargo run -- daemon --dry-audio &
+cargo run -- daemon --dry-audio --with-loopback &
 cargo run -- mock-phone --id phone1 --ring 5551234 &   # connects over WS
 cargo run -- devices                                   # shows loopback + phone1
 cargo run -- call phone1 5559999
