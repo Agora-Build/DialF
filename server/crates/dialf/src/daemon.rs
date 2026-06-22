@@ -219,12 +219,17 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             }
             Ok(ok_msg(&id))
         }
-        ControlOp::CallReject { device } => {
+        ControlOp::CallReject { device, drop } => {
             let dev = resolve_device(state, Some(device))?;
             match device_kind(state, &dev)? {
                 // Loopback has no ring to decline; simulate by clearing the call.
                 DeviceKind::Loopback => loop_io(state, dev).hangup()?,
-                DeviceKind::Phone => state.hub.command(&dev, Action::Reject { call_id: None }).await?,
+                DeviceKind::Phone => {
+                    state
+                        .hub
+                        .command(&dev, Action::Reject { call_id: None, drop })
+                        .await?
+                }
             }
             Ok(ok_msg(&id))
         }

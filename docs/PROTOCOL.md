@@ -40,7 +40,7 @@ A single frame, `cmd`, carrying `cmd_id` plus a flattened **action**:
 | `pickup`        | `call_id?`       | answer the ringing call (or the given leg)      |
 | `dial`          | `number`, `sim_sub_id?` | place an outbound call (default SIM if omitted) |
 | `hangup`        | `call_id?`       | end the active call (or the given leg)          |
-| `reject`        | `call_id?`       | decline the ringing call (or the given leg)     |
+| `reject`        | `call_id?`, `drop?` | decline the ringing call; `drop` answers then hangs up (no voicemail) |
 | `send_sms`      | `to`, `body`     | send a text                                     |
 | `list_sms`      | `since?`         | report the inbox (replies as `sms` frames)      |
 | `list_calls`    | —                | report the call log (replies as one `calls` frame) |
@@ -66,7 +66,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.pickup`  | `device`                        | ok                                     |
 | `call.hangup`  | `device`                        | ok                                     |
-| `call.reject`  | `device`                        | ok                                     |
+| `call.reject`  | `device`, `drop?`               | ok                                     |
 | `sms.send`     | `device`, `to`, `body`          | ok                                     |
 | `sms.list`     | `device`                        | `{messages:[...]}`                     |
 | `call.list`    | `device`                        | `{calls:[...]}`                        |
@@ -91,7 +91,7 @@ dialf sims <device>                            list the device's active SIMs (de
 dialf call dial   <device> <number> [--sim N]  place a call (default SIM if --sim omitted)
 dialf call pickup <device>                      answer the ringing call
 dialf call hangup <device>                      end the active call
-dialf call reject <device>                      decline the ringing call
+dialf call reject <device> [--drop]             decline ringing call (--drop = answer+hangup, no voicemail)
 dialf call list   <device>                      read the call log (JSON)
 dialf voicemail off <device> [--sim N]         disable carrier voicemail (MMI #004#)
 dialf voicemail on  <device> [--number N] [--sim N]  re-enable (*004# or **004*N#)

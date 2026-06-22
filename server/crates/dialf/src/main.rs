@@ -175,8 +175,13 @@ enum CallAction {
     Pickup { device: String },
     /// Hang up the active call: dialf call hangup <device>.
     Hangup { device: String },
-    /// Decline the ringing call: dialf call reject <device>.
-    Reject { device: String },
+    /// Decline the ringing call: dialf call reject <device> [--drop].
+    Reject {
+        device: String,
+        /// Answer then instantly hang up so the caller can't leave voicemail.
+        #[arg(long)]
+        drop: bool,
+    },
     /// List the recent call log: dialf call list <device>.
     List { device: String },
 }
@@ -217,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
                 },
                 CallAction::Pickup { device } => ControlOp::CallPickup { device },
                 CallAction::Hangup { device } => ControlOp::CallHangup { device },
-                CallAction::Reject { device } => ControlOp::CallReject { device },
+                CallAction::Reject { device, drop } => ControlOp::CallReject { device, drop },
                 CallAction::List { device } => ControlOp::CallList { device },
             };
             let resp = call(&socket, op).await?;
@@ -248,6 +253,13 @@ async fn main() -> anyhow::Result<()> {
                     sim,
                 } => (device, true, number, sim),
             };
+            if !enabled {
+                eprintln!(
+                    "note: voicemail off may not work with AT&T or T-Mobile (network-level \
+                     voicemail) — you may need to call your carrier's customer service. \
+                     To keep callers out of voicemail regardless, use: dialf call reject --drop"
+                );
+            }
             let resp = call(
                 &socket,
                 ControlOp::VoicemailSet {

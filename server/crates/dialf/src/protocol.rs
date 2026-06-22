@@ -143,9 +143,12 @@ pub enum Action {
         call_id: Option<CallId>,
     },
     /// Decline a ringing call. `call_id` omitted ⇒ the phone rejects the ringing call.
+    /// `drop` answers then immediately hangs up, so the caller can't leave voicemail.
     Reject {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<CallId>,
+        #[serde(default)]
+        drop: bool,
     },
     /// Send a text message.
     SendSms { to: String, body: String },
@@ -210,9 +213,13 @@ pub enum ControlOp {
     /// Hang up the active call on `device`.
     #[serde(rename = "call.hangup")]
     CallHangup { device: String },
-    /// Decline the ringing call on `device`.
+    /// Decline the ringing call on `device`. `drop` answers then hangs up (no voicemail).
     #[serde(rename = "call.reject")]
-    CallReject { device: String },
+    CallReject {
+        device: String,
+        #[serde(default)]
+        drop: bool,
+    },
     /// Send an SMS from `device`.
     #[serde(rename = "sms.send")]
     SmsSend {
@@ -310,6 +317,7 @@ mod tests {
             id: "1".into(),
             op: ControlOp::CallReject {
                 device: "phone1".into(),
+                drop: false,
             },
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
@@ -321,7 +329,10 @@ mod tests {
     fn reject_action_flattens_into_cmd() {
         let cmd = ServerToPhone::Cmd {
             cmd_id: "c1".into(),
-            action: Action::Reject { call_id: None },
+            action: Action::Reject {
+                call_id: None,
+                drop: false,
+            },
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
         assert_eq!(v["type"], "cmd");

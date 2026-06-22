@@ -53,11 +53,26 @@ object Telecom {
         c.disconnect()
     }
 
-    /** Decline a ringing call (specific id, or the current ringing one). */
-    fun reject(callId: String?) {
+    /**
+     * Decline a ringing call (specific id, or the current ringing one). With [drop], answer
+     * then immediately hang up so the network treats it as answered — the caller can't reach
+     * voicemail (the only reliable way when the carrier's voicemail can't be disabled).
+     */
+    fun reject(callId: String?, drop: Boolean) {
         val c = Dialf.call(callId) ?: Dialf.ringingCall()
             ?: throw IllegalStateException("no call to reject")
-        c.reject(false, null)
+        if (drop) {
+            c.answer(VideoProfile.STATE_AUDIO_ONLY)
+            // Give the call a moment to connect, then end it.
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    (Dialf.call(callId) ?: c).disconnect()
+                } catch (_: Exception) {
+                }
+            }, 1000)
+        } else {
+            c.reject(false, null)
+        }
     }
 
     fun sendSms(ctx: Context, to: String, body: String) {
