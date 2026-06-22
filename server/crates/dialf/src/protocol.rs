@@ -120,6 +120,11 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<CallId>,
     },
+    /// Decline a ringing call. `call_id` omitted ⇒ the phone rejects the ringing call.
+    Reject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<CallId>,
+    },
     /// Send a text message.
     SendSms { to: String, body: String },
     /// Request the inbox (optionally since a timestamp).
@@ -161,6 +166,9 @@ pub enum ControlOp {
     /// Hang up the active call on `device`.
     #[serde(rename = "call.hangup")]
     CallHangup { device: String },
+    /// Decline the ringing call on `device`.
+    #[serde(rename = "call.reject")]
+    CallReject { device: String },
     /// Send an SMS from `device`.
     #[serde(rename = "sms.send")]
     SmsSend {
@@ -229,6 +237,32 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(v["op"], "call.list");
         assert_eq!(v["device"], "phone1");
+    }
+
+    #[test]
+    fn call_reject_op_tag() {
+        let req = ControlRequest {
+            id: "1".into(),
+            op: ControlOp::CallReject {
+                device: "phone1".into(),
+            },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["op"], "call.reject");
+        assert_eq!(v["device"], "phone1");
+    }
+
+    #[test]
+    fn reject_action_flattens_into_cmd() {
+        let cmd = ServerToPhone::Cmd {
+            cmd_id: "c1".into(),
+            action: Action::Reject { call_id: None },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert_eq!(v["type"], "cmd");
+        assert_eq!(v["action"], "reject");
+        // call_id omitted when None.
+        assert!(v.get("call_id").is_none());
     }
 
     #[test]

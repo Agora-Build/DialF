@@ -38,6 +38,7 @@ dialf devices                      # list connected phones
 dialf call dial   <device> <number>   # place a call
 dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
+dialf call reject <device>            # decline the ringing call
 dialf call list   <device>            # read the call log (JSON)
 dialf sms send <device> <to> <body>
 dialf sms list <device>

@@ -131,6 +131,8 @@ enum CallAction {
     Pickup { device: String },
     /// Hang up the active call: dialf call hangup <device>.
     Hangup { device: String },
+    /// Decline the ringing call: dialf call reject <device>.
+    Reject { device: String },
     /// List the recent call log: dialf call list <device>.
     List { device: String },
 }
@@ -167,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
                 CallAction::Dial { device, number } => ControlOp::CallDial { device, number },
                 CallAction::Pickup { device } => ControlOp::CallPickup { device },
                 CallAction::Hangup { device } => ControlOp::CallHangup { device },
+                CallAction::Reject { device } => ControlOp::CallReject { device },
                 CallAction::List { device } => ControlOp::CallList { device },
             };
             let resp = call(&socket, op).await?;

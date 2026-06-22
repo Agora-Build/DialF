@@ -37,6 +37,7 @@ A single frame, `cmd`, carrying `cmd_id` plus a flattened **action**:
 | `pickup`        | `call_id?`       | answer the ringing call (or the given leg)      |
 | `dial`          | `number`         | place an outbound call                          |
 | `hangup`        | `call_id?`       | end the active call (or the given leg)          |
+| `reject`        | `call_id?`       | decline the ringing call (or the given leg)     |
 | `send_sms`      | `to`, `body`     | send a text                                     |
 | `list_sms`      | `since?`         | report the inbox (replies as `sms` frames)      |
 | `list_calls`    | —                | report the call log (replies as one `calls` frame) |
@@ -59,6 +60,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `call.dial`    | `device`, `number`              | `{dialed}`                             |
 | `call.pickup`  | `device`                        | ok                                     |
 | `call.hangup`  | `device`                        | ok                                     |
+| `call.reject`  | `device`                        | ok                                     |
 | `sms.send`     | `device`, `to`, `body`          | ok                                     |
 | `sms.list`     | `device`                        | `{messages:[...]}`                     |
 | `call.list`    | `device`                        | `{calls:[...]}`                        |
@@ -79,6 +81,7 @@ dialf devices                                  list connected phones
 dialf call dial   <device> <number>            place a call
 dialf call pickup <device>                      answer the ringing call
 dialf call hangup <device>                      end the active call
+dialf call reject <device>                      decline the ringing call
 dialf call list   <device>                      read the call log (JSON)
 dialf sms send <device> <to> <body>            send a text
 dialf sms list <device>                         read recent texts (JSON)

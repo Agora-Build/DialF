@@ -40,6 +40,13 @@ object Telecom {
         c.disconnect()
     }
 
+    /** Decline a ringing call (specific id, or the current ringing one). */
+    fun reject(callId: String?) {
+        val c = Dialf.call(callId) ?: Dialf.ringingCall()
+            ?: throw IllegalStateException("no call to reject")
+        c.reject(false, null)
+    }
+
     fun sendSms(ctx: Context, to: String, body: String) {
         val sms = smsManager(ctx)
         val parts = sms.divideMessage(body)

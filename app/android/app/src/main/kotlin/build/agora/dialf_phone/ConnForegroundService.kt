@@ -207,6 +207,7 @@ class ConnForegroundService : Service() {
                 "dial" -> Telecom.placeCall(this, msg.getString("number"))
                 "pickup" -> Telecom.answer(msg.optString("call_id").ifEmpty { null })
                 "hangup" -> Telecom.hangup(msg.optString("call_id").ifEmpty { null })
+                "reject" -> Telecom.reject(msg.optString("call_id").ifEmpty { null })
                 "send_sms" -> Telecom.sendSms(this, msg.getString("to"), msg.getString("body"))
                 "list_sms" -> Telecom.listSms(this, 20).forEach { sms ->
                     val m = HashMap<String, Any?>(sms)
