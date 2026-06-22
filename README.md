@@ -95,6 +95,9 @@ dialf call hangup <device>            # end the active call
 dialf call reject <device>            # decline the ringing call
 dialf call list   <device>            # read the call log (JSON)
 
+dialf voicemail off <device> [--sim N]              # disable carrier voicemail (stop decline→voicemail)
+dialf voicemail on  <device> [--number <vm#>] [--sim N]  # re-enable (--number needed on e.g. T-Mobile)
+
 dialf sms send <device> <to> <body>   # send a text
 dialf sms list <device>               # read recent texts (JSON)
 

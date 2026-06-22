@@ -73,6 +73,18 @@ pub struct SimInfo {
     pub is_default: bool,
 }
 
+/// The network's reply to an MMI / USSD request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MmiResult {
+    /// The code that was sent (e.g. `#004#`).
+    pub code: String,
+    /// Whether the network accepted the request.
+    pub success: bool,
+    /// The network's human-readable response, if any.
+    #[serde(default)]
+    pub response: Option<String>,
+}
+
 /// A registered device.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {

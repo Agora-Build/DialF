@@ -82,6 +82,13 @@ pub enum PhoneToServer {
     Sims {
         entries: Vec<crate::registry::SimInfo>,
     },
+    /// The network's reply to an `mmi` request.
+    MmiResult {
+        code: String,
+        success: bool,
+        #[serde(default)]
+        response: Option<String>,
+    },
     /// Acknowledges a [`ServerToPhone::Cmd`].
     Ack { cmd_id: CmdId, ok: bool },
     /// Reports a failure, optionally tied to a command.
@@ -144,6 +151,12 @@ pub enum Action {
     ListCalls {},
     /// Request the list of active SIMs.
     ListSims {},
+    /// Run an MMI / USSD code (e.g. call-forwarding) on a SIM; reply is an `mmi_result`.
+    Mmi {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sim_sub_id: Option<i32>,
+    },
     /// Replace the phone's local auto-pickup number list.
     SetAutopickup { numbers: Vec<String> },
 }
@@ -200,6 +213,14 @@ pub enum ControlOp {
     /// List the active SIMs on `device`.
     #[serde(rename = "sims.list")]
     SimsList { device: String },
+    /// Run an MMI / USSD code on `device` (optionally on a specific SIM).
+    #[serde(rename = "mmi.send")]
+    Mmi {
+        device: String,
+        code: String,
+        #[serde(default)]
+        sim_sub_id: Option<i32>,
+    },
     /// Play an audio file out the sound card (optionally tied to a device's call).
     #[serde(rename = "audio.play")]
     AudioPlay {
@@ -351,6 +372,44 @@ mod tests {
                 assert_eq!(entries[1].number, None);
             }
             other => panic!("expected Sims, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mmi_op_action_and_result() {
+        let req = ControlRequest {
+            id: "1".into(),
+            op: ControlOp::Mmi {
+                device: "phone1".into(),
+                code: "#004#".into(),
+                sim_sub_id: Some(9),
+            },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["op"], "mmi.send");
+        assert_eq!(v["code"], "#004#");
+        assert_eq!(v["sim_sub_id"], 9);
+
+        let cmd = ServerToPhone::Cmd {
+            cmd_id: "c1".into(),
+            action: Action::Mmi {
+                code: "*004#".into(),
+                sim_sub_id: None,
+            },
+        };
+        let cv: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert_eq!(cv["action"], "mmi");
+        assert_eq!(cv["code"], "*004#");
+        assert!(cv.get("sim_sub_id").is_none());
+
+        let frame = r##"{"type":"mmi_result","code":"#004#","success":true,"response":"Erasure was successful"}"##;
+        match serde_json::from_str::<PhoneToServer>(frame).unwrap() {
+            PhoneToServer::MmiResult { code, success, response } => {
+                assert_eq!(code, "#004#");
+                assert!(success);
+                assert_eq!(response.as_deref(), Some("Erasure was successful"));
+            }
+            other => panic!("expected MmiResult, got {other:?}"),
         }
     }
 

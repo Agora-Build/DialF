@@ -41,6 +41,7 @@ dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
 dialf call reject <device>            # decline the ringing call
 dialf call list   <device>            # read the call log (JSON)
+dialf voicemail off|on <device> [--sim N]   # toggle carrier voicemail (MMI)
 dialf sms send <device> <to> <body>
 dialf sms list <device>
 dialf run  <job.yaml> [--device <id>]

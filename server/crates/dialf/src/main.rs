@@ -53,6 +53,11 @@ enum Command {
     },
     /// List the device's active SIMs (slot, number, carrier).
     Sims { device: String },
+    /// Turn carrier voicemail (conditional call-forwarding) on/off via MMI codes.
+    Voicemail {
+        #[command(subcommand)]
+        action: VoicemailAction,
+    },
     /// Run a YAML job against a device.
     Run {
         /// Path to the YAML job file.
@@ -123,6 +128,29 @@ enum SmsAction {
     },
     /// List recent texts: dialf sms list <device>.
     List { device: String },
+}
+
+#[derive(Subcommand)]
+enum VoicemailAction {
+    /// Disable voicemail forwarding (dials #004#): dialf voicemail off <device> [--sim N].
+    Off {
+        device: String,
+        /// SIM subscription id (from `dialf sims`); omit for the default SIM.
+        #[arg(long)]
+        sim: Option<i32>,
+    },
+    /// Re-enable voicemail forwarding: dialf voicemail on <device> [--number <vm#>] [--sim N].
+    /// Without --number, dials *004# (re-activate); some carriers (e.g. T-Mobile) require
+    /// --number to re-register the forwarding target as **004*<number>#.
+    On {
+        device: String,
+        /// Voicemail number to forward to (registers via **004*<number>#).
+        #[arg(long)]
+        number: Option<String>,
+        /// SIM subscription id (from `dialf sims`); omit for the default SIM.
+        #[arg(long)]
+        sim: Option<i32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -199,6 +227,35 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Sims { device } => {
             let resp = call(&socket, ControlOp::SimsList { device }).await?;
+            print_response(&resp);
+            ok_or_err(resp)
+        }
+        Command::Voicemail { action } => {
+            // GSM supplementary-service codes for all conditional call-forwarding:
+            //   #004#  deactivate (caller no longer forwarded to voicemail)
+            //   *004#  reactivate
+            let (device, sim, code) = match action {
+                VoicemailAction::Off { device, sim } => (device, sim, "#004#".to_string()),
+                VoicemailAction::On {
+                    device,
+                    number: Some(n),
+                    sim,
+                } => (device, sim, format!("**004*{n}#")),
+                VoicemailAction::On {
+                    device,
+                    number: None,
+                    sim,
+                } => (device, sim, "*004#".to_string()),
+            };
+            let resp = call(
+                &socket,
+                ControlOp::Mmi {
+                    device,
+                    code,
+                    sim_sub_id: sim,
+                },
+            )
+            .await?;
             print_response(&resp);
             ok_or_err(resp)
         }

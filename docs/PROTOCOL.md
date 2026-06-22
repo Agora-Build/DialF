@@ -26,6 +26,7 @@ closed.
 | `sms`        | `direction` (`in`/`out`), `from?`, `to?`, `body`, `ts`                 |
 | `calls`      | `entries[]` of `{number?, kind, ts, duration}` — reply to `list_calls` |
 | `sims`       | `entries[]` of `{slot, sub_id, name?, carrier?, number?, is_default}` — reply to `list_sims` |
+| `mmi_result` | `code`, `success`, `response?` — reply to `mmi`                        |
 | `ack`        | `cmd_id`, `ok` — acknowledges a command                               |
 | `error`      | `cmd_id?`, `msg`                                                       |
 
@@ -43,6 +44,7 @@ A single frame, `cmd`, carrying `cmd_id` plus a flattened **action**:
 | `list_sms`      | `since?`         | report the inbox (replies as `sms` frames)      |
 | `list_calls`    | —                | report the call log (replies as one `calls` frame) |
 | `list_sims`     | —                | report active SIMs (replies as one `sims` frame) |
+| `mmi`           | `code`, `sim_sub_id?` | run an MMI/USSD code via `sendUssdRequest` (replies `mmi_result`) |
 | `set_autopickup`| `numbers[]`      | replace the phone's local auto-pickup list      |
 
 **Auto-pickup:** `dialfd` owns the allow-list (config `autopickup`). On an inbound
@@ -67,6 +69,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `sms.list`     | `device`                        | `{messages:[...]}`                     |
 | `call.list`    | `device`                        | `{calls:[...]}`                        |
 | `sims.list`    | `device`                        | `{sims:[...]}`                         |
+| `mmi.send`     | `device`, `code`, `sim_sub_id?` | `{code, success, response?}`           |
 | `audio.play`   | `file`, `device?`               | ok                                     |
 | `job.run`      | `path?` \| `steps?`, `device?`  | `{steps:[...], recording:{rx,tx,mix}}` |
 | `job.status`   | `job_id`                        | (not tracked yet)                      |
@@ -87,6 +90,8 @@ dialf call pickup <device>                      answer the ringing call
 dialf call hangup <device>                      end the active call
 dialf call reject <device>                      decline the ringing call
 dialf call list   <device>                      read the call log (JSON)
+dialf voicemail off <device> [--sim N]         disable carrier voicemail (MMI #004#)
+dialf voicemail on  <device> [--number N] [--sim N]  re-enable (*004# or **004*N#)
 dialf sms send <device> <to> <body>            send a text
 dialf sms list <device>                         read recent texts (JSON)
 dialf run  <job.yaml> [--device <id>]          run a YAML job

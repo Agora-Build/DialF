@@ -229,6 +229,15 @@ class ConnForegroundService : Service() {
                     Telecom.listSims(this).forEach { arr.put(JSONObject(it)) }
                     ws?.send(JSONObject().put("type", "sims").put("entries", arr).toString())
                 }
+                "mmi" -> {
+                    val code = msg.getString("code")
+                    val sim = if (msg.has("sim_sub_id") && !msg.isNull("sim_sub_id")) msg.getInt("sim_sub_id") else null
+                    Telecom.sendMmi(this, code, sim) { ok, resp ->
+                        val o = JSONObject().put("type", "mmi_result").put("code", code).put("success", ok)
+                        if (resp != null) o.put("response", resp)
+                        ws?.send(o.toString())
+                    }
+                }
                 "set_autopickup" -> {} // dialfd owns the picklist
                 else -> {
                     sendError(cmdId, "unknown action $action")

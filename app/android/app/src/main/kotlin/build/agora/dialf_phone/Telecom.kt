@@ -4,12 +4,15 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.CallLog
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 
 /**
  * Telephony primitives, callable from both the UI (MainActivity) and the headless
@@ -32,7 +35,9 @@ object Telecom {
                 ?: throw IllegalArgumentException("no SIM with subscription id $simSubId")
             extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
         }
-        tm.placeCall(Uri.fromParts("tel", number, null), extras)
+        // Encode so MMI/USSD codes survive ('#' -> %23); '+' kept for international numbers.
+        val uri = Uri.parse("tel:" + Uri.encode(number, "+"))
+        tm.placeCall(uri, extras)
     }
 
     /** Answer the ringing call (specific id, or the current ringing one). */
@@ -166,6 +171,28 @@ object Telecom {
             )
         }
         return out
+    }
+
+    /**
+     * Run an MMI/USSD code (e.g. call-forwarding) on a SIM and deliver the network reply
+     * via [onResult]. Headless — no dialer UI, the response is captured programmatically.
+     */
+    fun sendMmi(ctx: Context, code: String, simSubId: Int?, onResult: (Boolean, String?) -> Unit) {
+        var tm = ctx.getSystemService(TelephonyManager::class.java)
+            ?: return onResult(false, "no telephony service")
+        val sub = simSubId ?: SubscriptionManager.getDefaultVoiceSubscriptionId()
+        if (sub != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            tm = tm.createForSubscriptionId(sub)
+        }
+        val cb = object : TelephonyManager.UssdResponseCallback() {
+            override fun onReceiveUssdResponse(t: TelephonyManager, request: String, response: CharSequence) {
+                onResult(true, response.toString())
+            }
+            override fun onReceiveUssdResponseFailed(t: TelephonyManager, request: String, failureCode: Int) {
+                onResult(false, "request failed (code $failureCode)")
+            }
+        }
+        tm.sendUssdRequest(code, cb, Handler(Looper.getMainLooper()))
     }
 
     private fun smsManager(ctx: Context): SmsManager =

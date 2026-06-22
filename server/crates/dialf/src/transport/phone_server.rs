@@ -191,6 +191,21 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
             tracing::info!(%device_id, count = entries.len(), "sims");
             state.set_sims(device_id, entries);
         }
+        PhoneToServer::MmiResult {
+            code,
+            success,
+            response,
+        } => {
+            tracing::info!(%device_id, %code, success, "mmi result");
+            state.set_mmi_result(
+                device_id,
+                crate::registry::MmiResult {
+                    code,
+                    success,
+                    response,
+                },
+            );
+        }
         PhoneToServer::Ack { cmd_id, ok } => state.hub.resolve_ack(device_id, &cmd_id, ok),
         PhoneToServer::Error { cmd_id, msg } => {
             if let Some(id) = cmd_id {
