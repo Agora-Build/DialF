@@ -1,7 +1,7 @@
 //! Local control API server: line-delimited JSON over a Unix domain socket.
 //!
-//! Each request is one [`ControlRequest`] JSON line; the daemon replies with one (M1) or
-//! more (future: streamed) [`ControlResponse`] JSON lines.
+//! Each request is one [`ControlRequest`] JSON line; the daemon replies with one (or, in
+//! future, streamed) [`ControlResponse`] JSON lines.
 
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
