@@ -131,3 +131,42 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  r2-mirror:
+    name: Mirror to Cloudflare R2 (dl.agora.build)
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Upload tarballs + install script to R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          npm i -g wrangler
+          VERSION="${GITHUB_REF_NAME}"
+          # Shared releases bucket for all Agora-Build CLIs; dl.agora.build fronts it.
+          # Per-project key prefix (dialf/…) keeps projects separate.
+          BUCKET="agora-build-releases"
+
+          # Mirror each platform tarball
+          for f in dist/dialf-*.tar.gz; do
+            KEY="dialf/releases/${VERSION}/$(basename "$f")"
+            echo "Uploading $KEY"
+            wrangler r2 object put "$BUCKET/$KEY" --file="$f" --remote
+          done
+
+          # 'latest' version marker (plain text, no 'v' prefix)
+          echo -n "${VERSION#v}" | wrangler r2 object put "$BUCKET/dialf/releases/latest" \
+            --pipe --content-type text/plain --remote
+
+          # install script -> https://dl.agora.build/dialf/install.sh
+          wrangler r2 object put "$BUCKET/dialf/install.sh" \
+            --file=scripts/install.sh --content-type text/plain --remote
