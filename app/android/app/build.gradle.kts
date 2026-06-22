@@ -15,7 +15,6 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "build.agora.dialf_phone"
         // minSdk 29: RoleManager.ROLE_DIALER (default-dialer flow) is API 29+.
         minSdk = 29

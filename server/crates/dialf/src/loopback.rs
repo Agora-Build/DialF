@@ -1,5 +1,5 @@
-//! In-process loopback phone — the hardware-free test device (always registered
-//! alongside any real phones).
+//! In-process loopback phone — the hardware-free test device (registered only when
+//! `--with-loopback` is passed).
 //!
 //! Implements [`JobIo`] by driving the [`AudioEngine`] for audio steps and updating the
 //! [`Registry`]'s call state for call/SMS steps. With `dry_audio = true`, audio steps are
