@@ -39,9 +39,10 @@ dialf sims <device>                # list SIMs (default tagged)
 dialf call dial   <device> <number> [--sim <sub_id>]   # place a call (default SIM if omitted)
 dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
-dialf call reject <device>            # decline the ringing call
+dialf call reject <device> [--drop]   # decline ringing call (--drop = answer+hangup, no voicemail)
 dialf call list   <device>            # read the call log (JSON)
 dialf voicemail off|on <device> [--sim N]   # toggle carrier voicemail (MMI)
+dialf mmi <device> <code> [--sim N]   # (advanced) raw MMI/USSD code
 dialf sms send <device> <to> <body>
 dialf sms list <device>
 dialf run  <job.yaml> [--device <id>]

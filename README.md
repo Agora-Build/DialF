@@ -32,10 +32,17 @@ More options (per-user service, service management, build from source) in
 
 ## Features
 
-- **Make & answer calls** programmatically on the phone's SIM, from the CLI or a job.
+- **Make / answer / hang up / reject calls** programmatically on the phone's SIM, from the
+  CLI or a job. `reject --drop` answers then instantly hangs up so the caller can't reach
+  voicemail (handy when the carrier won't disable it).
 - **Auto-answer** an allow-list of numbers (`autopickup`) — `dialfd` answers matching
   inbound calls automatically.
-- **Send & receive SMS**; `dialf sms list` reads the phone's real inbox.
+- **Dual-SIM aware**: `dialf sims` lists the SIMs (number/carrier, default tagged) and
+  `call dial --sim <id>` places a call on a chosen SIM.
+- **Read the call log** (`dialf call list`) and **send & receive SMS** (`dialf sms list`
+  reads the phone's real inbox).
+- **Carrier controls**: `dialf voicemail off/on` toggles voicemail forwarding, and
+  `dialf mmi` sends raw MMI/USSD codes (the device captures the network reply headlessly).
 - **Scripted audio conversations** via YAML: play a prompt, wait for the caller to stop
   talking (ten-vad end-of-speech), play the next — through the USB sound card.
 - **Call recording**: both directions separately (`-rx`/`-tx`) and/or mixed (`-mix`), as
@@ -97,6 +104,7 @@ dialf call list   <device>            # read the call log (JSON)
 
 dialf voicemail off <device> [--sim N]              # disable carrier voicemail (stop decline→voicemail)
 dialf voicemail on  <device> [--number <vm#>] [--sim N]  # re-enable (--number needed on e.g. T-Mobile)
+dialf mmi <device> <code> [--sim N]   # (advanced) send a raw MMI/USSD code, get the network reply
 
 dialf sms send <device> <to> <body>   # send a text
 dialf sms list <device>               # read recent texts (JSON)
