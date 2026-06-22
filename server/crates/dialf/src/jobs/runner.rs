@@ -1,8 +1,8 @@
 //! Job runner: executes a list of [`Step`]s against a [`JobIo`] implementation.
 //!
 //! The runner is pure control flow — all side effects go through [`JobIo`]. The real
-//! implementation (added with the daemon) ties the audio engine to a connected phone;
-//! the [`tests`] mock here doubles as the loopback used for hardware-free M1 runs.
+//! implementation ties the audio engine to a connected phone; the [`tests`] mock here
+//! doubles as the loopback used for hardware-free runs.
 
 use serde::Serialize;
 

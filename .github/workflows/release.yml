@@ -1,9 +1,9 @@
 # Tag-driven release: push vX.Y.Z -> build prebuilt dialf binaries (ten-vad compiled from
-# source, onnxruntime + model bundled + rpath fixed), publish a GitHub Release, then the
-# npm wrapper.
+# source, onnxruntime + model bundled + rpath fixed), publish a GitHub Release, the npm
+# wrapper, and mirror to Cloudflare R2 (dl.agora.build).
 #
 # dialf/dialfd ARE shipped as prebuilt binaries; ten-vad inside them is always compiled
-# from source (ONNX path). Linux aarch64 (no runner here) builds from source on-device.
+# from source (ONNX path). Linux aarch64 is cross-compiled on the x86_64 runner.
 name: release
 
 on:

@@ -11,14 +11,15 @@ model bundled) for your platform on install.
 
 ```sh
 npm install -g @agora-build/dialf
+
+# or, without npm:
+curl -fsSL https://dl.agora.build/dialf/install.sh | bash
 ```
 
 Supported platforms: macOS (arm64/x86_64) and Linux (x86_64/aarch64). The postinstall step
 fetches the matching binary from the [GitHub Releases](https://github.com/Agora-Build/DialF/releases);
 it never hard-fails `npm install` — if no prebuilt exists for your platform it prints
 guidance to build from source.
-
-Prefer curl instead of npm? See the [repository README](https://github.com/Agora-Build/DialF#install).
 
 ## Run the daemon as a service
 

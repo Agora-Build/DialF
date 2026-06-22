@@ -1,7 +1,7 @@
 //! In-memory registry of connected devices and their call state.
 //!
-//! For M1 the only device is the in-process [`crate::loopback`] phone. M2 adds real
-//! phones over WebSocket; they register/unregister here on connect/disconnect.
+//! Real phones register/unregister here over WebSocket on connect/disconnect; an optional
+//! in-process [`crate::loopback`] test device is added when `--with-loopback` is passed.
 
 use std::collections::HashMap;
 

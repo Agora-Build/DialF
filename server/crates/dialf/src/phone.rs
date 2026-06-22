@@ -1,4 +1,4 @@
-//! [`JobIo`] for a real connected phone (M2).
+//! [`JobIo`] for a real connected phone.
 //!
 //! Audio steps use the [`AudioEngine`] (same as loopback); call/SMS steps become hub
 //! commands. The job runner is synchronous and runs on a blocking task, so async hub
