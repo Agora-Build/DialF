@@ -1,8 +1,10 @@
 package build.agora.dialf_phone
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -63,6 +65,22 @@ class ConnForegroundService : Service() {
             connectOrDiscover()
         }
         return START_STICKY
+    }
+
+    /** App swiped from recents — reschedule a restart so the service keeps running. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (running) {
+            val restart = Intent(applicationContext, ConnForegroundService::class.java)
+            val pi = PendingIntent.getForegroundService(
+                this,
+                1,
+                restart,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            getSystemService(AlarmManager::class.java)
+                ?.set(AlarmManager.RTC, System.currentTimeMillis() + 1500, pi)
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {

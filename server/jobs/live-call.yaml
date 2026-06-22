@@ -1,0 +1,43 @@
+# DialF — live call through the MiniFuse 2 sound-card bridge.
+#
+#   dialf run jobs/live-call.yaml --device pixel-9-pro-7867
+#
+# Places a real call, plays two prompts, and records the conversation. With
+# audio.record_dir set (see config), the call is written to <job>-rx.wav (far end),
+# <job>-tx.wav (our prompts) and <job>-mix.wav (both, when mix_recording: true).
+
+- type: call.dial
+  number: "5555550123"
+  description: call the phone
+
+- type: wait
+  ms: 9000
+  description: allow time to answer
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav1.wav
+  description: prompt 1
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 30000
+  silence_duration_ms: 2500
+  description: listen to the reply (recorded as rx)
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav2.wav
+  description: prompt 2
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 30000
+  silence_duration_ms: 2500
+  description: listen to the reply (recorded as rx)
+
+- type: wait
+  ms: 500
+  description: let the last audio play out
+
+- type: call.hangup
+  description: end the call
+
+- type: log
+  message: live call complete

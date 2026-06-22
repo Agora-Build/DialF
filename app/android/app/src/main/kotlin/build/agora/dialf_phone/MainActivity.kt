@@ -67,10 +67,11 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // Allow `am start -n .../.MainActivity --ez start true` to launch the service
-        // headlessly (also used to auto-resume on app open).
-        if (intent?.getBooleanExtra("start", false) == true) {
-            setEnabled(true)
+        // Always (re)start the control-plane service when the app opens if it's enabled —
+        // so it keeps running/reconnecting. `--ez start true` force-enables it headlessly.
+        val forceStart = intent?.getBooleanExtra("start", false) == true
+        if (forceStart) setEnabled(true)
+        if (forceStart || prefs().getBoolean("enabled", false)) {
             ContextCompat.startForegroundService(this, serviceIntent())
         }
     }
