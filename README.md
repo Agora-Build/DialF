@@ -17,6 +17,19 @@ Two planes:
 - **Audio plane (physical):** phone headset jack ↔ USB sound card on the host. `dialfd`
   owns the audio engine, VAD, recording, and the YAML job runner.
 
+## Quick install
+
+```sh
+# curl (macOS & Linux, arm64/x86_64) — installs dialf + runs dialfd as a boot service
+curl -fsSL https://dl.agora.build/dialf/install.sh | bash
+
+# or npm — installs the CLI, then enable the service
+npm install -g @agora-build/dialf && sudo dialf service install
+```
+
+More options (per-user service, service management, build from source) in
+[Install](#install) below.
+
 ## Features
 
 - **Make & answer calls** programmatically on the phone's SIM, from the CLI or a job.
