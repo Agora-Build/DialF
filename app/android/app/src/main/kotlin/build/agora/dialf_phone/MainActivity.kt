@@ -3,11 +3,14 @@ package build.agora.dialf_phone
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import kotlin.random.Random
 
 /**
  * Thin UI host: configures the control-plane service, requests the default-dialer role,
@@ -37,6 +40,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 try {
                     when (call.method) {
+                        "deviceDefaults" -> result.success(deviceDefaults())
                         "isDefaultDialer" -> result.success(Telecom.isDefaultDialer(this))
                         "requestDialerRole" -> {
                             requestDialerRole()
@@ -74,6 +78,38 @@ class MainActivity : FlutterActivity() {
     private fun serviceIntent() = Intent(this, ConnForegroundService::class.java)
 
     private fun prefs() = getSharedPreferences(ConnForegroundService.PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * Suggested config for first-run UI: a friendly phone name (the user's "Device name", or
+     * the brand + model) and a device id of `<slug>-<4 digits>`. Persisted on first call so
+     * the random suffix stays stable across launches.
+     */
+    private fun deviceDefaults(): Map<String, String> {
+        val p = prefs()
+        val name = p.getString("name", null)?.takeIf { it.isNotBlank() } ?: detectPhoneName()
+        val id = p.getString("device_id", null)?.takeIf { it.isNotBlank() } ?: deviceIdFor(name)
+        p.edit().putString("name", name).putString("device_id", id).apply()
+        return mapOf("device_id" to id, "name" to name)
+    }
+
+    /** The user-set "Device name", falling back to "<Manufacturer> <Model>". */
+    private fun detectPhoneName(): String {
+        Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        val mfr = Build.MANUFACTURER?.replaceFirstChar { it.uppercase() }.orEmpty()
+        val model = Build.MODEL?.takeIf { it.isNotBlank() } ?: "phone"
+        return if (mfr.isBlank() || model.startsWith(mfr, ignoreCase = true)) model else "$mfr $model"
+    }
+
+    /** Slugify a name and append 4 random digits, e.g. "Pixel 9 Pro" -> "pixel-9-pro-4827". */
+    private fun deviceIdFor(name: String): String {
+        val slug = name.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .ifBlank { "phone" }
+        return "$slug-${Random.nextInt(1000, 10000)}"
+    }
 
     private fun saveConfig(call: io.flutter.plugin.common.MethodCall) {
         prefs().edit()

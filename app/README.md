@@ -39,8 +39,8 @@ The UI is just for configuration/status; the service is the part that matters at
 
 | Field            | Meaning                                                        |
 |------------------|---------------------------------------------------------------|
-| Device id        | id this phone registers as (e.g. `phone1`)                    |
-| Device name      | friendly name shown in `dialf devices`                        |
+| Device id        | id this phone registers as; defaults to `<phone-name>-NNNN` (4 random digits, stable) |
+| Device name      | friendly name shown in `dialf devices`; defaults to the phone's name / brand+model |
 | Shared key       | must match `dialfd`'s `shared_key`                            |
 | dialfd address   | `host:port` to pin a daemon; **leave blank to auto-discover** |
 

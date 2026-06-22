@@ -30,8 +30,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _id = TextEditingController(text: 'phone1');
-  final _name = TextEditingController(text: 'DialF Phone');
+  final _id = TextEditingController();
+  final _name = TextEditingController();
   final _key = TextEditingController(text: 'change-me');
   final _addr = TextEditingController();
 
@@ -51,6 +51,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _bootstrap() async {
     await [Permission.phone, Permission.sms, Permission.notification].request();
+    final defaults = await Native.deviceDefaults();
+    if (_id.text.isEmpty) _id.text = defaults['device_id'] ?? 'phone1';
+    if (_name.text.isEmpty) _name.text = defaults['name'] ?? 'DialF Phone';
     _isDefaultDialer = await Native.isDefaultDialer();
     if (mounted) setState(() {});
   }

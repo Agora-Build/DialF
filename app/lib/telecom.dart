@@ -16,6 +16,13 @@ class Native {
     return _events!;
   }
 
+  /// Suggested first-run config: `{device_id, name}` derived from the phone's name/brand,
+  /// with a stable 4-digit suffix on the id (persisted natively).
+  static Future<Map<String, String>> deviceDefaults() async {
+    final m = await _m.invokeMethod<Map>('deviceDefaults');
+    return m == null ? {} : Map<String, String>.from(m);
+  }
+
   static Future<bool> isDefaultDialer() async =>
       (await _m.invokeMethod<bool>('isDefaultDialer')) ?? false;
 
