@@ -61,7 +61,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `call.hangup`  | `device`                        | ok                                     |
 | `sms.send`     | `device`, `to`, `body`          | ok                                     |
 | `sms.list`     | `device`                        | `{messages:[...]}`                     |
-| `calls.list`   | `device`                        | `{calls:[...]}`                        |
+| `call.list`    | `device`                        | `{calls:[...]}`                        |
 | `audio.play`   | `file`, `device?`               | ok                                     |
 | `job.run`      | `path?` \| `steps?`, `device?`  | `{steps:[...], recording:{rx,tx,mix}}` |
 | `job.status`   | `job_id`                        | (not tracked yet)                      |
@@ -76,12 +76,12 @@ returns what it has recorded.
 ```
 dialf daemon [--dry-audio] [--with-loopback]   run dialfd (control socket + WS + mDNS)
 dialf devices                                  list connected phones
-dialf call   <device> <number>                 place a call
-dialf pickup <device>                           answer the ringing call
-dialf hangup <device>                           end the active call
+dialf call dial   <device> <number>            place a call
+dialf call pickup <device>                      answer the ringing call
+dialf call hangup <device>                      end the active call
+dialf call list   <device>                      read the call log (JSON)
 dialf sms send <device> <to> <body>            send a text
 dialf sms list <device>                         read recent texts (JSON)
-dialf calls list <device>                       read the call log (JSON)
 dialf run  <job.yaml> [--device <id>]          run a YAML job
 dialf play <file>                              inject audio out the sound card
 dialf service install|uninstall|start|stop|status [--user] [--config <path>]

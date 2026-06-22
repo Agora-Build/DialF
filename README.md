@@ -88,13 +88,13 @@ dialf daemon --dry-audio           # simulate audio steps (no sound card needed)
 dialf daemon --with-loopback       # also register an in-process simulated phone for testing
 
 dialf devices                      # list connected phones
-dialf call   <device> <number>     # place a call
-dialf pickup <device>              # answer the ringing call
-dialf hangup <device>              # end the active call
+dialf call dial   <device> <number>   # place a call
+dialf call pickup <device>            # answer the ringing call
+dialf call hangup <device>            # end the active call
+dialf call list   <device>            # read the call log (JSON)
 
 dialf sms send <device> <to> <body>   # send a text
 dialf sms list <device>               # read recent texts (JSON)
-dialf calls list <device>             # read the call log (JSON)
 
 dialf run  <job.yaml> [--device <id>] # run a scripted job
 dialf play <file>                     # inject audio out the sound card now
@@ -110,7 +110,7 @@ socket, so it must run on the same host. Tip: pretty-print SMS with `dialf sms l
 ```sh
 dialf daemon --dry-audio --with-loopback &
 dialf devices
-dialf call loopback 5551234
+dialf call dial loopback 5551234
 dialf run server/jobs/sample.yaml
 ```
 

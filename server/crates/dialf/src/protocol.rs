@@ -172,8 +172,8 @@ pub enum ControlOp {
     #[serde(rename = "sms.list")]
     SmsList { device: String },
     /// List the recent call log on `device`.
-    #[serde(rename = "calls.list")]
-    CallsList { device: String },
+    #[serde(rename = "call.list")]
+    CallList { device: String },
     /// Play an audio file out the sound card (optionally tied to a device's call).
     #[serde(rename = "audio.play")]
     AudioPlay {
@@ -210,4 +210,71 @@ pub struct ControlResponse {
     /// Arbitrary payload (device list, job event, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::CallRecord;
+
+    #[test]
+    fn call_list_op_tag() {
+        // The control op for the call log is `call.list` (grouped with call.*).
+        let req = ControlRequest {
+            id: "1".into(),
+            op: ControlOp::CallList {
+                device: "phone1".into(),
+            },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["op"], "call.list");
+        assert_eq!(v["device"], "phone1");
+    }
+
+    #[test]
+    fn list_calls_action_flattens_into_cmd() {
+        let cmd = ServerToPhone::Cmd {
+            cmd_id: "c1".into(),
+            action: Action::ListCalls {},
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert_eq!(v["type"], "cmd");
+        assert_eq!(v["cmd_id"], "c1");
+        assert_eq!(v["action"], "list_calls");
+    }
+
+    #[test]
+    fn calls_frame_parses_with_missing_number() {
+        // A missed call with no number key must still deserialize (number -> None).
+        let frame = r#"{"type":"calls","entries":[
+            {"number":"+15551234","kind":"outgoing","ts":1000,"duration":7},
+            {"kind":"missed","ts":2000,"duration":0}
+        ]}"#;
+        let msg: PhoneToServer = serde_json::from_str(frame).unwrap();
+        match msg {
+            PhoneToServer::Calls { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].number.as_deref(), Some("+15551234"));
+                assert_eq!(entries[0].kind, "outgoing");
+                assert_eq!(entries[1].number, None);
+                assert_eq!(entries[1].kind, "missed");
+            }
+            other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_record_roundtrip() {
+        let rec = CallRecord {
+            number: Some("+1".into()),
+            kind: "incoming".into(),
+            ts: 42,
+            duration: 3,
+        };
+        let back: CallRecord = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(back.number, rec.number);
+        assert_eq!(back.kind, rec.kind);
+        assert_eq!(back.ts, rec.ts);
+        assert_eq!(back.duration, rec.duration);
+    }
 }

@@ -35,12 +35,12 @@ dialf service install --user      # or per-user (login), no sudo
 ```sh
 dialf daemon                       # run dialfd in the foreground
 dialf devices                      # list connected phones
-dialf call   <device> <number>     # place a call
-dialf pickup <device>              # answer the ringing call
-dialf hangup <device>              # end the active call
+dialf call dial   <device> <number>   # place a call
+dialf call pickup <device>            # answer the ringing call
+dialf call hangup <device>            # end the active call
+dialf call list   <device>            # read the call log (JSON)
 dialf sms send <device> <to> <body>
 dialf sms list <device>
-dialf calls list <device>
 dialf run  <job.yaml> [--device <id>]
 dialf play <file>
 ```

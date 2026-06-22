@@ -41,21 +41,15 @@ enum Command {
     },
     /// List connected phones.
     Devices,
-    /// Place a call: dialf call <device> <number>.
-    Call { device: String, number: String },
-    /// Answer the ringing call: dialf pickup <device>.
-    Pickup { device: String },
-    /// Hang up the active call: dialf hangup <device>.
-    Hangup { device: String },
+    /// Place/answer/hang up calls and read the call log.
+    Call {
+        #[command(subcommand)]
+        action: CallAction,
+    },
     /// Send or list texts.
     Sms {
         #[command(subcommand)]
         action: SmsAction,
-    },
-    /// Read the call log.
-    Calls {
-        #[command(subcommand)]
-        action: CallsAction,
     },
     /// Run a YAML job against a device.
     Run {
@@ -130,8 +124,14 @@ enum SmsAction {
 }
 
 #[derive(Subcommand)]
-enum CallsAction {
-    /// List the recent call log: dialf calls list <device>.
+enum CallAction {
+    /// Place a call: dialf call dial <device> <number>.
+    Dial { device: String, number: String },
+    /// Answer the ringing call: dialf call pickup <device>.
+    Pickup { device: String },
+    /// Hang up the active call: dialf call hangup <device>.
+    Hangup { device: String },
+    /// List the recent call log: dialf call list <device>.
     List { device: String },
 }
 
@@ -162,18 +162,14 @@ async fn main() -> anyhow::Result<()> {
             print_response(&resp);
             ok_or_err(resp)
         }
-        Command::Call { device, number } => {
-            let resp = call(&socket, ControlOp::CallDial { device, number }).await?;
-            print_response(&resp);
-            ok_or_err(resp)
-        }
-        Command::Pickup { device } => {
-            let resp = call(&socket, ControlOp::CallPickup { device }).await?;
-            print_response(&resp);
-            ok_or_err(resp)
-        }
-        Command::Hangup { device } => {
-            let resp = call(&socket, ControlOp::CallHangup { device }).await?;
+        Command::Call { action } => {
+            let op = match action {
+                CallAction::Dial { device, number } => ControlOp::CallDial { device, number },
+                CallAction::Pickup { device } => ControlOp::CallPickup { device },
+                CallAction::Hangup { device } => ControlOp::CallHangup { device },
+                CallAction::List { device } => ControlOp::CallList { device },
+            };
+            let resp = call(&socket, op).await?;
             print_response(&resp);
             ok_or_err(resp)
         }
@@ -181,14 +177,6 @@ async fn main() -> anyhow::Result<()> {
             let op = match action {
                 SmsAction::Send { device, to, body } => ControlOp::SmsSend { device, to, body },
                 SmsAction::List { device } => ControlOp::SmsList { device },
-            };
-            let resp = call(&socket, op).await?;
-            print_response(&resp);
-            ok_or_err(resp)
-        }
-        Command::Calls { action } => {
-            let op = match action {
-                CallsAction::List { device } => ControlOp::CallsList { device },
             };
             let resp = call(&socket, op).await?;
             print_response(&resp);

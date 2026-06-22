@@ -36,7 +36,7 @@ pub struct DaemonState {
     pub config: Arc<Config>,
     /// Recently received/sent SMS, per device id.
     pub inbox: Arc<Mutex<HashMap<String, Vec<SmsRecord>>>>,
-    /// Most recent call-log snapshot, per device id (replaced on each `calls.list`).
+    /// Most recent call-log snapshot, per device id (replaced on each `call.list`).
     pub call_log: Arc<Mutex<HashMap<String, Vec<CallRecord>>>>,
     /// When true, audio steps are simulated (no sound card / ten-vad needed).
     pub dry_audio: bool,
@@ -204,7 +204,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 .unwrap_or_default();
             Ok(ok_data(&id, json!({ "messages": msgs })))
         }
-        ControlOp::CallsList { device } => {
+        ControlOp::CallList { device } => {
             let dev = resolve_device(state, Some(device))?;
             // Ask a real phone to report its call log, then give the reply a moment to
             // arrive (it comes back as a `calls` frame the reader records).
