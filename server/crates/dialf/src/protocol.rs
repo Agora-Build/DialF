@@ -82,6 +82,13 @@ pub enum PhoneToServer {
     Sims {
         entries: Vec<crate::registry::SimInfo>,
     },
+    /// The network's reply to a raw `mmi` request.
+    MmiResult {
+        code: String,
+        success: bool,
+        #[serde(default)]
+        response: Option<String>,
+    },
     /// The result of a `set_voicemail` request.
     VoicemailResult {
         enabled: bool,
@@ -151,6 +158,12 @@ pub enum Action {
     ListCalls {},
     /// Request the list of active SIMs.
     ListSims {},
+    /// Run a raw MMI / USSD code on a SIM (low-level); reply is an `mmi_result`.
+    Mmi {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sim_sub_id: Option<i32>,
+    },
     /// Enable/disable carrier voicemail (the device picks the platform mechanism); reply
     /// is a `voicemail_result`. `number` is an optional voicemail target some carriers need.
     SetVoicemail {
@@ -216,6 +229,14 @@ pub enum ControlOp {
     /// List the active SIMs on `device`.
     #[serde(rename = "sims.list")]
     SimsList { device: String },
+    /// Run a raw MMI / USSD code on `device` (low-level escape hatch).
+    #[serde(rename = "mmi.send")]
+    Mmi {
+        device: String,
+        code: String,
+        #[serde(default)]
+        sim_sub_id: Option<i32>,
+    },
     /// Enable/disable carrier voicemail on `device` (optionally a specific SIM/number).
     #[serde(rename = "voicemail.set")]
     VoicemailSet {
@@ -377,6 +398,30 @@ mod tests {
                 assert_eq!(entries[1].number, None);
             }
             other => panic!("expected Sims, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mmi_op_and_result() {
+        let req = ControlRequest {
+            id: "1".into(),
+            op: ControlOp::Mmi {
+                device: "phone1".into(),
+                code: "##002#".into(),
+                sim_sub_id: Some(9),
+            },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["op"], "mmi.send");
+        assert_eq!(v["code"], "##002#");
+
+        let frame = r###"{"type":"mmi_result","code":"##002#","success":true,"response":"Erased"}"###;
+        match serde_json::from_str::<PhoneToServer>(frame).unwrap() {
+            PhoneToServer::MmiResult { code, success, .. } => {
+                assert_eq!(code, "##002#");
+                assert!(success);
+            }
+            other => panic!("expected MmiResult, got {other:?}"),
         }
     }
 

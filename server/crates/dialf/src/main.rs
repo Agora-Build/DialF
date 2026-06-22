@@ -58,6 +58,14 @@ enum Command {
         #[command(subcommand)]
         action: VoicemailAction,
     },
+    /// (advanced) Send a raw MMI/USSD code to a device: dialf mmi <device> <code> [--sim N].
+    Mmi {
+        device: String,
+        code: String,
+        /// SIM subscription id (from `dialf sims`); omit for the default SIM.
+        #[arg(long)]
+        sim: Option<i32>,
+    },
     /// Run a YAML job against a device.
     Run {
         /// Path to the YAML job file.
@@ -246,6 +254,19 @@ async fn main() -> anyhow::Result<()> {
                     device,
                     enabled,
                     number,
+                    sim_sub_id: sim,
+                },
+            )
+            .await?;
+            print_response(&resp);
+            ok_or_err(resp)
+        }
+        Command::Mmi { device, code, sim } => {
+            let resp = call(
+                &socket,
+                ControlOp::Mmi {
+                    device,
+                    code,
                     sim_sub_id: sim,
                 },
             )

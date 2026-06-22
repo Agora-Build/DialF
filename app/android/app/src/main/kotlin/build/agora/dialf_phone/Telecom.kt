@@ -188,16 +188,34 @@ object Telecom {
         simSubId: Int?,
         onResult: (Boolean, String?) -> Unit,
     ) {
-        val code = when {
-            !enabled -> "#004#"
-            number != null -> "**004*$number#"
-            else -> "*004#"
+        if (enabled) {
+            // Re-enable: register a target if given, else reactivate all conditional CF.
+            val code = if (number != null) "**004*$number#" else "*004#"
+            sendMmi(ctx, code, simSubId, onResult)
+            return
         }
-        sendMmi(ctx, code, simSubId, onResult)
+        // Disable: carriers vary, so try the standard erase/deactivate codes one by one and
+        // report each. 004=all conditional CF, 002=all CF, 21=unconditional CF.
+        val codes = listOf("#004#", "##002#", "##21#")
+        val log = StringBuilder()
+        fun tryNext(i: Int, anyOk: Boolean) {
+            if (i >= codes.size) {
+                onResult(anyOk, log.toString().trim())
+                return
+            }
+            val c = codes[i]
+            sendMmi(ctx, c, simSubId) { ok, resp ->
+                log.append(c).append(": ").append(if (ok) "ok" else "failed")
+                if (resp != null) log.append(" — ").append(resp.replace("\n", " "))
+                log.append('\n')
+                tryNext(i + 1, anyOk || ok)
+            }
+        }
+        tryNext(0, false)
     }
 
     /** Low-level: run an MMI/USSD code on a SIM and deliver the network reply via [onResult]. */
-    private fun sendMmi(ctx: Context, code: String, simSubId: Int?, onResult: (Boolean, String?) -> Unit) {
+    fun sendMmi(ctx: Context, code: String, simSubId: Int?, onResult: (Boolean, String?) -> Unit) {
         var tm = ctx.getSystemService(TelephonyManager::class.java)
             ?: return onResult(false, "no telephony service")
         val sub = simSubId ?: SubscriptionManager.getDefaultVoiceSubscriptionId()
