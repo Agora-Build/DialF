@@ -134,8 +134,13 @@ enum SmsAction {
         to: String,
         body: String,
     },
-    /// List recent texts: dialf sms list <device>.
-    List { device: String },
+    /// List recent texts: dialf sms list <device> [--human].
+    List {
+        device: String,
+        /// Pretty, human-readable output (formatted times and numbers).
+        #[arg(long)]
+        human: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -182,8 +187,13 @@ enum CallAction {
         #[arg(long)]
         drop: bool,
     },
-    /// List the recent call log: dialf call list <device>.
-    List { device: String },
+    /// List the recent call log: dialf call list <device> [--human].
+    List {
+        device: String,
+        /// Pretty, human-readable output (formatted times, numbers, durations).
+        #[arg(long)]
+        human: bool,
+    },
 }
 
 #[tokio::main]
@@ -214,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
             ok_or_err(resp)
         }
         Command::Call { action } => {
+            let mut human = false;
             let op = match action {
                 CallAction::Dial { device, number, sim } => ControlOp::CallDial {
                     device,
@@ -223,19 +234,26 @@ async fn main() -> anyhow::Result<()> {
                 CallAction::Pickup { device } => ControlOp::CallPickup { device },
                 CallAction::Hangup { device } => ControlOp::CallHangup { device },
                 CallAction::Reject { device, drop } => ControlOp::CallReject { device, drop },
-                CallAction::List { device } => ControlOp::CallList { device },
+                CallAction::List { device, human: h } => {
+                    human = h;
+                    ControlOp::CallList { device }
+                }
             };
             let resp = call(&socket, op).await?;
-            print_response(&resp);
+            print_list(&resp, human, "calls", human_calls);
             ok_or_err(resp)
         }
         Command::Sms { action } => {
+            let mut human = false;
             let op = match action {
                 SmsAction::Send { device, to, body } => ControlOp::SmsSend { device, to, body },
-                SmsAction::List { device } => ControlOp::SmsList { device },
+                SmsAction::List { device, human: h } => {
+                    human = h;
+                    ControlOp::SmsList { device }
+                }
             };
             let resp = call(&socket, op).await?;
-            print_response(&resp);
+            print_list(&resp, human, "messages", human_sms);
             ok_or_err(resp)
         }
         Command::Sims { device } => {
@@ -450,6 +468,85 @@ async fn call(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
     Ok(resp)
 }
 
+/// Print a list response: human-formatted when `human`, else the raw JSON. `key` is the
+/// array field in the response data; `fmt` renders one row.
+fn print_list(resp: &ControlResponse, human: bool, key: &str, fmt: fn(&serde_json::Value)) {
+    if human && resp.ok != Some(false) {
+        match resp.data.as_ref().and_then(|d| d.get(key)).and_then(|v| v.as_array()) {
+            Some(rows) if !rows.is_empty() => rows.iter().for_each(fmt),
+            _ => println!("(none)"),
+        }
+    } else {
+        print_response(resp);
+    }
+}
+
+fn human_calls(c: &serde_json::Value) {
+    let ts = c.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+    let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let num = c.get("number").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+    let dur = c.get("duration").and_then(|v| v.as_i64()).unwrap_or(0);
+    println!(
+        "{}  {:<9} {:<17} {}",
+        fmt_ts(ts),
+        kind,
+        fmt_number(num),
+        fmt_duration(dur)
+    );
+}
+
+fn human_sms(m: &serde_json::Value) {
+    let ts = m.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+    let dir = m.get("direction").and_then(|v| v.as_str()).unwrap_or("in");
+    let (arrow, who) = if dir == "out" {
+        ("->", m.get("to").and_then(|v| v.as_str()))
+    } else {
+        ("<-", m.get("from").and_then(|v| v.as_str()))
+    };
+    let body = m.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    println!(
+        "{}  {} {:<17} {}",
+        fmt_ts(ts),
+        arrow,
+        fmt_number(who.unwrap_or("(unknown)")),
+        body.replace('\n', " ")
+    );
+}
+
+/// Epoch milliseconds -> local "YYYY-MM-DD HH:MM:SS".
+fn fmt_ts(ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => ms.to_string(),
+    }
+}
+
+/// Seconds -> largest sensible unit: <1m seconds, <1h minutes, <1d hours, else days.
+fn fmt_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Pretty-print NANP numbers (+1 / bare 10-digit); other formats pass through unchanged.
+fn fmt_number(s: &str) -> String {
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    if s.starts_with('+') && digits.len() == 11 && digits.starts_with('1') {
+        format!("+1 {}-{}-{}", &digits[1..4], &digits[4..7], &digits[7..11])
+    } else if !s.starts_with('+') && digits.len() == 10 {
+        format!("{}-{}-{}", &digits[0..3], &digits[3..6], &digits[6..10])
+    } else {
+        s.to_string()
+    }
+}
+
 fn print_response(resp: &ControlResponse) {
     // Errors are surfaced once, by `ok_or_err` returning `Err` (the runtime prints them).
     if resp.ok == Some(false) {
@@ -470,4 +567,29 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "request failed".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fmt_duration, fmt_number};
+
+    #[test]
+    fn duration_units() {
+        assert_eq!(fmt_duration(7), "7s");
+        assert_eq!(fmt_duration(59), "59s");
+        assert_eq!(fmt_duration(60), "1m");
+        assert_eq!(fmt_duration(3599), "59m");
+        assert_eq!(fmt_duration(3600), "1h");
+        assert_eq!(fmt_duration(86399), "23h");
+        assert_eq!(fmt_duration(86400), "1d");
+        assert_eq!(fmt_duration(200000), "2d");
+    }
+
+    #[test]
+    fn number_format() {
+        assert_eq!(fmt_number("+1REDACTED"), "+1 REDACTED");
+        assert_eq!(fmt_number("REDACTED"), "REDACTED");
+        assert_eq!(fmt_number("+REDACTED"), "+REDACTED"); // non-NANP passthrough
+        assert_eq!(fmt_number("123"), "123");
+    }
 }

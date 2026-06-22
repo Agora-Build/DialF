@@ -100,14 +100,14 @@ dialf call dial   <device> <number> [--sim <sub_id>]  # place a call (default SI
 dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
 dialf call reject <device> [--drop]   # decline ringing call (--drop = answer+hangup, no voicemail)
-dialf call list   <device>            # read the call log (JSON)
+dialf call list   <device> [--human]  # read the call log (JSON, or --human for a readable table)
 
 dialf voicemail off <device> [--sim N]              # disable carrier voicemail (stop decline→voicemail)
 dialf voicemail on  <device> [--number <vm#>] [--sim N]  # re-enable (--number needed on e.g. T-Mobile)
 dialf mmi <device> <code> [--sim N]   # (advanced) send a raw MMI/USSD code, get the network reply
 
 dialf sms send <device> <to> <body>   # send a text
-dialf sms list <device>               # read recent texts (JSON)
+dialf sms list <device> [--human]     # read recent texts (JSON, or --human for readable)
 
 dialf run  <job.yaml> [--device <id>] # run a scripted job
 dialf play <file>                     # inject audio out the sound card now

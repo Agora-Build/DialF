@@ -92,12 +92,12 @@ dialf call dial   <device> <number> [--sim N]  place a call (default SIM if --si
 dialf call pickup <device>                      answer the ringing call
 dialf call hangup <device>                      end the active call
 dialf call reject <device> [--drop]             decline ringing call (--drop = answer+hangup, no voicemail)
-dialf call list   <device>                      read the call log (JSON)
+dialf call list   <device> [--human]           read the call log (--human = readable times/numbers/durations)
 dialf voicemail off <device> [--sim N]         disable carrier voicemail (MMI #004#)
 dialf voicemail on  <device> [--number N] [--sim N]  re-enable (*004# or **004*N#)
 dialf mmi <device> <code> [--sim N]            (advanced) send a raw MMI/USSD code
 dialf sms send <device> <to> <body>            send a text
-dialf sms list <device>                         read recent texts (JSON)
+dialf sms list <device> [--human]              read recent texts (--human = readable)
 dialf run  <job.yaml> [--device <id>]          run a YAML job
 dialf play <file>                              inject audio out the sound card
 dialf service install|uninstall|start|stop|status [--user] [--config <path>]
