@@ -347,15 +347,16 @@ async fn call(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
 }
 
 fn print_response(resp: &ControlResponse) {
+    // Errors are surfaced once, by `ok_or_err` returning `Err` (the runtime prints them).
+    if resp.ok == Some(false) {
+        return;
+    }
     if let Some(data) = &resp.data {
         match serde_json::to_string_pretty(data) {
             Ok(s) => println!("{s}"),
             Err(_) => println!("{data:?}"),
         }
-    }
-    if let Some(err) = &resp.error {
-        eprintln!("error: {err}");
-    } else if resp.data.is_none() {
+    } else {
         println!("ok");
     }
 }
