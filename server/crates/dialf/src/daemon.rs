@@ -21,7 +21,7 @@ use crate::jobs::{runner, schema};
 use crate::loopback::{LoopbackJobIo, LOOPBACK_ID};
 use crate::phone::PhoneJobIo;
 use crate::protocol::{Action, ControlOp, ControlRequest, ControlResponse};
-use crate::registry::{CallRecord, DeviceInfo, DeviceKind, Registry, SmsRecord};
+use crate::registry::{CallRecord, DeviceInfo, DeviceKind, Registry, SimInfo, SmsRecord};
 use crate::transport::{control_server, discovery, phone_server};
 
 /// Most recent SMS kept per device.
@@ -38,6 +38,8 @@ pub struct DaemonState {
     pub inbox: Arc<Mutex<HashMap<String, Vec<SmsRecord>>>>,
     /// Most recent call-log snapshot, per device id (replaced on each `call.list`).
     pub call_log: Arc<Mutex<HashMap<String, Vec<CallRecord>>>>,
+    /// Most recent SIM list, per device id (replaced on each `sims.list`).
+    pub sims: Arc<Mutex<HashMap<String, Vec<SimInfo>>>>,
     /// When true, audio steps are simulated (no sound card / ten-vad needed).
     pub dry_audio: bool,
 }
@@ -57,6 +59,14 @@ impl DaemonState {
     /// Replace a device's cached call log with a fresh snapshot from the phone.
     pub fn set_call_log(&self, device_id: &str, entries: Vec<CallRecord>) {
         self.call_log
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), entries);
+    }
+
+    /// Replace a device's cached SIM list with a fresh snapshot from the phone.
+    pub fn set_sims(&self, device_id: &str, entries: Vec<SimInfo>) {
+        self.sims
             .lock()
             .unwrap()
             .insert(device_id.to_string(), entries);
@@ -93,6 +103,7 @@ pub async fn run(config: Config, dry_audio: bool, with_loopback: bool) -> anyhow
         config: Arc::new(config),
         inbox: Arc::new(Mutex::new(HashMap::new())),
         call_log: Arc::new(Mutex::new(HashMap::new())),
+        sims: Arc::new(Mutex::new(HashMap::new())),
         dry_audio,
     };
 
@@ -145,18 +156,28 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let list = state.registry.lock().unwrap().list();
             Ok(ok_data(&id, json!(list)))
         }
-        ControlOp::CallDial { device, number } => {
+        ControlOp::CallDial {
+            device,
+            number,
+            sim_sub_id,
+        } => {
             let dev = resolve_device(state, Some(device))?;
             match device_kind(state, &dev)? {
                 DeviceKind::Loopback => loop_io(state, dev).dial(&number)?,
                 DeviceKind::Phone => {
                     state
                         .hub
-                        .command(&dev, Action::Dial { number: number.clone() })
+                        .command(
+                            &dev,
+                            Action::Dial {
+                                number: number.clone(),
+                                sim_sub_id,
+                            },
+                        )
                         .await?
                 }
             }
-            Ok(ok_data(&id, json!({ "dialed": number })))
+            Ok(ok_data(&id, json!({ "dialed": number, "sim_sub_id": sim_sub_id })))
         }
         ControlOp::CallPickup { device } => {
             let dev = resolve_device(state, Some(device))?;
@@ -229,6 +250,22 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 .cloned()
                 .unwrap_or_default();
             Ok(ok_data(&id, json!({ "calls": calls })))
+        }
+        ControlOp::SimsList { device } => {
+            let dev = resolve_device(state, Some(device))?;
+            // Ask a real phone to report its SIMs, then wait briefly for the `sims` reply.
+            if matches!(device_kind(state, &dev)?, DeviceKind::Phone) {
+                let _ = state.hub.fire(&dev, Action::ListSims {}).await;
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+            let sims = state
+                .sims
+                .lock()
+                .unwrap()
+                .get(&dev)
+                .cloned()
+                .unwrap_or_default();
+            Ok(ok_data(&id, json!({ "sims": sims })))
         }
         ControlOp::AudioPlay { file, device: _ } => {
             let engine = state.engine.clone();

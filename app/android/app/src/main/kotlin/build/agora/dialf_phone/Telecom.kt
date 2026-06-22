@@ -9,6 +9,7 @@ import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 import android.telephony.SmsManager
+import android.telephony.SubscriptionManager
 
 /**
  * Telephony primitives, callable from both the UI (MainActivity) and the headless
@@ -22,9 +23,16 @@ object Telecom {
         return rm?.isRoleHeld(android.app.role.RoleManager.ROLE_DIALER) == true
     }
 
-    fun placeCall(ctx: Context, number: String) {
-        val tm = ctx.getSystemService(TelecomManager::class.java)
-        tm?.placeCall(Uri.fromParts("tel", number, null), Bundle())
+    /** Place a call; if [simSubId] is given, route it to that SIM, else the system default. */
+    fun placeCall(ctx: Context, number: String, simSubId: Int?) {
+        val tm = ctx.getSystemService(TelecomManager::class.java) ?: return
+        val extras = Bundle()
+        if (simSubId != null) {
+            val handle = tm.callCapablePhoneAccounts.firstOrNull { it.id == simSubId.toString() }
+                ?: throw IllegalArgumentException("no SIM with subscription id $simSubId")
+            extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+        }
+        tm.placeCall(Uri.fromParts("tel", number, null), extras)
     }
 
     /** Answer the ringing call (specific id, or the current ringing one). */
@@ -131,6 +139,31 @@ object Telecom {
                     )
                 )
             }
+        }
+        return out
+    }
+
+    /** List the device's active SIMs (slot, subscription id, name, carrier, number). */
+    fun listSims(ctx: Context): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        val sm = ctx.getSystemService(SubscriptionManager::class.java) ?: return out
+        val subs = try {
+            sm.activeSubscriptionInfoList
+        } catch (_: SecurityException) {
+            null
+        } ?: return out
+        val defaultVoice = SubscriptionManager.getDefaultVoiceSubscriptionId()
+        for (s in subs) {
+            out.add(
+                mapOf(
+                    "slot" to s.simSlotIndex,
+                    "sub_id" to s.subscriptionId,
+                    "name" to s.displayName?.toString()?.ifBlank { null },
+                    "carrier" to s.carrierName?.toString()?.ifBlank { null },
+                    "number" to s.number?.ifBlank { null },
+                    "is_default" to (s.subscriptionId == defaultVoice),
+                )
+            )
         }
         return out
     }

@@ -78,6 +78,10 @@ pub enum PhoneToServer {
     Calls {
         entries: Vec<crate::registry::CallRecord>,
     },
+    /// The phone's active SIMs (reply to `list_sims`).
+    Sims {
+        entries: Vec<crate::registry::SimInfo>,
+    },
     /// Acknowledges a [`ServerToPhone::Cmd`].
     Ack { cmd_id: CmdId, ok: bool },
     /// Reports a failure, optionally tied to a command.
@@ -113,8 +117,12 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<CallId>,
     },
-    /// Place an outbound call.
-    Dial { number: String },
+    /// Place an outbound call. `sim_sub_id` omitted ⇒ the phone's default calling SIM.
+    Dial {
+        number: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sim_sub_id: Option<i32>,
+    },
     /// End a call leg. `call_id` omitted ⇒ the phone ends the active call.
     Hangup {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +142,8 @@ pub enum Action {
     },
     /// Request the call log.
     ListCalls {},
+    /// Request the list of active SIMs.
+    ListSims {},
     /// Replace the phone's local auto-pickup number list.
     SetAutopickup { numbers: Vec<String> },
 }
@@ -157,9 +167,14 @@ pub enum ControlOp {
     /// List connected devices.
     #[serde(rename = "devices.list")]
     DevicesList,
-    /// Place a call from `device` to `number`.
+    /// Place a call from `device` to `number` (optionally on a specific SIM).
     #[serde(rename = "call.dial")]
-    CallDial { device: String, number: String },
+    CallDial {
+        device: String,
+        number: String,
+        #[serde(default)]
+        sim_sub_id: Option<i32>,
+    },
     /// Answer the ringing call on `device`.
     #[serde(rename = "call.pickup")]
     CallPickup { device: String },
@@ -182,6 +197,9 @@ pub enum ControlOp {
     /// List the recent call log on `device`.
     #[serde(rename = "call.list")]
     CallList { device: String },
+    /// List the active SIMs on `device`.
+    #[serde(rename = "sims.list")]
+    SimsList { device: String },
     /// Play an audio file out the sound card (optionally tied to a device's call).
     #[serde(rename = "audio.play")]
     AudioPlay {
@@ -294,6 +312,45 @@ mod tests {
                 assert_eq!(entries[1].kind, "missed");
             }
             other => panic!("expected Calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sims_list_op_and_action() {
+        let req = ControlRequest {
+            id: "1".into(),
+            op: ControlOp::SimsList {
+                device: "phone1".into(),
+            },
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["op"], "sims.list");
+
+        let cmd = ServerToPhone::Cmd {
+            cmd_id: "c1".into(),
+            action: Action::ListSims {},
+        };
+        let cv: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert_eq!(cv["action"], "list_sims");
+    }
+
+    #[test]
+    fn sims_frame_parses() {
+        let frame = r#"{"type":"sims","entries":[
+            {"slot":0,"sub_id":1,"name":"SIM 1","carrier":"Carrier","number":"+1555"},
+            {"slot":1,"sub_id":2}
+        ]}"#;
+        let msg: PhoneToServer = serde_json::from_str(frame).unwrap();
+        match msg {
+            PhoneToServer::Sims { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].slot, 0);
+                assert_eq!(entries[0].number.as_deref(), Some("+1555"));
+                assert_eq!(entries[1].sub_id, 2);
+                assert_eq!(entries[1].name, None);
+                assert_eq!(entries[1].number, None);
+            }
+            other => panic!("expected Sims, got {other:?}"),
         }
     }
 

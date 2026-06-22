@@ -51,6 +51,8 @@ enum Command {
         #[command(subcommand)]
         action: SmsAction,
     },
+    /// List the device's active SIMs (slot, number, carrier).
+    Sims { device: String },
     /// Run a YAML job against a device.
     Run {
         /// Path to the YAML job file.
@@ -125,8 +127,14 @@ enum SmsAction {
 
 #[derive(Subcommand)]
 enum CallAction {
-    /// Place a call: dialf call dial <device> <number>.
-    Dial { device: String, number: String },
+    /// Place a call: dialf call dial <device> <number> [--sim <sub_id>].
+    Dial {
+        device: String,
+        number: String,
+        /// SIM subscription id to call on (from `dialf sims`); omit for the default SIM.
+        #[arg(long)]
+        sim: Option<i32>,
+    },
     /// Answer the ringing call: dialf call pickup <device>.
     Pickup { device: String },
     /// Hang up the active call: dialf call hangup <device>.
@@ -166,7 +174,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Call { action } => {
             let op = match action {
-                CallAction::Dial { device, number } => ControlOp::CallDial { device, number },
+                CallAction::Dial { device, number, sim } => ControlOp::CallDial {
+                    device,
+                    number,
+                    sim_sub_id: sim,
+                },
                 CallAction::Pickup { device } => ControlOp::CallPickup { device },
                 CallAction::Hangup { device } => ControlOp::CallHangup { device },
                 CallAction::Reject { device } => ControlOp::CallReject { device },
@@ -182,6 +194,11 @@ async fn main() -> anyhow::Result<()> {
                 SmsAction::List { device } => ControlOp::SmsList { device },
             };
             let resp = call(&socket, op).await?;
+            print_response(&resp);
+            ok_or_err(resp)
+        }
+        Command::Sims { device } => {
+            let resp = call(&socket, ControlOp::SimsList { device }).await?;
             print_response(&resp);
             ok_or_err(resp)
         }

@@ -204,7 +204,11 @@ class ConnForegroundService : Service() {
         val action = msg.optString("action")
         try {
             when (action) {
-                "dial" -> Telecom.placeCall(this, msg.getString("number"))
+                "dial" -> Telecom.placeCall(
+                    this,
+                    msg.getString("number"),
+                    if (msg.has("sim_sub_id") && !msg.isNull("sim_sub_id")) msg.getInt("sim_sub_id") else null,
+                )
                 "pickup" -> Telecom.answer(msg.optString("call_id").ifEmpty { null })
                 "hangup" -> Telecom.hangup(msg.optString("call_id").ifEmpty { null })
                 "reject" -> Telecom.reject(msg.optString("call_id").ifEmpty { null })
@@ -219,6 +223,11 @@ class ConnForegroundService : Service() {
                     val arr = org.json.JSONArray()
                     Telecom.listCallLog(this, 50).forEach { arr.put(JSONObject(it)) }
                     ws?.send(JSONObject().put("type", "calls").put("entries", arr).toString())
+                }
+                "list_sims" -> {
+                    val arr = org.json.JSONArray()
+                    Telecom.listSims(this).forEach { arr.put(JSONObject(it)) }
+                    ws?.send(JSONObject().put("type", "sims").put("entries", arr).toString())
                 }
                 "set_autopickup" -> {} // dialfd owns the picklist
                 else -> {

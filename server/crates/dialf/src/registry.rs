@@ -52,6 +52,27 @@ pub struct CallRecord {
     pub duration: i64,
 }
 
+/// An active SIM / subscription on the device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimInfo {
+    /// Physical SIM slot index (0-based).
+    pub slot: i32,
+    /// Subscription id (use to place calls on this SIM).
+    pub sub_id: i32,
+    /// User-facing SIM name, if set.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Carrier name, if known.
+    #[serde(default)]
+    pub carrier: Option<String>,
+    /// The SIM's own number (often blank — carriers don't always provision it).
+    #[serde(default)]
+    pub number: Option<String>,
+    /// True if this is the system default SIM for outgoing calls.
+    #[serde(default)]
+    pub is_default: bool,
+}
+
 /// A registered device.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {

@@ -88,7 +88,8 @@ dialf daemon --dry-audio           # simulate audio steps (no sound card needed)
 dialf daemon --with-loopback       # also register an in-process simulated phone for testing
 
 dialf devices                      # list connected phones
-dialf call dial   <device> <number>   # place a call
+dialf sims <device>                # list SIMs (slot/number/carrier, default tagged)
+dialf call dial   <device> <number> [--sim <sub_id>]  # place a call (default SIM if omitted)
 dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
 dialf call reject <device>            # decline the ringing call

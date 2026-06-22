@@ -35,7 +35,8 @@ dialf service install --user      # or per-user (login), no sudo
 ```sh
 dialf daemon                       # run dialfd in the foreground
 dialf devices                      # list connected phones
-dialf call dial   <device> <number>   # place a call
+dialf sims <device>                # list SIMs (default tagged)
+dialf call dial   <device> <number> [--sim <sub_id>]   # place a call (default SIM if omitted)
 dialf call pickup <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
 dialf call reject <device>            # decline the ringing call

@@ -83,6 +83,7 @@ impl JobIo for PhoneJobIo {
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {
         self.cmd(Action::Dial {
             number: number.to_string(),
+            sim_sub_id: None, // job-driven dials use the default SIM
         })
     }
 
