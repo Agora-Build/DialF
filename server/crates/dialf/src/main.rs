@@ -535,15 +535,15 @@ fn fmt_duration(secs: i64) -> String {
     }
 }
 
-/// Pretty-print NANP numbers (+1 / bare 10-digit); other formats pass through unchanged.
+/// Format a phone number with high confidence using libphonenumber metadata: valid numbers
+/// are rendered in international format (country code + grouped national number); numbers
+/// that don't parse to a valid number (short codes, alphanumeric senders) pass through.
+/// A bare number with no country code is interpreted as US (NANP).
 fn fmt_number(s: &str) -> String {
-    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    if s.starts_with('+') && digits.len() == 11 && digits.starts_with('1') {
-        format!("+1 {}-{}-{}", &digits[1..4], &digits[4..7], &digits[7..11])
-    } else if !s.starts_with('+') && digits.len() == 10 {
-        format!("{}-{}-{}", &digits[0..3], &digits[3..6], &digits[6..10])
-    } else {
-        s.to_string()
+    use phonenumber::{country, Mode};
+    match phonenumber::parse(Some(country::US), s) {
+        Ok(n) if phonenumber::is_valid(&n) => n.format().mode(Mode::International).to_string(),
+        _ => s.to_string(),
     }
 }
 
@@ -587,9 +587,14 @@ mod tests {
 
     #[test]
     fn number_format() {
-        assert_eq!(fmt_number("+1REDACTED"), "+1 REDACTED");
-        assert_eq!(fmt_number("REDACTED"), "REDACTED");
-        assert_eq!(fmt_number("+REDACTED"), "+REDACTED"); // non-NANP passthrough
+        // Fake but library-valid numbers -> international format (high-confidence).
+        assert!(fmt_number("+12015550123").starts_with("+1 ")); // US
+        assert!(fmt_number("+8613912345678").starts_with("+86 ")); // CN
+        assert!(fmt_number("+525512345678").starts_with("+52 ")); // MX
+        // A bare US number gets the +1 country code added.
+        assert!(fmt_number("2015550123").starts_with("+1 "));
+        // Short codes / non-numbers aren't valid phone numbers -> passed through unchanged.
         assert_eq!(fmt_number("123"), "123");
+        assert_eq!(fmt_number("3002"), "3002");
     }
 }
