@@ -404,7 +404,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let recorder = match (dry, state.config.audio.record_dir.clone()) {
                 (false, Some(dir)) => Some(Recorder::new(
                     dir,
-                    format!("job-{}", now_ms()),
+                    format!("dialf-job-{}", now_ms()),
                     state.config.audio.mix_recording,
                 )?),
                 _ => None,
