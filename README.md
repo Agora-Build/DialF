@@ -199,7 +199,6 @@ Layout:
   - `jobs/` — sample jobs
 - `app/` — Flutter + Kotlin phone app ([`app/README.md`](app/README.md))
 - `samples/` — ready-to-use voice prompts for the sample jobs
-- `corpus/` — (optional) larger audio corpora referenced by custom jobs
 - `docs/` — [`PROTOCOL.md`](docs/PROTOCOL.md), [`HARDWARE.md`](docs/HARDWARE.md)
 - `config.example.yaml` — sample daemon config (sound card + recording)
 

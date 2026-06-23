@@ -7,7 +7,7 @@
 //! - type: call.pickup
 //!   description: answer the inbound call
 //! - type: audio.play
-//!   file: corpus/turn_taking/en/audio/en_question_short1.wav
+//!   file: samples/prompt-en-1.wav
 //!   description: RSP_BASIC-001 question
 //! - type: audio.wait_for_speech
 //!   end_timeout_ms: 45000
@@ -99,7 +99,7 @@ mod tests {
     fn parses_spec_example() {
         let yaml = r#"
 - type: audio.play
-  file: corpus/turn_taking/en/audio/en_question_short1.wav
+  file: samples/prompt-en-1.wav
   description: RSP_BASIC-001 question
 - type: audio.wait_for_speech
   end_timeout_ms: 45000
@@ -109,7 +109,7 @@ mod tests {
         let job = parse(yaml).expect("parse");
         assert_eq!(job.len(), 2);
         match &job[0].kind {
-            StepKind::AudioPlay { file } => assert!(file.ends_with("short1.wav")),
+            StepKind::AudioPlay { file } => assert!(file.ends_with("prompt-en-1.wav")),
             other => panic!("unexpected: {other:?}"),
         }
         match &job[1].kind {

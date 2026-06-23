@@ -9,7 +9,7 @@
 #
 # Audio is bridged through the host's USB sound card (see config audio.*). If
 # `audio.record_dir` is set, the whole call is recorded to <job>-rx/tx/mix.wav.
-# Replace the corpus/*.wav paths with your own prompts (any WAV; resampled to 16k).
+# Replace the samples/*.wav paths with your own prompts (any WAV; resampled to 16k).
 #
 # Step reference:
 #   call.dial {number}        place an outbound call

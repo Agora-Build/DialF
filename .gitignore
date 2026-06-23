@@ -18,6 +18,3 @@ Cargo.lock.orig
 /app/build/
 /app/.flutter-plugins
 /app/.flutter-plugins-dependencies
-
-# Downloaded corpus audio (job assets, not vendored)
-/corpus/**/*.wav
