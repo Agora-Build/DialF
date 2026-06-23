@@ -1,0 +1,20 @@
+# DialF — record-only (no call). Plays a prompt and records both directions through
+# the sound card; nothing is dialed. With audio.record_dir set, writes <job>-rx.wav
+# (sound-card input), <job>-tx.wav (what we play) and <job>-mix.wav.
+#
+#   dialf run jobs/record-only.yaml --device <device>
+#
+# The --device is just the job target; audio steps use the sound card, not the phone.
+# (Run `dialf daemon --with-loopback` and use `--device loopback` for a phone-free run.)
+
+- type: audio.play
+  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav1.wav
+  description: play a prompt out the sound card (recorded as tx)
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 10000
+  silence_duration_ms: 15000   # > end_timeout, so it records the full 10s window
+  description: record the sound-card input for ~10s (rx)
+
+- type: log
+  message: record-only complete

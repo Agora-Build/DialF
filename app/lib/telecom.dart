@@ -34,6 +34,14 @@ class Native {
   static Future<void> setWiredHeadset(bool wired) =>
       _m.invokeMethod('setWiredHeadset', {'wired': wired});
 
+  /// Whether DialF keeps itself running (auto-restart on boot/power/network/swipe).
+  static Future<bool> getKeepRunning() async =>
+      (await _m.invokeMethod<bool>('getKeepRunning')) ?? true;
+
+  /// Keep DialF running as long as possible when true; when false, never auto-(re)launch.
+  static Future<void> setKeepRunning(bool keep) =>
+      _m.invokeMethod('setKeepRunning', {'keep': keep});
+
   static Future<void> requestDialerRole() => _m.invokeMethod('requestDialerRole');
 
   /// Persist the service config (device id / name / shared key / optional host:port).

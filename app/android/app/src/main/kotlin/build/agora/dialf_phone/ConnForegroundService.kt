@@ -8,6 +8,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
@@ -49,6 +51,10 @@ class ConnForegroundService : Service() {
     @Volatile private var ws: WebSocket? = null
     @Volatile private var running = false
     private var heartbeat: Runnable? = null
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
+    private fun keepRunning() =
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("keep_running", true)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,6 +62,17 @@ class ConnForegroundService : Service() {
         super.onCreate()
         nsd = getSystemService(NsdManager::class.java)
         Dialf.serviceListener = { ev -> send(ev) }
+        // Reconnect promptly when the network comes back (e.g. wifi flaps / changes).
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (running && ws == null) main.post { connectOrDiscover() }
+            }
+        }
+        try {
+            cm?.registerDefaultNetworkCallback(cb)
+            netCallback = cb
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -69,7 +86,7 @@ class ConnForegroundService : Service() {
 
     /** App swiped from recents — reschedule a restart so the service keeps running. */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (running) {
+        if (running && keepRunning()) {
             val restart = Intent(applicationContext, ConnForegroundService::class.java)
             val pi = PendingIntent.getForegroundService(
                 this,
@@ -88,6 +105,12 @@ class ConnForegroundService : Service() {
         Dialf.serviceListener = null
         stopDiscovery()
         cancelHeartbeat()
+        netCallback?.let {
+            try {
+                getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it)
+            } catch (_: Exception) {}
+        }
+        netCallback = null
         ws?.close(1000, "service stopping")
         ws = null
         stopForeground(STOP_FOREGROUND_REMOVE)

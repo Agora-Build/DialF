@@ -3,7 +3,9 @@ package build.agora.dialf_phone
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -48,6 +50,18 @@ class MainActivity : FlutterActivity() {
                             DialfInCallService.applyRoute(wired)
                             result.success(null)
                         }
+                        "getKeepRunning" -> result.success(prefs().getBoolean("keep_running", true))
+                        "setKeepRunning" -> {
+                            val keep = call.argument<Boolean>("keep") ?: true
+                            prefs().edit().putBoolean("keep_running", keep).apply()
+                            if (keep) {
+                                requestIgnoreBatteryOptimizations()
+                                if (prefs().getBoolean("enabled", false)) {
+                                    ContextCompat.startForegroundService(this, serviceIntent())
+                                }
+                            }
+                            result.success(null)
+                        }
                         "isDefaultDialer" -> result.success(Telecom.isDefaultDialer(this))
                         "requestDialerRole" -> {
                             requestDialerRole()
@@ -74,13 +88,31 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // Always (re)start the control-plane service when the app opens if it's enabled —
-        // so it keeps running/reconnecting. `--ez start true` force-enables it headlessly.
+        // (Re)start the control-plane service when the app opens if enabled — so it keeps
+        // running/reconnecting. `--ez start true` force-enables it headlessly. Auto-start on
+        // open is gated by "keep running"; the explicit Start button always works.
+        val keep = prefs().getBoolean("keep_running", true)
         val forceStart = intent?.getBooleanExtra("start", false) == true
         if (forceStart) setEnabled(true)
-        if (forceStart || prefs().getBoolean("enabled", false)) {
+        if (forceStart || (prefs().getBoolean("enabled", false) && keep)) {
             ContextCompat.startForegroundService(this, serviceIntent())
         }
+        if (keep && prefs().getBoolean("enabled", false)) requestIgnoreBatteryOptimizations()
+    }
+
+    /** Ask the OS to exempt us from battery optimization, so the service isn't killed and
+     *  background (re)starts from broadcasts are allowed. No-op if already exempt. */
+    private fun requestIgnoreBatteryOptimizations() {
+        val pm = getSystemService(PowerManager::class.java) ?: return
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                )
+            )
+        } catch (_: Exception) {}
     }
 
     private fun serviceIntent() = Intent(this, ConnForegroundService::class.java)

@@ -11,6 +11,7 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val prefs = context.getSharedPreferences(ConnForegroundService.PREFS, Context.MODE_PRIVATE)
         if (!prefs.getBoolean("enabled", false)) return
+        if (!prefs.getBoolean("keep_running", true)) return
         ContextCompat.startForegroundService(
             context,
             Intent(context, ConnForegroundService::class.java),

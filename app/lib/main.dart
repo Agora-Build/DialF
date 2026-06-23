@@ -37,6 +37,7 @@ class _HomePageState extends State<HomePage> {
 
   bool _isDefaultDialer = false;
   bool _wiredHeadset = true;
+  bool _keepRunning = true;
   bool _connected = false;
   String? _server;
   bool _running = false;
@@ -57,6 +58,7 @@ class _HomePageState extends State<HomePage> {
     if (_name.text.isEmpty) _name.text = defaults['name'] ?? 'DialF Phone';
     _isDefaultDialer = await Native.isDefaultDialer();
     _wiredHeadset = await Native.getWiredHeadset();
+    _keepRunning = await Native.getKeepRunning();
     if (mounted) setState(() {});
   }
 
@@ -128,6 +130,8 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 12),
           _audioCard(),
           const SizedBox(height: 12),
+          _keepRunningCard(),
+          const SizedBox(height: 12),
           _configCard(),
           const SizedBox(height: 12),
           _buttons(),
@@ -166,6 +170,24 @@ class _HomePageState extends State<HomePage> {
         onChanged: (v) async {
           await Native.setWiredHeadset(v);
           setState(() => _wiredHeadset = v);
+        },
+      ),
+    );
+  }
+
+  Widget _keepRunningCard() {
+    return Card(
+      child: SwitchListTile(
+        secondary: Icon(
+          _keepRunning ? Icons.lock_clock : Icons.timer_off,
+          color: _keepRunning ? Colors.green : Colors.grey,
+        ),
+        title: const Text('Keep app running'),
+        subtitle: const Text('Auto-restart on boot / power / network / swipe (default)'),
+        value: _keepRunning,
+        onChanged: (v) async {
+          await Native.setKeepRunning(v);
+          setState(() => _keepRunning = v);
         },
       ),
     );

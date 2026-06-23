@@ -1,0 +1,24 @@
+# Example dialfd config — copy to ~/.config/dialf/config.yaml and edit.
+# Every field has a default; set only what you need. See docs/HARDWARE.md for the
+# sound-card bridge wiring and the macOS microphone/LaunchAgent setup.
+
+# shared_key: change-me            # must match the phone app's shared key
+# ws_bind: "0.0.0.0:8765"          # phone WebSocket server bind
+# instance_name: dialfd            # mDNS instance name
+# autopickup: ["+15551234"]        # numbers auto-answered when they ring
+control_socket: /tmp/dialfd.sock    # dialf <-> dialfd control socket (pin it so all
+                                    # contexts agree, e.g. ssh vs GUI session)
+
+audio:
+  sample_rate: 48000                # card native rate (resampled to 16k for VAD/recording)
+  channels: 1
+  capture_device: "MiniFuse 2"      # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0"
+  playback_device: "MiniFuse 2"
+  record_dir: /Users/you/dialf/recordings   # set to enable rx/tx/mix recording
+  mix_recording: true
+
+  # Optional: pin the audio tool by full path + explicit device so a stripped PATH
+  # can't fall back to a default-output tool (afplay). `gain N` adds N dB to the
+  # captured far-end audio in software (drop it if the card's input gain is enough).
+  capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "gain", "20"]
+  playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
