@@ -84,7 +84,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _logLine(String m) {
-    _log.insert(0, m);
+    final n = DateTime.now();
+    String two(int x) => x.toString().padLeft(2, '0');
+    final ts = '${two(n.hour)}:${two(n.minute)}:${two(n.second)}';
+    _log.insert(0, '$ts  $m');
     if (_log.length > 50) _log.removeLast();
   }
 
