@@ -119,7 +119,13 @@ Each recorded job writes (paths returned by `dialf run`):
 
 - `<job>-rx.wav` — captured from the card (far end)
 - `<job>-tx.wav` — audio injected into the card (our prompts)
-- `<job>-mix.wav` — both, time-aligned (when `mix_recording: true`)
+- `<job>-mix.wav` — both summed (when `mix_recording: true`)
+
+Recording is **full-duplex on a single clock**: rx is captured continuously for the whole
+job — including while a prompt plays and across `wait`/dial gaps — and tx carries each prompt
+at its true offset (silence elsewhere). The master clock is the rx sample count (the card's
+own clock), so the three files are the **same length and sample-aligned**: index *i* is the
+same instant in rx, tx, and mix.
 
 ```sh
 dialf run server/jobs/live-call.yaml   --device <id>   # call + record
@@ -127,3 +133,27 @@ dialf run server/jobs/record-only.yaml --device <id>   # record only, no dial
 ```
 
 Tip: serve the WAVs to listen from another machine — `atem serv files <dir> --background`.
+
+### Measuring latency
+
+Because rx/tx/mix share one timeline you can read latency straight off the files:
+
+- **Round-trip / echo latency** — cross-correlate `tx` against `rx` (both 16 kHz mono). The
+  lag at the correlation peak is how long our injected audio takes to come back through the
+  bridge (host → card → phone mic → cellular → earpiece → card). Example with Python/NumPy:
+
+  ```python
+  import numpy as np, soundfile as sf
+  tx, _ = sf.read("job-tx.wav"); rx, _ = sf.read("job-rx.wav")
+  n = min(len(tx), len(rx))                      # equal length already
+  c = np.correlate(rx[:n], tx[:n], "full")
+  lag = c.argmax() - (n - 1)                     # samples; /16000 = seconds
+  print(lag / 16000 * 1000, "ms")
+  ```
+
+- **Response-gap latency** — on the shared clock, measure (onset of the reply in `rx`) −
+  (end of the prompt in `tx`).
+
+Caveat: the round-trip figure includes a small **fixed** offset from the playback tool's
+spawn + buffering (we can't observe exactly when the card emits sound). It's a constant per
+host/tool — characterize it once (e.g. a hard loopback cable) and subtract.

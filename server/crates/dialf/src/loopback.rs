@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::audio::engine::AudioEngine;
-use crate::audio::record::{RecordOutput, Recorder};
+use crate::audio::record::{DuplexSession, RecordOutput};
 use crate::audio::vad::{EndReason, TurnConfig};
 use crate::jobs::runner::JobIo;
 use crate::protocol::{CallState, Direction};
@@ -29,8 +29,8 @@ pub struct LoopbackJobIo {
     device_id: String,
     /// When true, audio steps are logged and skipped instead of touching the card.
     dry_audio: bool,
-    /// When set, audio is recorded (rx/tx legs + optional mix).
-    recorder: Option<Recorder>,
+    /// When set, audio is recorded full-duplex (rx/tx legs + optional mix).
+    session: Option<DuplexSession>,
 }
 
 impl LoopbackJobIo {
@@ -40,21 +40,21 @@ impl LoopbackJobIo {
         registry: Arc<Mutex<Registry>>,
         device_id: impl Into<String>,
         dry_audio: bool,
-        recorder: Option<Recorder>,
+        session: Option<DuplexSession>,
     ) -> Self {
         Self {
             engine,
             registry,
             device_id: device_id.into(),
             dry_audio,
-            recorder,
+            session,
         }
     }
 
     /// Finalize any recording, returning the written file paths.
     pub fn finish(self) -> anyhow::Result<Option<RecordOutput>> {
-        match self.recorder {
-            Some(r) => Ok(Some(r.finish()?)),
+        match self.session {
+            Some(s) => Ok(Some(s.finish()?)),
             None => Ok(None),
         }
     }
@@ -85,7 +85,7 @@ impl JobIo for LoopbackJobIo {
             tracing::info!(file, "audio.play (dry): skipped");
             return Ok(());
         }
-        self.engine.play_file(Path::new(file), self.recorder.as_mut())
+        self.engine.play_file(Path::new(file), self.session.as_mut())
     }
 
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason> {
@@ -97,7 +97,7 @@ impl JobIo for LoopbackJobIo {
             );
             return Ok(EndReason::Silence);
         }
-        self.engine.wait_for_speech(turn, self.recorder.as_mut())
+        self.engine.wait_for_speech(turn, self.session.as_mut())
     }
 
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {

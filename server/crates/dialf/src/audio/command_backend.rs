@@ -6,14 +6,18 @@
 //! Synchronous on purpose — the daemon drives these from `tokio::task::spawn_blocking`.
 
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use super::backend::CaptureSource;
 use super::tool_detect::{CaptureCommand, PlaybackCommand};
 
 /// A capture source backed by an external recording tool.
 pub struct CommandCaptureSource {
-    child: Child,
+    /// Shared so the source can be stopped from another thread (kill -> stdout EOF).
+    child: Arc<Mutex<Child>>,
     stdout: ChildStdout,
     sample_rate: u32,
     /// Carries a leftover odd byte between reads (PCM frames are 2 bytes).
@@ -28,22 +32,39 @@ impl CommandCaptureSource {
         if argv.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty capture argv"));
         }
-        let mut child = Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        command
             .args(&argv[1..])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        // Best-effort: raise the capture tool's priority so it isn't starved on a loaded
+        // host. Negative nice needs privilege (root / CAP_SYS_NICE); ignored otherwise.
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                // SAFETY: setpriority is async-signal-safe, valid in a post-fork child.
+                libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "capture: no stdout"))?;
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stdout,
             sample_rate,
             leftover: None,
             byte_buf: Vec::new(),
         })
+    }
+
+    /// A handle that can kill the capture child from another thread. Killing the child
+    /// makes the blocking stdout `read` return EOF, so a background reader loop exits.
+    pub fn kill_handle(&self) -> Arc<Mutex<Child>> {
+        self.child.clone()
     }
 }
 
@@ -84,8 +105,10 @@ impl CaptureSource for CommandCaptureSource {
 
 impl Drop for CommandCaptureSource {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 

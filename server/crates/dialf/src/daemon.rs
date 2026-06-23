@@ -13,7 +13,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use crate::audio::engine::AudioEngine;
-use crate::audio::record::{RecordOutput, Recorder};
+use crate::audio::record::RecordOutput;
 use crate::config::Config;
 use crate::hub::Hub;
 use crate::jobs::runner::JobIo as _;
@@ -412,23 +412,25 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let kind = device_kind(state, &device_id)?;
             let engine = state.engine.clone();
             let dry = state.dry_audio;
-
-            // Record the call when configured (real audio only).
-            let recorder = match (dry, state.config.audio.record_dir.clone()) {
-                (false, Some(dir)) => Some(Recorder::new(
-                    dir,
-                    format!("dialf-job-{}", now_ms()),
-                    state.config.audio.mix_recording,
-                )?),
-                _ => None,
-            };
+            // Recording config; the duplex session is started inside the blocking task so
+            // the capture thread begins recording rx before the first step runs.
+            let record_dir = state.config.audio.record_dir.clone();
+            let mix_recording = state.config.audio.mix_recording;
 
             type JobResult = anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)>;
             let (outcomes, recording) = match kind {
                 DeviceKind::Loopback => {
                     let registry = state.registry.clone();
                     tokio::task::spawn_blocking(move || -> JobResult {
-                        let mut io = LoopbackJobIo::new(engine, registry, device_id, dry, recorder);
+                        let session = match (dry, record_dir) {
+                            (false, Some(dir)) => Some(engine.start_duplex(
+                                dir,
+                                format!("dialf-job-{}", now_ms()),
+                                mix_recording,
+                            )?),
+                            _ => None,
+                        };
+                        let mut io = LoopbackJobIo::new(engine, registry, device_id, dry, session);
                         let outcomes = runner::run_job(&job, &mut io)?;
                         Ok((outcomes, io.finish()?))
                     })
@@ -438,7 +440,15 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                     let hub = state.hub.clone();
                     let rt = tokio::runtime::Handle::current();
                     tokio::task::spawn_blocking(move || -> JobResult {
-                        let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry, recorder);
+                        let session = match (dry, record_dir) {
+                            (false, Some(dir)) => Some(engine.start_duplex(
+                                dir,
+                                format!("dialf-job-{}", now_ms()),
+                                mix_recording,
+                            )?),
+                            _ => None,
+                        };
+                        let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry, session);
                         let outcomes = runner::run_job(&job, &mut io)?;
                         Ok((outcomes, io.finish()?))
                     })

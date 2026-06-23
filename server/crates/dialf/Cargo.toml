@@ -30,3 +30,5 @@ hound = { workspace = true }
 which = { workspace = true }
 chrono = "0.4"
 phonenumber = "0.3"
+thread-priority = "1"
+libc = "0.2"

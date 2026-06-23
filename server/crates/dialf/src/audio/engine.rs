@@ -6,13 +6,13 @@
 //!
 //! All methods are synchronous; the daemon calls them on a blocking task.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::AudioConfig;
 
-use super::backend::{CaptureSource, WavFileSource};
+use super::backend::{CaptureSource, WavFileSink, WavFileSource};
 use super::command_backend::{self, CommandCaptureSource};
-use super::record::Recorder;
+use super::record::{DuplexSession, VadFrameSource, RECORD_RATE};
 use super::resample::Resampler16k;
 use super::tool_detect::{self, AudioParams};
 use super::vad::{EndReason, Segmenter, TurnConfig, TurnEvent};
@@ -44,11 +44,12 @@ impl AudioEngine {
         }
     }
 
-    /// Play an audio file out the sound card (blocking until done). If `rec` is set, the
-    /// file's audio (resampled to 16 kHz) is also written to the tx leg.
-    pub fn play_file(&self, file: &Path, rec: Option<&mut Recorder>) -> anyhow::Result<()> {
-        if let Some(r) = rec {
-            tee_tx(r, file)?;
+    /// Play an audio file out the sound card (blocking until done). If `sess` is set, the
+    /// file's audio (resampled to 16 kHz) is also written to the tx leg, anchored at the
+    /// current rx clock so it aligns with what the continuous capture records.
+    pub fn play_file(&self, file: &Path, sess: Option<&mut DuplexSession>) -> anyhow::Result<()> {
+        if let Some(s) = sess {
+            tee_tx(s, file)?;
         }
         let file_str = file.to_string_lossy().to_string();
         let cmd = tool_detect::resolve_playback_file(
@@ -70,40 +71,84 @@ impl AudioEngine {
         Ok(src)
     }
 
-    /// Capture from the card until the current speaking turn ends. If `rec` is set, the
-    /// captured audio (16 kHz) is also written to the rx leg.
+    /// Start a full-duplex recording session: spawn the capture tool, create the rx/tx
+    /// sinks, and begin recording rx continuously. The bg thread is stopped (capture child
+    /// killed) on [`DuplexSession::finish`].
+    pub fn start_duplex(
+        &self,
+        dir: PathBuf,
+        session_name: String,
+        mix: bool,
+    ) -> anyhow::Result<DuplexSession> {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| anyhow::anyhow!("create record dir {}: {e}", dir.display()))?;
+        let source = self.open_capture()?;
+        let killer = source.kill_handle();
+        let unblock = Box::new(move || {
+            if let Ok(mut child) = killer.lock() {
+                let _ = child.kill();
+            }
+        });
+        let rx_path = dir.join(format!("{session_name}-rx.wav"));
+        let tx_path = dir.join(format!("{session_name}-tx.wav"));
+        let rx = WavFileSink::create(&rx_path, RECORD_RATE)?;
+        let tx = WavFileSink::create(&tx_path, RECORD_RATE)?;
+        DuplexSession::start(
+            source, rx, tx, rx_path, tx_path, dir, session_name, mix, unblock,
+        )
+    }
+
+    /// Capture from the card until the current speaking turn ends. With a recording session
+    /// the turn is driven from the continuous capture (rx is already being written by the
+    /// session's bg thread); without one, a one-shot capture is opened just for the VAD.
     pub fn wait_for_speech(
         &self,
         turn: TurnConfig,
-        rec: Option<&mut Recorder>,
+        sess: Option<&mut DuplexSession>,
     ) -> anyhow::Result<EndReason> {
-        let mut src = self.open_capture()?;
-        run_wait_for_speech(&mut src, turn, rec)
+        match sess {
+            Some(s) => {
+                s.vad_begin();
+                let reason = {
+                    let mut src = VadFrameSource::new(s.vad_receiver_mut());
+                    run_wait_for_speech(&mut src, turn)
+                };
+                s.vad_end();
+                reason
+            }
+            None => {
+                let mut src = self.open_capture()?;
+                run_wait_for_speech(&mut src, turn)
+            }
+        }
     }
 }
 
-/// Read `file`, resample to 16 kHz, and append it to the recorder's tx leg.
-fn tee_tx(rec: &mut Recorder, file: &Path) -> anyhow::Result<()> {
+/// Read `file`, resample to 16 kHz, and append it to the session's tx leg as one block
+/// anchored at the current rx clock.
+fn tee_tx(sess: &mut DuplexSession, file: &Path) -> anyhow::Result<()> {
     let mut src = WavFileSource::open(file)?;
     let mut rs = Resampler16k::new(src.sample_rate());
     let mut buf = vec![0i16; 4096];
+    let mut prompt: Vec<i16> = Vec::new();
     loop {
         let n = src.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        let out = rs.process(&buf[..n]);
-        rec.push_tx(&out)?;
+        prompt.extend(rs.process(&buf[..n]));
     }
+    sess.push_tx(&prompt)?;
     Ok(())
 }
 
 /// Drive a [`Segmenter`] from any capture source: resample to 16 kHz, frame into hops,
-/// and return why the turn ended. Generic so tests can feed a WAV file source.
+/// and return why the turn ended. Generic so tests can feed a WAV file source and the
+/// live path can feed the duplex session's frames. Recording (rx) is handled separately by
+/// the [`DuplexSession`]; this only does VAD.
 pub fn run_wait_for_speech<S: CaptureSource>(
     src: &mut S,
     turn: TurnConfig,
-    mut rec: Option<&mut Recorder>,
 ) -> anyhow::Result<EndReason> {
     let mut seg = Segmenter::new(turn)?;
     let hop = seg.hop_size();
@@ -128,9 +173,6 @@ pub fn run_wait_for_speech<S: CaptureSource>(
         }
 
         let out = resampler.process(&read_buf[..n]);
-        if let Some(r) = rec.as_deref_mut() {
-            r.push_rx(&out)?;
-        }
         pending.extend_from_slice(&out);
 
         // Consume whole hops.

@@ -203,6 +203,11 @@ by `dialf run`):
 - `<job>-tx.wav` — audio injected into the card (our prompts)
 - `<job>-mix.wav` — the two summed (when `mix_recording: true`)
 
+Recording is **full-duplex on a single clock** — rx records continuously for the whole job
+(including during playback and `wait` gaps), tx carries each prompt at its true offset, and
+all three files are the same length and sample-aligned. That makes them usable for **latency
+measurement** (cross-correlate tx vs rx); see [`docs/HARDWARE.md`](docs/HARDWARE.md).
+
 List ALSA cards with `arecord -l` (Linux). On macOS, capturing needs Microphone permission
 for the host app; Linux/ALSA has no such gate.
 
