@@ -25,26 +25,34 @@ microphone/LaunchAgent setup, and [`app/README.md`](app/README.md) for the phone
 
 ## Install
 
-Prebuilt binaries (macOS arm64/x86_64, Linux x86_64/aarch64) ship on GitHub Releases. The
-installers fetch the binary (onnxruntime + ten-vad model bundled) and can register `dialfd`
-as a background service.
+Prebuilt binaries (macOS arm64/x86_64, Linux x86_64/aarch64) ship on GitHub Releases. Both
+installers just install the `dialf` CLI (onnxruntime + ten-vad model bundled) — they don't
+start a service; you launch `dialfd` separately.
 
 ```sh
-# curl — installs the binary and starts dialfd as a boot service (prompts for sudo)
-curl -fsSL https://dl.agora.build/dialf/install.sh | bash
-
-# npm — installs the CLI; then enable the service
-npm install -g @agora-build/dialf
-sudo dialf service install            # boot service (launchd/systemd)
-dialf service install --user          # or, no sudo, runs at login
+curl -fsSL https://dl.agora.build/dialf/install.sh | bash   # or: npm i -g @agora-build/dialf
 ```
 
-Manage the service (launchd LaunchDaemon on macOS / systemd unit on Linux):
+Then launch the daemon — pick one:
 
 ```sh
-dialf service install [--user] [--config <path>]   # system scope needs sudo
+dialf daemon                  # run in the foreground
+sudo dialf service install    # system service at boot (launchd/systemd)
+dialf service install --user  # per-user service at login (no sudo)
+```
+
+**macOS + audio recording:** a system (root) service can't access the microphone, so for
+recording on macOS run the **user** service: `dialf service install --user` (details in
+[`docs/HARDWARE.md`](docs/HARDWARE.md)). On Linux a system service records fine (no TCC gate).
+
+Manage the service (launchd on macOS / systemd on Linux):
+
+```sh
 dialf service status|stop|start|uninstall [--user]
 ```
+
+(The curl installer is install-only by default; `DIALF_SERVICE=system|user` makes it also
+install that service.)
 
 ### Build from source
 

@@ -55,6 +55,6 @@ download(url, tgz, (err) => {
     return bail('extract failed: ' + e.message);
   }
   console.log('dialf: installed ' + target);
-  console.log('dialf: to run dialfd at boot:  sudo dialf service install');
-  console.log('dialf:           or per-user:  dialf service install --user');
+  console.log('dialf: launch dialfd:  dialf daemon  |  sudo dialf service install  (boot)');
+  console.log('dialf:   per-user (login; required on macOS for audio recording):  dialf service install --user');
 });

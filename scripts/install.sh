@@ -3,18 +3,17 @@
 #
 #   curl -fsSL https://dl.agora.build/dialf/install.sh | bash
 #
-# Downloads the prebuilt `dialf` binary (with onnxruntime + ten-vad model bundled) for
-# this OS/arch,
-# installs it under /opt/dialf with a symlink in /usr/local/bin, and (unless
-# DIALF_NO_SERVICE=1) installs dialfd as a boot service via `dialf service install`.
+# Downloads the prebuilt `dialf` binary (with onnxruntime + ten-vad model bundled) for this
+# OS/arch and installs it under /opt/dialf with a symlink in /usr/local/bin. It does NOT
+# start a service by default (like `npm i -g`) — it prints how to launch dialfd afterwards.
 #
 # Env overrides:
 #   DIALF_REPO       GitHub owner/repo            (default Agora-Build/DialF)
 #   DIALF_VERSION    release tag or "latest"      (default latest)
 #   DIALF_PREFIX     install dir                  (default /opt/dialf)
 #   DIALF_BINDIR     symlink dir                  (default /usr/local/bin)
-#   DIALF_NO_SERVICE 1 = skip `dialf service install`
-#   DIALF_USER_SERVICE 1 = install as a per-user (login) service instead of system
+#   DIALF_SERVICE    also install a service: "system" (boot, sudo) or "user" (login).
+#                    Default: none (install only). On macOS use "user" for audio recording.
 set -euo pipefail
 
 REPO="${DIALF_REPO:-Agora-Build/DialF}"
@@ -84,17 +83,32 @@ $SUDO chmod +x "$PREFIX/dialf"
 $SUDO ln -sf "$PREFIX/dialf" "$BINDIR/dialf"
 say "installed: $($BINDIR/dialf --version 2>/dev/null || echo dialf)"
 
-# --- service ---
-if [ "${DIALF_NO_SERVICE:-0}" = "1" ]; then
-  say "skipping service install (DIALF_NO_SERVICE=1). Start later with: dialf service install"
-else
-  if [ "${DIALF_USER_SERVICE:-0}" = "1" ]; then
-    say "installing dialfd as a per-user (login) service"
-    "$BINDIR/dialf" service install --user
-  else
+# --- optionally install a service (default: install only, like `npm i -g`) ---
+case "${DIALF_SERVICE:-none}" in
+  system)
     say "installing dialfd as a system (boot) service"
-    $SUDO "$BINDIR/dialf" service install
-  fi
-fi
+    $SUDO "$BINDIR/dialf" service install ;;
+  user)
+    say "installing dialfd as a per-user (login) service"
+    "$BINDIR/dialf" service install --user ;;
+  none|"") : ;;
+  *) die "DIALF_SERVICE must be 'system', 'user', or unset" ;;
+esac
 
-say "done. dialfd is running. Try: dialf devices"
+if [ "${DIALF_SERVICE:-none}" = "none" ] || [ -z "${DIALF_SERVICE:-}" ]; then
+  cat <<'MSG'
+
+dialf is installed. Next, launch the dialfd daemon — pick one:
+
+  dialf daemon                  # run in the foreground
+  sudo dialf service install    # system service at boot (launchd/systemd)
+  dialf service install --user  # per-user service at login (no sudo)
+
+macOS + audio recording: a system (root) service cannot access the microphone, so
+for recording on macOS run the USER service:
+
+  dialf service install --user
+
+Then: dialf devices
+MSG
+fi
