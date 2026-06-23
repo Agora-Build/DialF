@@ -30,7 +30,7 @@ installers just install the `dialf` CLI (onnxruntime + ten-vad model bundled) â€
 start a service; you launch `dialfd` separately.
 
 ```sh
-curl -fsSL https://dl.agora.build/dialf/install.sh | bash   # or: npm i -g @agora-build/dialf
+npm install -g @agora-build/dialf   # or: curl -fsSL https://dl.agora.build/dialf/install.sh | bash
 ```
 
 Then launch the daemon â€” pick one:

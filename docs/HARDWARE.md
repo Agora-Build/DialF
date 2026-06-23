@@ -9,7 +9,7 @@ and — the fiddly part — running `dialfd` so it can actually capture the mic 
 
 1. **Install the CLI** (host = macOS or Linux):
    ```sh
-   curl -fsSL https://dl.agora.build/dialf/install.sh | bash   # or: npm i -g @agora-build/dialf
+   npm install -g @agora-build/dialf   # or: curl -fsSL https://dl.agora.build/dialf/install.sh | bash
    ```
 2. **Wire the bridge** (diagram below) and set the card's input gain.
 3. **Configure** `~/.config/dialf/config.yaml` — `audio.capture_device`/`playback_device` =
