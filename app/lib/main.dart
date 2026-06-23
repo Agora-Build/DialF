@@ -36,6 +36,7 @@ class _HomePageState extends State<HomePage> {
   final _addr = TextEditingController();
 
   bool _isDefaultDialer = false;
+  bool _wiredHeadset = true;
   bool _connected = false;
   String? _server;
   bool _running = false;
@@ -55,6 +56,7 @@ class _HomePageState extends State<HomePage> {
     if (_id.text.isEmpty) _id.text = defaults['device_id'] ?? 'phone1';
     if (_name.text.isEmpty) _name.text = defaults['name'] ?? 'DialF Phone';
     _isDefaultDialer = await Native.isDefaultDialer();
+    _wiredHeadset = await Native.getWiredHeadset();
     if (mounted) setState(() {});
   }
 
@@ -124,6 +126,8 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 12),
           _dialerCard(),
           const SizedBox(height: 12),
+          _audioCard(),
+          const SizedBox(height: 12),
           _configCard(),
           const SizedBox(height: 12),
           _buttons(),
@@ -145,6 +149,24 @@ class _HomePageState extends State<HomePage> {
         leading: Icon(Icons.circle, color: color, size: 16),
         title: Text(label),
         subtitle: const Text('control plane runs in a background service (works locked)'),
+      ),
+    );
+  }
+
+  Widget _audioCard() {
+    return Card(
+      child: SwitchListTile(
+        secondary: Icon(
+          _wiredHeadset ? Icons.headset_mic : Icons.phone_in_talk,
+          color: _wiredHeadset ? Colors.green : Colors.grey,
+        ),
+        title: const Text('Route calls to wired headset'),
+        subtitle: const Text('Use the USB sound-card bridge for call audio (default)'),
+        value: _wiredHeadset,
+        onChanged: (v) async {
+          await Native.setWiredHeadset(v);
+          setState(() => _wiredHeadset = v);
+        },
       ),
     );
   }

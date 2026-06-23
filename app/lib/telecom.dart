@@ -26,6 +26,14 @@ class Native {
   static Future<bool> isDefaultDialer() async =>
       (await _m.invokeMethod<bool>('isDefaultDialer')) ?? false;
 
+  /// Whether calls are routed to the wired headset (the USB sound-card bridge).
+  static Future<bool> getWiredHeadset() async =>
+      (await _m.invokeMethod<bool>('getWiredHeadset')) ?? true;
+
+  /// Route calls to the wired headset (bridge) when true, else the earpiece.
+  static Future<void> setWiredHeadset(bool wired) =>
+      _m.invokeMethod('setWiredHeadset', {'wired': wired});
+
   static Future<void> requestDialerRole() => _m.invokeMethod('requestDialerRole');
 
   /// Persist the service config (device id / name / shared key / optional host:port).

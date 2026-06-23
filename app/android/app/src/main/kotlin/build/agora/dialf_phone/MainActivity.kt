@@ -41,6 +41,13 @@ class MainActivity : FlutterActivity() {
                 try {
                     when (call.method) {
                         "deviceDefaults" -> result.success(deviceDefaults())
+                        "getWiredHeadset" -> result.success(prefs().getBoolean("wired_headset", true))
+                        "setWiredHeadset" -> {
+                            val wired = call.argument<Boolean>("wired") ?: true
+                            prefs().edit().putBoolean("wired_headset", wired).apply()
+                            DialfInCallService.applyRoute(wired)
+                            result.success(null)
+                        }
                         "isDefaultDialer" -> result.success(Telecom.isDefaultDialer(this))
                         "requestDialerRole" -> {
                             requestDialerRole()
