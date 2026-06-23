@@ -52,6 +52,7 @@ class ConnForegroundService : Service() {
     @Volatile private var running = false
     private var heartbeat: Runnable? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var statusText = "Starting…"
 
     private fun keepRunning() =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("keep_running", true)
@@ -76,7 +77,9 @@ class ConnForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, notification("Starting…"))
+        // Re-show the *current* status (a re-start while already connected must not reset
+        // the notification to "Starting…").
+        startForeground(NOTIF_ID, notification(statusText))
         if (!running) {
             running = true
             connectOrDiscover()
@@ -336,6 +339,7 @@ class ConnForegroundService : Service() {
     }
 
     private fun notify(text: String) {
+        statusText = text
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification(text))
     }
 }
