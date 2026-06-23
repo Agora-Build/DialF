@@ -15,7 +15,7 @@
   description: allow time to answer
 
 - type: audio.play
-  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav1.wav
+  file: samples/prompt-en-1.wav
   description: prompt 1
 
 - type: audio.wait_for_speech
@@ -24,7 +24,7 @@
   description: listen to the reply (recorded as rx)
 
 - type: audio.play
-  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav2.wav
+  file: samples/prompt-en-2.wav
   description: prompt 2
 
 - type: audio.wait_for_speech

@@ -8,7 +8,7 @@
 # (Run `dialf daemon --with-loopback` and use `--device loopback` for a phone-free run.)
 
 - type: audio.play
-  file: corpus/turn_taking/en/audio/NonsemanticCoughLaughterwav1.wav
+  file: samples/prompt-en-1.wav
   description: play a prompt out the sound card (recorded as tx)
 
 - type: audio.wait_for_speech

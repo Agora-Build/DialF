@@ -128,7 +128,7 @@ A job is a list of steps run in order. See `server/jobs/sample.yaml` (two-turn e
 - type: call.dial            # also: call.pickup, call.hangup
   number: "5551234"
 - type: audio.play
-  file: corpus/turn_taking/en/audio/en_question_short1.wav
+  file: samples/prompt-en-1.wav
 - type: audio.wait_for_speech
   end_timeout_ms: 45000      # hard cap waiting for the turn to end
   silence_duration_ms: 3000  # trailing silence that marks end-of-turn
@@ -198,7 +198,8 @@ Layout:
   - `crates/ten-vad-sys/` — FFI bindings to ten-vad (built from source)
   - `jobs/` — sample jobs
 - `app/` — Flutter + Kotlin phone app ([`app/README.md`](app/README.md))
-- `corpus/` — audio assets referenced by jobs
+- `samples/` — ready-to-use voice prompts for the sample jobs
+- `corpus/` — (optional) larger audio corpora referenced by custom jobs
 - `docs/` — [`PROTOCOL.md`](docs/PROTOCOL.md), [`HARDWARE.md`](docs/HARDWARE.md)
 - `config.example.yaml` — sample daemon config (sound card + recording)
 
