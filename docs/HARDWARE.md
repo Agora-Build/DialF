@@ -5,7 +5,40 @@ Android won't let an app capture/inject cellular-call audio. `dialfd` plays prom
 card and records the far end from the card. This guide covers the wiring, the phone routing,
 and — the fiddly part — running `dialfd` so it can actually capture the mic on macOS.
 
+## Quick start: record a call
+
+1. **Install the CLI** (host = macOS or Linux):
+   ```sh
+   curl -fsSL https://dl.agora.build/dialf/install.sh | bash   # or: npm i -g @agora-build/dialf
+   ```
+2. **Wire the bridge** (diagram below) and set the card's input gain.
+3. **Configure** `~/.config/dialf/config.yaml` — `audio.capture_device`/`playback_device` =
+   your card, `record_dir`, `mix_recording: true` (see `config.example.yaml`).
+4. **Run dialfd where it can use the mic:**
+   - **Linux:** `dialf service install` (systemd, records headless — no permission gate), or `dialf daemon`.
+   - **macOS:** `dialf service install --user` (login LaunchAgent) and **Allow** the mic prompt
+     (a *system* daemon can't record — see below).
+5. **Phone app:** keep **Route calls to wired headset** on, then **Start service**.
+6. **Record:**
+   ```sh
+   dialf run server/jobs/live-call.yaml   --device <id>   # call + record
+   dialf run server/jobs/record-only.yaml --device <id>   # record only, no call
+   ```
+   → writes `<job>-rx.wav`, `-tx.wav`, `-mix.wav` in `record_dir`.
+
 ## Wiring (sound card ↔ phone)
+
+```
+  Physical chain:
+
+    host (mac/linux) ──USB── USB sound card ──line out/in── USB-C⇄TRRS adapter ──USB-C── phone
+        dialfd                 (MiniFuse 2)                   (4-pole headset)          (Pixel)
+
+  Signal flow (two independent directions):
+
+    tx   dialfd ─▶ card OUT ─▶ adapter MIC pin ─▶ phone call mic ─▶ … ─▶ far end
+    rx   far end ─▶ … ─▶ phone earpiece ─▶ adapter EAR pin ─▶ card IN ─▶ dialfd (records rx)
+```
 
 The bridge needs **two directions**:
 
