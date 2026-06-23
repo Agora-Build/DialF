@@ -83,10 +83,11 @@ wired headset so the host's USB sound card becomes the call mic/earpiece.
 
 Install the APK (Android 9+, sideload — debug-signed):
 
+- Newest build: https://dl.agora.build/dialf/dialf-phone-latest.apk
+- All versions: https://github.com/Agora-Build/DialF/releases
+
 ```sh
-# newest release (or browse GitHub Releases):
-#   https://dl.agora.build/dialf/releases/v0.1.5/dialf-phone-0.1.5.apk
-adb install dialf-phone-0.1.5.apk      # or just open the .apk on the phone
+adb install dialf-phone-latest.apk     # or just open the .apk on the phone
 ```
 
 Full UI/permissions reference: [`app/README.md`](app/README.md).
