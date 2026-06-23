@@ -11,6 +11,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.nsd.NsdManager
+import android.os.BatteryManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -39,6 +40,14 @@ class ConnForegroundService : Service() {
         const val SERVICE_TYPE = "_dialfd._tcp"
         private const val CHANNEL = "dialf_conn"
         private const val NOTIF_ID = 1
+
+        // Reconnect backoff: start short, double each failed attempt up to a cap. The cap
+        // is tighter while charging (retry often) and relaxed on battery (save power).
+        private const val MIN_RECONNECT_MS = 2_000L
+        private const val MAX_RECONNECT_CHARGING_MS = 30_000L
+        private const val MAX_RECONNECT_BATTERY_MS = 120_000L
+        // How long to leave NSD discovery (multicast) running per attempt before backing off.
+        private const val DISCOVERY_WINDOW_MS = 20_000L
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -53,6 +62,12 @@ class ConnForegroundService : Service() {
     private var heartbeat: Runnable? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var statusText = "Starting…"
+    private var reconnectDelayMs = MIN_RECONNECT_MS
+    private var reconnectRunnable: Runnable? = null
+    private var discoveryTimeout: Runnable? = null
+
+    private fun isCharging() =
+        getSystemService(BatteryManager::class.java)?.isCharging == true
 
     private fun keepRunning() =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("keep_running", true)
@@ -67,7 +82,10 @@ class ConnForegroundService : Service() {
         val cm = getSystemService(ConnectivityManager::class.java)
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (running && ws == null) main.post { connectOrDiscover() }
+                if (running && ws == null) main.post {
+                    reconnectDelayMs = MIN_RECONNECT_MS // network's back — try right away
+                    connectOrDiscover()
+                }
             }
         }
         try {
@@ -82,6 +100,7 @@ class ConnForegroundService : Service() {
         startForeground(NOTIF_ID, notification(statusText))
         if (!running) {
             running = true
+            reconnectDelayMs = MIN_RECONNECT_MS
             connectOrDiscover()
         }
         return START_STICKY
@@ -108,6 +127,7 @@ class ConnForegroundService : Service() {
         Dialf.serviceListener = null
         stopDiscovery()
         cancelHeartbeat()
+        reconnectRunnable?.let { main.removeCallbacks(it) }
         netCallback?.let {
             try {
                 getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it)
@@ -147,12 +167,23 @@ class ConnForegroundService : Service() {
         discovery = listener
         try {
             nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            // Don't leave multicast running forever — stop after a window and back off.
+            val t = Runnable {
+                if (running && ws == null) {
+                    stopDiscovery()
+                    scheduleReconnect()
+                }
+            }
+            discoveryTimeout = t
+            main.postDelayed(t, DISCOVERY_WINDOW_MS)
         } catch (_: Exception) {
             scheduleReconnect()
         }
     }
 
     private fun stopDiscovery() {
+        discoveryTimeout?.let { main.removeCallbacks(it) }
+        discoveryTimeout = null
         discovery?.let {
             try {
                 nsd.stopServiceDiscovery(it)
@@ -182,7 +213,14 @@ class ConnForegroundService : Service() {
 
     private fun scheduleReconnect() {
         if (!running) return
-        main.postDelayed({ connectOrDiscover() }, 2_000)
+        reconnectRunnable?.let { main.removeCallbacks(it) }
+        val delay = reconnectDelayMs
+        val r = Runnable { connectOrDiscover() }
+        reconnectRunnable = r
+        main.postDelayed(r, delay)
+        // Grow the backoff toward the (charge-dependent) cap for the next attempt.
+        val cap = if (isCharging()) MAX_RECONNECT_CHARGING_MS else MAX_RECONNECT_BATTERY_MS
+        reconnectDelayMs = (delay * 2).coerceAtMost(cap)
     }
 
     // --- websocket ------------------------------------------------------------
@@ -199,6 +237,9 @@ class ConnForegroundService : Service() {
                 .put("app_version", "0.1")
             webSocket.send(hello.toString())
             startHeartbeat()
+            // Connected — reset the backoff and cancel any pending retry.
+            reconnectDelayMs = MIN_RECONNECT_MS
+            reconnectRunnable?.let { main.removeCallbacks(it) }
             notify("Connected · $url")
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
         }
