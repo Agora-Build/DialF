@@ -196,6 +196,19 @@ jobs:
           echo -n "${VERSION#v}" | wrangler r2 object put "$BUCKET/dialf/releases/latest" \
             --pipe --content-type text/plain --remote
 
+          # Stable 'latest' aliases that always point at the newest build (easy to share)
+          APK="$(ls dist/dialf-phone-*.apk 2>/dev/null | head -1)"
+          if [ -n "$APK" ]; then
+            wrangler r2 object put "$BUCKET/dialf/dialf-phone-latest.apk" \
+              --file="$APK" --content-type application/vnd.android.package-archive --remote
+          fi
+          for f in dist/dialf-*.tar.gz; do
+            [ -e "$f" ] || continue
+            # strip version: dialf-0.1.5-darwin-aarch64.tar.gz -> dialf-darwin-aarch64.tar.gz
+            stable="$(basename "$f" | sed -E 's/dialf-[0-9]+\.[0-9]+\.[0-9]+-/dialf-/')"
+            wrangler r2 object put "$BUCKET/dialf/latest/$stable" --file="$f" --remote
+          done
+
           # install script -> https://dl.agora.build/dialf/install.sh
           wrangler r2 object put "$BUCKET/dialf/install.sh" \
             --file=scripts/install.sh --content-type text/plain --remote

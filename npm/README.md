@@ -21,6 +21,19 @@ fetches the matching binary from the [GitHub Releases](https://github.com/Agora-
 it never hard-fails `npm install` — if no prebuilt exists for your platform it prints
 guidance to build from source.
 
+## The phone app (DialF Phone)
+
+This package installs the **controller** (`dialf` CLI + `dialfd`). The phone DialF controls
+runs the **DialF Phone** Android app — it places/answers/rejects calls, sends/reads SMS, and
+reads the call log/SIMs on command, while call audio is bridged through the host's USB sound
+card. Install it on the phone and pair it to `dialfd` with a shared key:
+
+- Newest APK: https://dl.agora.build/dialf/dialf-phone-latest.apk
+- All versions: https://github.com/Agora-Build/DialF/releases
+
+See the [main repository](https://github.com/Agora-Build/DialF) for the end-to-end setup
+walkthrough and the [phone-app reference](https://github.com/Agora-Build/DialF/blob/main/app/README.md).
+
 ## Run the daemon as a service
 
 `npm install` only installs the CLI. To run `dialfd` in the background:

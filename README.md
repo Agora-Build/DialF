@@ -69,6 +69,57 @@ matching onnxruntime into `$CARGO_HOME/ten-vad-ort/` (one-time, needs network); 
 `$TEN_VAD_MODEL`, defaulting to the submodule's `src/onnx_model/ten-vad.onnx`. Works on any
 platform/arch, including Linux aarch64 / Raspberry Pi.
 
+## The phone app (DialF Phone)
+
+**DialF Phone** is the Android side — it *is* the phone DialF controls (on its own SIM). It
+carries **no call audio**; it executes commands from `dialfd` and routes call audio to the
+wired headset so the host's USB sound card becomes the call mic/earpiece.
+
+- **Default dialer** (`ROLE_DIALER` + `InCallService`) → programmatic **dial / answer / hang up / reject**.
+- **Dual-SIM aware** — per-call SIM selection, SIM list with the default tagged.
+- **SMS** send + live inbox forwarding, **call log**, carrier **voicemail** on/off, raw **MMI/USSD**.
+- **Native foreground service** — works while the phone is **locked**, auto-(re)starts on
+  boot / power / network changes, and is Doze-exempt so commands run while it's asleep.
+
+Install the APK (Android 9+, sideload — debug-signed):
+
+```sh
+# newest release (or browse GitHub Releases):
+#   https://dl.agora.build/dialf/releases/v0.1.5/dialf-phone-0.1.5.apk
+adb install dialf-phone-0.1.5.apk      # or just open the .apk on the phone
+```
+
+Full UI/permissions reference: [`app/README.md`](app/README.md).
+
+## Getting started (end-to-end)
+
+Host (the computer running `dialfd`) and phone on the **same WiFi**. Minimal manual run:
+
+1. **Install the CLI** on the host (macOS/Linux): `npm install -g @agora-build/dialf`.
+2. **Configure `dialfd`** — create `~/.config/dialf/config.yaml` with a `shared_key` and your
+   sound-card devices (copy [`config.example.yaml`](config.example.yaml); see *Configuration*).
+3. **Start the daemon**: `dialf daemon` (foreground), or install it as a service (above). On
+   macOS use `dialf service install --user` if you need call **recording**.
+4. **Wire the sound card** to the phone's headset jack ([`docs/HARDWARE.md`](docs/HARDWARE.md)).
+   Skip this if you only need call control / SMS and no audio.
+5. **Install & open DialF Phone** (APK above). Grant phone/SMS/notification permissions,
+   **Allow** the battery-optimization prompt, and **Set** it as the default dialer.
+6. **Pair them**: in the app enter the same **shared key**; leave the dialfd address blank to
+   auto-discover over mDNS (or pin `host:port`). Tap **Start service**.
+7. **Verify** on the host: `dialf devices` — the phone should appear.
+8. **Drive it**:
+   ```sh
+   dialf sims <device>                         # which SIMs are in the phone
+   dialf call dial <device> +15551234          # place a call
+   dialf sms send <device> +15551234 "hi"      # send a text
+   dialf call list <device> --human            # read the call log
+   ```
+9. **Run a scripted call** (needs the audio bridge):
+   `dialf run server/jobs/end-to-end-call.yaml --device <device>`.
+
+(`<device>` is the id from `dialf devices`; omit `--device`/`<device>` when exactly one phone
+is connected.)
+
 ## Commands
 
 Start the daemon (or install it as a service, above), then drive it with `dialf`:
@@ -204,12 +255,18 @@ Layout:
 
 ### Release
 
-Tag `vX.Y.Z` (via `scripts/release.sh`) triggers `.github/workflows/release.yml`: builds
-prebuilt binaries for macOS arm64/x86_64 + Linux x86_64/aarch64 (ten-vad compiled from
-source; linux-aarch64 cross-compiled) **and the Android APK** (`dialf-phone-<ver>.apk`,
-release build / debug-signed — sideload only), publishes a GitHub Release, the npm package
-(`@agora-build/dialf`), and mirrors the tarballs + APK + `install.sh` to Cloudflare R2
-(`dl.agora.build`). Packaging lives in `scripts/` and `npm/`.
+Tag `vX.Y.Z` (via `scripts/release.sh`) triggers `.github/workflows/release.yml`.
+
+Downloads (`dl.agora.build`, latest = **v0.1.5**):
+
+| Artifact | Link |
+|---|---|
+| CLI — macOS arm64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-darwin-aarch64.tar.gz |
+| CLI — macOS x86_64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-darwin-x86_64.tar.gz |
+| CLI — Linux x86_64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-linux-x86_64.tar.gz |
+| CLI — Linux aarch64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-linux-aarch64.tar.gz |
+| Phone app (APK) | https://dl.agora.build/dialf/releases/v0.1.5/dialf-phone-0.1.5.apk |
+| Install script | https://dl.agora.build/dialf/install.sh |
 
 ## License
 
