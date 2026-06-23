@@ -282,11 +282,17 @@ class ConnForegroundService : Service() {
         ws?.send(JSONObject().put("type", "error").put("cmd_id", cmdId).put("msg", msg).toString())
     }
 
-    /** Forward a Dialf event map (call_state / sms) to dialfd as JSON. */
+    /** Forward a phone-side event to dialfd. Only frames dialfd understands are sent;
+     *  UI-only events (status / dialer_role) are dropped. */
     private fun send(event: Map<String, Any?>) {
-        val o = JSONObject()
-        for ((k, v) in event) o.put(k, v ?: JSONObject.NULL)
-        ws?.send(o.toString())
+        when (event["type"]) {
+            "call_state", "sms" -> {
+                val o = JSONObject()
+                for ((k, v) in event) o.put(k, v ?: JSONObject.NULL)
+                ws?.send(o.toString())
+            }
+            else -> {} // status, dialer_role, etc. are for the Flutter UI only
+        }
     }
 
     // --- notification ---------------------------------------------------------
