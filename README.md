@@ -198,8 +198,9 @@ Layout:
 
 Tag `vX.Y.Z` (via `scripts/release.sh`) triggers `.github/workflows/release.yml`: builds
 prebuilt binaries for macOS arm64/x86_64 + Linux x86_64/aarch64 (ten-vad compiled from
-source; linux-aarch64 cross-compiled), publishes a GitHub Release, the npm package
-(`@agora-build/dialf`), and mirrors the tarballs + `install.sh` to Cloudflare R2
+source; linux-aarch64 cross-compiled) **and the Android APK** (`dialf-phone-<ver>.apk`,
+release build / debug-signed — sideload only), publishes a GitHub Release, the npm package
+(`@agora-build/dialf`), and mirrors the tarballs + APK + `install.sh` to Cloudflare R2
 (`dl.agora.build`). Packaging lives in `scripts/` and `npm/`.
 
 ## License
