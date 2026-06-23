@@ -257,17 +257,6 @@ Layout:
 
 Tag `vX.Y.Z` (via `scripts/release.sh`) triggers `.github/workflows/release.yml`.
 
-Downloads (`dl.agora.build`, latest = **v0.1.5**):
-
-| Artifact | Link |
-|---|---|
-| CLI — macOS arm64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-darwin-aarch64.tar.gz |
-| CLI — macOS x86_64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-darwin-x86_64.tar.gz |
-| CLI — Linux x86_64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-linux-x86_64.tar.gz |
-| CLI — Linux aarch64 | https://dl.agora.build/dialf/releases/v0.1.5/dialf-0.1.5-linux-aarch64.tar.gz |
-| Phone app (APK) | https://dl.agora.build/dialf/releases/v0.1.5/dialf-phone-0.1.5.apk |
-| Install script | https://dl.agora.build/dialf/install.sh |
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
