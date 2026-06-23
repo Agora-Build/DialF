@@ -64,6 +64,17 @@ The UI is just config/status; the service is what matters at runtime.
 | Route calls to wired headset | use the USB sound-card bridge for call audio (default on) |
 | Keep app running | auto-(re)start on boot/power/network/swipe (default on) |
 
+## Install (prebuilt APK)
+
+Sideload the prebuilt APK (Android 9+, debug-signed) — no toolchain needed:
+
+- Newest build: https://dl.agora.build/dialf/dialf-phone-latest.apk
+- All versions: https://github.com/Agora-Build/DialF/releases
+
+```sh
+adb install dialf-phone-latest.apk    # or open the .apk on the phone
+```
+
 ## Build & run
 
 ```sh
