@@ -23,6 +23,10 @@ class Native {
     return m == null ? {} : Map<String, String>.from(m);
   }
 
+  /// Whether the control-plane service is enabled (i.e. it should be running).
+  static Future<bool> isServiceEnabled() async =>
+      (await _m.invokeMethod<bool>('isServiceEnabled')) ?? false;
+
   static Future<bool> isDefaultDialer() async =>
       (await _m.invokeMethod<bool>('isDefaultDialer')) ?? false;
 

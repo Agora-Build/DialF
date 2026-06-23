@@ -62,6 +62,7 @@ class MainActivity : FlutterActivity() {
                             }
                             result.success(null)
                         }
+                        "isServiceEnabled" -> result.success(prefs().getBoolean("enabled", false))
                         "isDefaultDialer" -> result.success(Telecom.isDefaultDialer(this))
                         "requestDialerRole" -> {
                             requestDialerRole()

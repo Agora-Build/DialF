@@ -59,6 +59,7 @@ class _HomePageState extends State<HomePage> {
     _isDefaultDialer = await Native.isDefaultDialer();
     _wiredHeadset = await Native.getWiredHeadset();
     _keepRunning = await Native.getKeepRunning();
+    _running = await Native.isServiceEnabled(); // reflect the actual service state
     if (mounted) setState(() {});
   }
 
@@ -66,6 +67,7 @@ class _HomePageState extends State<HomePage> {
     switch (e['type']) {
       case 'status':
         _connected = e['connected'] == true;
+        if (_connected) _running = true; // connected implies the service is running
         _server = e['server'] as String?;
         _logLine(_connected ? 'connected ${_server ?? ''}' : 'disconnected');
         break;
