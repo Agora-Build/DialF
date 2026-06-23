@@ -389,7 +389,20 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let job = if let Some(p) = path {
                 let text =
                     std::fs::read_to_string(&p).with_context(|| format!("read job file {p}"))?;
-                schema::parse(&text).with_context(|| format!("parse job file {p}"))?
+                let mut job = schema::parse(&text).with_context(|| format!("parse job file {p}"))?;
+                // Resolve relative `audio.play` paths against the job file's directory, so a
+                // job is portable regardless of the daemon's working directory (it usually
+                // runs as a service with cwd=/).
+                if let Some(base) = Path::new(&p).parent().filter(|b| !b.as_os_str().is_empty()) {
+                    for step in &mut job {
+                        if let schema::StepKind::AudioPlay { file } = &mut step.kind {
+                            if Path::new(file).is_relative() {
+                                *file = base.join(&*file).to_string_lossy().into_owned();
+                            }
+                        }
+                    }
+                }
+                job
             } else if let Some(s) = steps {
                 s
             } else {

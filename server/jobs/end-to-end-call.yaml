@@ -32,11 +32,11 @@
   description: allow time for the callee to pick up
 
 - type: audio.play
-  file: samples/prompt-en-1.wav
+  file: ../../samples/prompt-en-1.wav
   description: greeting
 
 - type: audio.play
-  file: samples/prompt-en-1.wav
+  file: ../../samples/prompt-en-1.wav
   description: RSP_BASIC-001 question
 - type: audio.wait_for_speech
   end_timeout_ms: 45000
@@ -44,7 +44,7 @@
   description: RSP_BASIC-001 response
 
 - type: audio.play
-  file: samples/prompt-en-2.wav
+  file: ../../samples/prompt-en-2.wav
   description: RSP_BASIC-002 question
 - type: audio.wait_for_speech
   end_timeout_ms: 45000
@@ -52,7 +52,7 @@
   description: RSP_BASIC-002 response
 
 - type: audio.play
-  file: samples/prompt-en-2.wav
+  file: ../../samples/prompt-en-2.wav
   description: closing
 
 - type: wait

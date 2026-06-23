@@ -305,8 +305,12 @@ async fn main() -> anyhow::Result<()> {
             ok_or_err(resp)
         }
         Command::Run { path, device } => {
+            // dialfd reads the job file from *its* working directory (often a service with
+            // cwd=/), so resolve the path against the CLI's cwd before sending it.
+            let abs = std::fs::canonicalize(&path)
+                .with_context(|| format!("job file not found: {}", path.display()))?;
             let op = ControlOp::JobRun {
-                path: Some(path.to_string_lossy().to_string()),
+                path: Some(abs.to_string_lossy().to_string()),
                 steps: None,
                 device,
             };
@@ -315,8 +319,11 @@ async fn main() -> anyhow::Result<()> {
             ok_or_err(resp)
         }
         Command::Play { file } => {
+            // Resolve against the CLI's cwd — dialfd opens the file in its own dir.
+            let abs = std::fs::canonicalize(&file)
+                .with_context(|| format!("audio file not found: {}", file.display()))?;
             let op = ControlOp::AudioPlay {
-                file: file.to_string_lossy().to_string(),
+                file: abs.to_string_lossy().to_string(),
                 device: None,
             };
             let resp = call(&socket, op).await?;
