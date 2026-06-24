@@ -51,8 +51,26 @@ Manage the service (launchd on macOS / systemd on Linux):
 dialf service status|stop|start|uninstall [--user]
 ```
 
+`install` points the service at a stable symlink (`~/.local/bin/dialfd` for `--user`,
+`/usr/local/bin/dialfd` for system) rather than the versioned binary, so the plist/unit
+stays valid across versions.
+
 (The curl installer is install-only by default; `DIALF_SERVICE=system|user` makes it also
 install that service.)
+
+### Upgrading
+
+```sh
+npm install -g @agora-build/dialf   # or re-run the curl installer
+dialf service install [--user]      # re-point the stable symlink at the new binary, reload
+```
+
+The new binary installs at a versioned path, so **re-run `dialf service install` after an
+upgrade** to repoint the symlink and reload the service (idempotent — same plist/unit, no
+uninstall needed). On **macOS**, the daemon is unsigned, so the OS re-prompts for the
+**Microphone** the first time the upgraded daemon records — **Allow** it. (A silent empty
+`rx.wav` is the tell that the mic grant is missing; see [`docs/HARDWARE.md`](docs/HARDWARE.md).)
+The phone reconnects on its own a few seconds after the reload.
 
 ### Build from source
 
