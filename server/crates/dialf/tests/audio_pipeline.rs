@@ -5,10 +5,11 @@
 //! vendored in the ten-vad-sys crate.
 
 use std::path::Path;
+use std::sync::mpsc::sync_channel;
 
 use dialf::audio::backend::{CaptureSource, WavFileSink, WavFileSource};
 use dialf::audio::engine::run_wait_for_speech;
-use dialf::audio::record::{DuplexSession, RECORD_RATE};
+use dialf::audio::record::{DuplexSession, VadFrameSource, RECORD_RATE};
 use dialf::audio::vad::{EndReason, TurnConfig};
 
 const FIXTURE: &str = concat!(
@@ -37,6 +38,47 @@ fn wait_for_speech_runs_over_real_clip() {
 
     // The clip is ~7.6s and short, so it must not hit the 60s cap.
     assert_ne!(reason, EndReason::Timeout, "unexpected timeout on a 7.6s clip");
+}
+
+/// The duplex VAD path: frames pushed through the session's channel and consumed via
+/// `VadFrameSource` must drive the segmenter exactly like a direct capture — speech onset
+/// followed by trailing silence ends the turn with `Silence` (not `Timeout`/`EndOfStream`).
+/// This exercises the path `wait_for_speech` uses while a recording session is active.
+#[test]
+fn wait_for_speech_over_vad_frame_channel() {
+    if !dialf::vad_linked() {
+        eprintln!("ten-vad not linked; skipping duplex VAD path test");
+        return;
+    }
+    let (tx, mut rx) = sync_channel::<Vec<i16>>(10_000);
+
+    // Push the speech fixture (16 kHz) as ~100 ms frames, then ~1 s of trailing silence.
+    let mut fixture = WavFileSource::open(Path::new(FIXTURE)).expect("open fixture");
+    let mut buf = vec![0i16; 1_600];
+    loop {
+        let n = fixture.read(&mut buf).expect("read fixture");
+        if n == 0 {
+            break;
+        }
+        tx.send(buf[..n].to_vec()).expect("send speech frame");
+    }
+    for _ in 0..10 {
+        tx.send(vec![0i16; 1_600]).expect("send silence frame"); // 10 * 100 ms = 1 s
+    }
+    drop(tx); // disconnect after the data so a stuck run would EndOfStream, not hang
+
+    let turn = TurnConfig {
+        silence_duration_ms: 300, // ends well within the appended 1 s of silence
+        end_timeout_ms: 60_000,
+        ..TurnConfig::default()
+    };
+    let mut src = VadFrameSource::new(&mut rx);
+    let reason = run_wait_for_speech(&mut src, turn).expect("vad ran over channel");
+    assert_eq!(
+        reason,
+        EndReason::Silence,
+        "duplex VAD path should end the turn on trailing silence"
+    );
 }
 
 /// Full-duplex recording: a WAV "card" (the fixture) is captured continuously to rx.wav,
