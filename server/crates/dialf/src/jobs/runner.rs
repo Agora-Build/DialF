@@ -63,10 +63,12 @@ fn run_step(kind: &StepKind, io: &mut dyn JobIo) -> anyhow::Result<String> {
         StepKind::AudioWaitForSpeech {
             end_timeout_ms,
             silence_duration_ms,
+            onset_duration_ms,
         } => {
             let turn = TurnConfig {
                 silence_duration_ms: *silence_duration_ms,
                 end_timeout_ms: *end_timeout_ms,
+                onset_duration_ms: *onset_duration_ms,
                 ..TurnConfig::default()
             };
             let reason = io.wait_for_speech(turn)?;

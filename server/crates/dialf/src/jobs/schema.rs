@@ -24,6 +24,9 @@ pub type Job = Vec<Step>;
 pub const DEFAULT_END_TIMEOUT_MS: u64 = 45_000;
 /// Default for [`StepKind::WaitForSpeech::silence_duration_ms`].
 pub const DEFAULT_SILENCE_MS: u64 = 3_000;
+/// Default for [`StepKind::WaitForSpeech::onset_duration_ms`] — continuous voiced run
+/// required to count as speech onset (debounces spurious noise/echo hops).
+pub const DEFAULT_ONSET_MS: u64 = 100;
 
 /// One job step: its kind plus an optional description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +54,10 @@ pub enum StepKind {
         /// Continuous trailing non-speech that marks end-of-turn, in milliseconds.
         #[serde(default = "default_silence")]
         silence_duration_ms: u64,
+        /// Continuous voiced run required to count as speech onset, in milliseconds.
+        /// Raise it if line noise/echo prematurely ends the turn; default 100 ms.
+        #[serde(default = "default_onset")]
+        onset_duration_ms: u64,
     },
 
     /// Place an outbound call on the controlled phone.
@@ -86,6 +93,10 @@ fn default_silence() -> u64 {
     DEFAULT_SILENCE_MS
 }
 
+fn default_onset() -> u64 {
+    DEFAULT_ONSET_MS
+}
+
 /// Parse a YAML job document.
 pub fn parse(yaml: &str) -> Result<Job, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
@@ -116,6 +127,7 @@ mod tests {
             StepKind::AudioWaitForSpeech {
                 end_timeout_ms,
                 silence_duration_ms,
+                ..
             } => {
                 assert_eq!(*end_timeout_ms, 45_000);
                 assert_eq!(*silence_duration_ms, 3_000);
@@ -132,9 +144,11 @@ mod tests {
             StepKind::AudioWaitForSpeech {
                 end_timeout_ms,
                 silence_duration_ms,
+                onset_duration_ms,
             } => {
                 assert_eq!(*end_timeout_ms, DEFAULT_END_TIMEOUT_MS);
                 assert_eq!(*silence_duration_ms, DEFAULT_SILENCE_MS);
+                assert_eq!(*onset_duration_ms, DEFAULT_ONSET_MS);
             }
             other => panic!("unexpected: {other:?}"),
         }

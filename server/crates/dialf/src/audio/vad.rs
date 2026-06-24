@@ -23,6 +23,10 @@ pub struct TurnConfig {
     pub silence_duration_ms: u64,
     /// Overall cap on the wait.
     pub end_timeout_ms: u64,
+    /// Continuous voiced run required to declare speech *onset*. Debounces spurious single
+    /// voiced hops (line noise / echo / comfort noise) so they don't start — and then
+    /// prematurely end — a turn. A genuinely silent caller runs to `end_timeout_ms`.
+    pub onset_duration_ms: u64,
     /// Voiced decision threshold passed to ten-vad.
     pub threshold: f32,
 }
@@ -33,6 +37,7 @@ impl Default for TurnConfig {
             hop_size: ten_vad_sys::HOP_256,
             silence_duration_ms: 3_000,
             end_timeout_ms: 45_000,
+            onset_duration_ms: 100,
             threshold: 0.5,
         }
     }
@@ -64,7 +69,9 @@ pub struct TurnDetector {
     hop_ms: f64,
     silence_hops_needed: usize,
     timeout_hops: usize,
+    onset_hops_needed: usize,
     started: bool,
+    voiced_run: usize,
     silence_run: usize,
     elapsed_hops: usize,
     finished: bool,
@@ -78,7 +85,9 @@ impl TurnDetector {
             hop_ms,
             silence_hops_needed: ms_to_hops(cfg.silence_duration_ms, hop_ms),
             timeout_hops: ms_to_hops(cfg.end_timeout_ms, hop_ms),
+            onset_hops_needed: ms_to_hops(cfg.onset_duration_ms, hop_ms).max(1),
             started: false,
+            voiced_run: 0,
             silence_run: 0,
             elapsed_hops: 0,
             finished: false,
@@ -103,13 +112,19 @@ impl TurnDetector {
         }
         self.elapsed_hops += 1;
 
-        // Onset.
+        // Onset: require a continuous voiced run so isolated spurious hops (noise/echo)
+        // don't start the turn. A single non-voiced hop resets the run.
         if !self.started {
             if voiced {
-                self.started = true;
-                // Onset and timeout can't both fire meaningfully on the same hop;
-                // prefer reporting onset, timeout will be caught next hop.
-                return Some(TurnEvent::SpeechStarted);
+                self.voiced_run += 1;
+                if self.voiced_run >= self.onset_hops_needed {
+                    self.started = true;
+                    // Onset and timeout can't both fire meaningfully on the same hop;
+                    // prefer reporting onset, timeout will be caught next hop.
+                    return Some(TurnEvent::SpeechStarted);
+                }
+            } else {
+                self.voiced_run = 0;
             }
         } else if voiced {
             self.silence_run = 0;
@@ -213,6 +228,7 @@ mod tests {
             hop_size: hop,
             silence_duration_ms: silence_ms,
             end_timeout_ms: timeout_ms,
+            onset_duration_ms: 10, // ~1 hop at hop=160 (10 ms) -> onset on first voiced hop
             threshold: 0.5,
         }
     }
@@ -265,6 +281,34 @@ mod tests {
             assert_eq!(d.push(false), None);
         }
         assert_eq!(d.push(false), Some(TurnEvent::Ended(EndReason::Silence)));
+    }
+
+    #[test]
+    fn onset_requires_consecutive_voiced() {
+        // onset needs 30 ms = 3 consecutive voiced hops (hop=160 -> 10 ms).
+        let mut c = cfg(160, 5_000, 100_000);
+        c.onset_duration_ms = 30;
+        let mut d = TurnDetector::new(&c);
+        assert_eq!(d.push(true), None); // run 1
+        assert_eq!(d.push(true), None); // run 2
+        assert_eq!(d.push(true), Some(TurnEvent::SpeechStarted)); // run 3 -> onset
+    }
+
+    #[test]
+    fn onset_debounce_ignores_spurious_blips() {
+        // Scattered single voiced hops (noise) must NOT start a turn — it should run to the
+        // timeout. onset needs 3 consecutive; timeout 200 ms = 20 hops.
+        let mut c = cfg(160, 5_000, 200);
+        c.onset_duration_ms = 30; // 3 hops
+        let mut d = TurnDetector::new(&c);
+        for _ in 0..6 {
+            assert_eq!(d.push(true), None); // a lone voiced blip (run=1)
+            assert_eq!(d.push(false), None); // resets the run
+            assert_eq!(d.push(false), None);
+        }
+        assert_eq!(d.push(false), None); // hop 19
+        // No onset ever fired, so the silent turn ends on the overall timeout, not silence.
+        assert_eq!(d.push(false), Some(TurnEvent::Ended(EndReason::Timeout))); // hop 20
     }
 
     #[test]
