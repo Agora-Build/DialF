@@ -108,9 +108,35 @@ audio:
   mix_recording: true
   # Pin sox by full path + explicit device so a stripped PATH can't fall back to a
   # default-output tool. `gain 20` boosts a quiet far-end capture ~20 dB (optional).
-  capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "gain", "20"]
+  # `remix 1` selects ONE capture channel (see "Loopback channels" below).
+  capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1", "gain", "20"]
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
 ```
+
+Match `sample_rate` to the card's actual rate (the MiniFuse Control Center shows it, e.g.
+44100 vs 48000) so CoreAudio doesn't resample twice.
+
+### Loopback channels — keep tx out of rx
+
+Some USB interfaces (e.g. the Arturia MiniFuse) expose a **multi-channel capture**: channels
+1/2 are the analog inputs, channels **3/4 are a *loopback* of the computer's own playback**.
+If the capture downmixes all channels, your injected prompt (**tx**) leaks into **rx** —
+rx.wav ends up containing the prompt. (This is the card, not DialF: rx is written straight
+from whatever the capture device hands over.)
+
+Fix: capture **only the analog channel** your bridge feeds, with sox's `remix N`. Find the
+clean channel — unplug the bridge, play a tone out the card, and capture all channels:
+
+```sh
+( sox -n -t coreaudio "MiniFuse 2" synth 8 sine 440 >/dev/null 2>&1 & ) ; sleep 1
+sox -t coreaudio "MiniFuse 2" /tmp/c.wav trim 0 4
+for ch in 1 2 3 4; do printf "ch$ch: "; sox /tmp/c.wav -n remix $ch stat 2>&1 | grep "RMS     amp"; done
+```
+
+The **silent** channels are the analog inputs (use one of them, e.g. `remix 1` → Analog 1);
+the **loud** ones carry the loopback. Then plug the bridge into that analog input. (Tip: run
+this in a GUI Terminal that has Microphone permission — over SSH/tmux the capture is denied
+and every channel reads silent.)
 
 ## Jobs
 

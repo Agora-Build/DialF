@@ -20,5 +20,15 @@ audio:
   # Optional: pin the audio tool by full path + explicit device so a stripped PATH
   # can't fall back to a default-output tool (afplay). `gain N` adds N dB to the
   # captured far-end audio in software (drop it if the card's input gain is enough).
-  capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "gain", "20"]
+  #
+  # `remix 1` selects capture CHANNEL 1 only. Some interfaces (e.g. the Arturia MiniFuse)
+  # expose a multi-channel capture where ch 1/2 are the analog inputs and ch 3/4 are a
+  # LOOPBACK of the computer's own playback. Without `remix N`, sox downmixes all of them,
+  # so your injected prompt (tx) bleeds into rx. Pin the analog channel your bridge feeds.
+  # Find the clean channel (bridge unplugged, while a tone plays out the card):
+  #   ( sox -n -t coreaudio "MiniFuse 2" synth 8 sine 440 & ) ; sleep 1
+  #   sox -t coreaudio "MiniFuse 2" /tmp/c.wav trim 0 4
+  #   for ch in 1 2 3 4; do printf "ch$ch: "; sox /tmp/c.wav -n remix $ch stat 2>&1 | grep RMS; done
+  # The silent channels are the analog inputs; the loud ones are the loopback. Use a silent one.
+  capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1", "gain", "20"]
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
