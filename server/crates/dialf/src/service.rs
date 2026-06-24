@@ -8,7 +8,7 @@
 //! `<this-binary> daemon [--config <path>]`.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
@@ -209,8 +209,14 @@ WantedBy={install_target}
 fn load(scope: Scope, path: &std::path::Path) -> Result<()> {
     if cfg!(target_os = "macos") {
         let domain = launchd_domain(scope);
-        // bootout first (ignore failure), then bootstrap.
-        let _ = run_cmd("launchctl", &["bootout", &domain, &path.to_string_lossy()]);
+        // Pre-emptive bootout so a reinstall replaces a running instance. Discard its output:
+        // when nothing is loaded launchctl prints a misleading "Boot-out failed: 5: Input/
+        // output error" (it just means "no such service") — we intentionally ignore it.
+        let _ = Command::new("launchctl")
+            .args(["bootout", &domain, &path.to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         run_cmd("launchctl", &["bootstrap", &domain, &path.to_string_lossy()])
             .context("launchctl bootstrap")?;
         let _ = run_cmd("launchctl", &["enable", &format!("{domain}/{LABEL}")]);

@@ -40,6 +40,13 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         .trim_end_matches(".local");
     let ver = format!("ver={}", env!("CARGO_PKG_VERSION"));
 
+    // Clear any orphaned advertiser from a previous daemon instance before registering our
+    // own. The advertiser is a child process; if the daemon was SIGKILL'd (e.g. by
+    // `launchctl bootout`) its `Drop` never ran, so the old `dns-sd`/`avahi-publish` keeps
+    // advertising a dead daemon. Multiple stale registrations for the same instance name
+    // create mDNS conflicts that block phones from discovering the live daemon.
+    reap_stale_advertisers(instance);
+
     let (tool, child) = if cfg!(target_os = "macos") {
         // dns-sd -R <name> <type> <domain> <port> [k=v ...]
         let child = Command::new("dns-sd")
@@ -68,4 +75,20 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         "advertising via mDNS"
     );
     Ok(Advertiser { child })
+}
+
+/// Best-effort: kill leftover advertisers for `instance` from a previous daemon run, so the
+/// LAN doesn't accumulate conflicting mDNS registrations. Safe because only one daemon owns
+/// the WS port at a time, and we run this just before registering our own advertiser.
+fn reap_stale_advertisers(instance: &str) {
+    let pattern = if cfg!(target_os = "macos") {
+        format!("dns-sd -R {instance} ")
+    } else {
+        format!("avahi-publish -s {instance} ")
+    };
+    let _ = Command::new("pkill")
+        .args(["-f", &pattern])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
