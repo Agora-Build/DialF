@@ -29,6 +29,7 @@ audio:
   #   ( sox -n -t coreaudio "MiniFuse 2" synth 8 sine 440 & ) ; sleep 1
   #   sox -t coreaudio "MiniFuse 2" /tmp/c.wav trim 0 4
   #   for ch in 1 2 3 4; do printf "ch$ch: "; sox /tmp/c.wav -n remix $ch stat 2>&1 | grep RMS; done
-  # The silent channels are the analog inputs; the loud ones are the loopback. Use a silent one.
+  # The silent channels are the analog inputs; the loud ones are the loopback. Pin a silent
+  # one — `remix 1` below is just an example; use whichever channel your bridge feeds.
   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1", "gain", "20"]
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]

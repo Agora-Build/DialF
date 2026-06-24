@@ -102,6 +102,7 @@ dialf sms list <device> [--human]              read recent texts (--human = read
 dialf run  <job.yaml> [--device <id>]          run a YAML job
 dialf play <file>                              inject audio out the sound card
 dialf service install|uninstall|start|stop|status [--user] [--config <path>]
+dialf --version                                CLI + running daemon (dialfd) versions
 ```
 
 Flags:
@@ -122,7 +123,7 @@ Flags:
 | `call.pickup`           | —                                       |
 | `call.hangup`           | —                                       |
 | `audio.play`            | `file`                                  |
-| `audio.wait_for_speech` | `end_timeout_ms`, `silence_duration_ms` |
+| `audio.wait_for_speech` | `end_timeout_ms`, `silence_duration_ms`, `onset_duration_ms` |
 | `sms.send`              | `to`, `body`                            |
 | `wait`                  | `ms`                                    |
 | `log`                   | `message`                               |

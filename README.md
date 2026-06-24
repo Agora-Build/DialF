@@ -160,6 +160,7 @@ dialf mmi <device> <code> [--sim N]            # (advanced) raw MMI/USSD code, r
 
 dialf run  <job.yaml> [--device <id>]          # run a scripted job
 dialf play <file>                              # inject audio out the sound card
+dialf --version                                # CLI + running daemon (dialfd) versions
 ```
 
 `<device>` is the id the phone registered as (see `dialf devices`). `dialf` talks to `dialfd`
@@ -193,19 +194,24 @@ A job is a list of steps run in order. See `server/jobs/sample.yaml` (two-turn e
 ```yaml
 - type: call.dial            # also: call.pickup, call.hangup
   number: "5551234"
+- type: call.wait_answered   # block until the callee actually answers
+  timeout_ms: 30000
 - type: audio.play
   file: samples/prompt-en-1.wav
 - type: audio.wait_for_speech
   end_timeout_ms: 45000      # hard cap waiting for the turn to end
   silence_duration_ms: 3000  # trailing silence that marks end-of-turn
+  onset_duration_ms: 100     # sustained voice needed to count as speech (debounces noise)
 - type: sms.send  { to: "5551234", body: "thanks!" }
 - type: wait      { ms: 1000 }
 - type: log       { message: "done" }
 ```
 
-`audio.wait_for_speech` captures from the card → resamples to 16 kHz → runs ten-vad per
-256-sample hop; speech onset followed by `silence_duration_ms` of continuous non-speech ends
-the turn (`end_timeout_ms` is the overall cap).
+`call.wait_answered` waits for the outbound call to reach the answered (`active`) state, so
+prompts play only after a real pickup (not on a fixed timer). `audio.wait_for_speech` captures
+from the card → resamples to 16 kHz → runs ten-vad per 256-sample hop; speech onset (a
+continuous `onset_duration_ms` voiced run, so noise/echo doesn't false-trigger) followed by
+`silence_duration_ms` of non-speech ends the turn (`end_timeout_ms` is the overall cap).
 
 ### Sound-card bridge + recording
 

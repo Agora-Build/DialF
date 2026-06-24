@@ -7,12 +7,12 @@
 # <job>-tx.wav (our prompts) and <job>-mix.wav (both, when mix_recording: true).
 
 - type: call.dial
-  number: "5555550123"
+  number: "+15555550123"
   description: call the phone
 
-- type: wait
-  ms: 9000
-  description: allow time to answer
+- type: call.wait_answered
+  timeout_ms: 30000
+  description: wait until the callee answers
 
 - type: audio.play
   file: ../../samples/prompt-en-1.wav
