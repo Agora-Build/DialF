@@ -50,64 +50,12 @@ fn exe_path() -> Result<String> {
     Ok(p.to_string_lossy().to_string())
 }
 
-/// A stable, version-independent path the service points at, so the unit/plist stays
-/// identical across upgrades (the real binary lives at a versioned path, e.g. npm's
-/// `vendor/dialf-<ver>/`). User scope is writable without root; system scope needs root
-/// (the system install already does).
-fn stable_bin_path(scope: Scope) -> PathBuf {
-    match scope {
-        Scope::System => PathBuf::from("/usr/local/bin/dialfd"),
-        Scope::User => home_dir().join(".local/bin/dialfd"),
-    }
-}
-
-/// Point a stable symlink at the real binary and return the path to embed in the unit.
-/// Falls back to the real path if the symlink can't be created (e.g. unsupported FS).
-///
-/// Note: on macOS this keeps the *service definition* stable, but TCC still resolves the
-/// symlink to the versioned target, so the microphone grant is re-prompted per release
-/// until the binary is code-signed with a stable identity.
-fn stable_program_path(real_exe: &str, scope: Scope) -> String {
-    #[cfg(unix)]
-    {
-        let link = stable_bin_path(scope);
-        match link_binary(real_exe, &link) {
-            Ok(()) => {
-                println!("linked {} -> {real_exe}", link.display());
-                return link.to_string_lossy().to_string();
-            }
-            Err(e) => eprintln!(
-                "warning: could not create stable link {} ({e}); using the versioned path",
-                link.display()
-            ),
-        }
-    }
-    real_exe.to_string()
-}
-
-#[cfg(unix)]
-fn link_binary(target: &str, link: &std::path::Path) -> Result<()> {
-    if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    match std::fs::remove_file(link) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => bail!("remove old link {}: {e}", link.display()),
-    }
-    std::os::unix::fs::symlink(target, link)
-        .with_context(|| format!("symlink {} -> {target}", link.display()))?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Install / uninstall
 // ---------------------------------------------------------------------------
 
 fn install(scope: Scope, config: Option<PathBuf>) -> Result<()> {
-    // Point the service at a stable symlink rather than the versioned binary path, so the
-    // unit/plist survives upgrades without a reinstall-to-repoint.
-    let exe = stable_program_path(&exe_path()?, scope);
+    let exe = exe_path()?;
     let cfg = config.map(|p| p.to_string_lossy().to_string());
     let path = unit_path(scope);
 
@@ -149,11 +97,6 @@ fn uninstall(scope: Scope) -> Result<()> {
             println!("not installed ({})", path.display())
         }
         Err(e) => bail!("remove {}: {e}", path.display()),
-    }
-    // Best-effort: drop the stable symlink we created at install time.
-    #[cfg(unix)]
-    {
-        let _ = std::fs::remove_file(stable_bin_path(scope));
     }
     Ok(())
 }

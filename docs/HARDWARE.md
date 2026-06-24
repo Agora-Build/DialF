@@ -17,10 +17,10 @@ and — the fiddly part — running `dialfd` so it can actually capture the mic 
 4. **Run dialfd where it can use the mic:**
    - **Linux:** `dialf service install` (systemd, records headless — no permission gate), or `dialf daemon`.
    - **macOS:** `dialf service install --user` (login LaunchAgent) and **Allow** the mic prompt
-     (a *system* daemon can't record — see below). The service points at a stable symlink
-     (`~/.local/bin/dialfd`), so upgrades don't need a reinstall — but because the binary is
-     unsigned, macOS re-prompts for the mic after a version bump; just **Allow** it again. If
-     recording silently yields an empty `rx.wav`, that grant is the cause.
+     (a *system* daemon can't record — see below). Because the binary is unsigned, macOS
+     re-prompts for the mic after a version bump (`dialf service install` repoints at the new
+     binary) — just **Allow** it again. If recording silently yields an empty `rx.wav`, that
+     grant is the cause.
 5. **Phone app:** keep **Route calls to wired headset** on, then **Start service**.
 6. **Record:**
    ```sh

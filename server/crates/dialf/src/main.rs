@@ -439,6 +439,9 @@ fn ensure_model_env() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
+        // Resolve symlinks: the service runs the daemon via a stable symlink
+        // (~/.local/bin/dialfd), but the bundled model lives next to the *real* binary.
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         if let Some(dir) = exe.parent() {
             let model = dir.join("ten-vad.onnx");
             if model.exists() {
