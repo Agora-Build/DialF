@@ -167,7 +167,9 @@ pub async fn handle(state: &DaemonState, req: ControlRequest) -> ControlResponse
             id,
             done: true,
             ok: Some(false),
-            error: Some(e.to_string()),
+            // Full cause chain ("{:#}"), so wrapped errors surface the underlying reason —
+            // e.g. a YAML parse error includes "… at line N column M".
+            error: Some(format!("{e:#}")),
             data: None,
         },
     }
