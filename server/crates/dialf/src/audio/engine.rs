@@ -94,9 +94,32 @@ impl AudioEngine {
         let tx_path = dir.join(format!("{session_name}-tx.wav"));
         let rx = WavFileSink::create(&rx_path, RECORD_RATE)?;
         let tx = WavFileSink::create(&tx_path, RECORD_RATE)?;
-        DuplexSession::start(
+        let session = DuplexSession::start(
             source, rx, tx, rx_path, tx_path, dir, session_name, mix, unblock,
-        )
+        )?;
+
+        // The capture tool opens even when the mic is denied (macOS) or the card is dead,
+        // but then yields no frames — which would otherwise stall playback on the same
+        // device for minutes. Verify the first frame arrives quickly; a healthy capture
+        // produces audio within a few hundred ms, so 3s with no data means it's dead.
+        let deadline = Instant::now() + Duration::from_millis(3_000);
+        while session.rx_len() == 0 {
+            if Instant::now() >= deadline {
+                tracing::error!(
+                    "capture produced no audio — please grant the daemon Microphone permission \
+                     (macOS: System Settings -> Privacy & Security -> Microphone) and check the \
+                     sound card is connected"
+                );
+                let _ = session.finish(); // kills the capture child, finalizes empty files
+                anyhow::bail!(
+                    "capture produced no audio (3s) — please grant Microphone permission to the \
+                     daemon (macOS: System Settings -> Privacy & Security -> Microphone) and \
+                     check the sound card is connected"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(session)
     }
 
     /// Capture from the card until the current speaking turn ends. With a recording session
@@ -172,7 +195,8 @@ pub fn run_wait_for_speech<S: CaptureSource>(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if last_data.elapsed() >= stall_limit {
                     anyhow::bail!(
-                        "capture produced no audio for {} ms — is the sound card / microphone working?",
+                        "capture stalled — no audio for {} ms. Please grant Microphone permission \
+                         to the daemon (macOS) and check the sound card is connected",
                         stall_limit.as_millis()
                     );
                 }
