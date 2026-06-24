@@ -431,8 +431,11 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                             _ => None,
                         };
                         let mut io = LoopbackJobIo::new(engine, registry, device_id, dry, session);
-                        let outcomes = runner::run_job(&job, &mut io)?;
-                        Ok((outcomes, io.finish()?))
+                        // Always finalize the recording, even if the job errored partway —
+                        // otherwise mix.wav is never written and the legs are left unpadded.
+                        let run = runner::run_job(&job, &mut io);
+                        let recording = io.finish()?;
+                        Ok((run?, recording))
                     })
                     .await??
                 }
@@ -449,8 +452,11 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                             _ => None,
                         };
                         let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry, session);
-                        let outcomes = runner::run_job(&job, &mut io)?;
-                        Ok((outcomes, io.finish()?))
+                        // Always finalize the recording, even if the job errored partway —
+                        // otherwise mix.wav is never written and the legs are left unpadded.
+                        let run = runner::run_job(&job, &mut io);
+                        let recording = io.finish()?;
+                        Ok((run?, recording))
                     })
                     .await??
                 }
