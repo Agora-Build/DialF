@@ -17,6 +17,8 @@ pub trait JobIo {
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason>;
     /// Place an outbound call.
     fn dial(&mut self, number: &str) -> anyhow::Result<()>;
+    /// Block until the current call is answered (active), or `timeout_ms` elapses.
+    fn wait_for_answer(&mut self, timeout_ms: u64) -> anyhow::Result<()>;
     /// Answer the ringing call.
     fn pickup(&mut self) -> anyhow::Result<()>;
     /// Hang up the active call.
@@ -78,6 +80,10 @@ fn run_step(kind: &StepKind, io: &mut dyn JobIo) -> anyhow::Result<String> {
             io.dial(number)?;
             format!("dialed {number}")
         }
+        StepKind::CallWaitAnswered { timeout_ms } => {
+            io.wait_for_answer(*timeout_ms)?;
+            "call answered".to_string()
+        }
         StepKind::CallPickup => {
             io.pickup()?;
             "picked up".to_string()
@@ -125,6 +131,10 @@ mod tests {
         }
         fn dial(&mut self, number: &str) -> anyhow::Result<()> {
             self.events.push(format!("dial:{number}"));
+            Ok(())
+        }
+        fn wait_for_answer(&mut self, _timeout_ms: u64) -> anyhow::Result<()> {
+            self.events.push("wait_answered".into());
             Ok(())
         }
         fn pickup(&mut self) -> anyhow::Result<()> {
@@ -188,6 +198,9 @@ mod tests {
             }
             fn dial(&mut self, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("no device")
+            }
+            fn wait_for_answer(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
             }
             fn pickup(&mut self) -> anyhow::Result<()> {
                 Ok(())

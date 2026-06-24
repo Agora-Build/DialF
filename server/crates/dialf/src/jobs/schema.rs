@@ -27,6 +27,8 @@ pub const DEFAULT_SILENCE_MS: u64 = 3_000;
 /// Default for [`StepKind::WaitForSpeech::onset_duration_ms`] — continuous voiced run
 /// required to count as speech onset (debounces spurious noise/echo hops).
 pub const DEFAULT_ONSET_MS: u64 = 100;
+/// Default for [`StepKind::CallWaitAnswered::timeout_ms`].
+pub const DEFAULT_ANSWER_TIMEOUT_MS: u64 = 30_000;
 
 /// One job step: its kind plus an optional description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,13 @@ pub enum StepKind {
     #[serde(rename = "call.dial")]
     CallDial { number: String },
 
+    /// Block until the outbound call is answered (active), or `timeout_ms` elapses.
+    #[serde(rename = "call.wait_answered")]
+    CallWaitAnswered {
+        #[serde(default = "default_answer_timeout")]
+        timeout_ms: u64,
+    },
+
     /// Answer the ringing call.
     #[serde(rename = "call.pickup")]
     CallPickup,
@@ -95,6 +104,10 @@ fn default_silence() -> u64 {
 
 fn default_onset() -> u64 {
     DEFAULT_ONSET_MS
+}
+
+fn default_answer_timeout() -> u64 {
+    DEFAULT_ANSWER_TIMEOUT_MS
 }
 
 /// Parse a YAML job document.
@@ -131,6 +144,17 @@ mod tests {
             } => {
                 assert_eq!(*end_timeout_ms, 45_000);
                 assert_eq!(*silence_duration_ms, 3_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_call_wait_answered_default() {
+        let job = parse("- type: call.wait_answered\n").expect("parse");
+        match &job[0].kind {
+            StepKind::CallWaitAnswered { timeout_ms } => {
+                assert_eq!(*timeout_ms, DEFAULT_ANSWER_TIMEOUT_MS)
             }
             other => panic!("unexpected: {other:?}"),
         }

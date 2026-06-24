@@ -112,6 +112,11 @@ impl JobIo for LoopbackJobIo {
         Ok(())
     }
 
+    fn wait_for_answer(&mut self, _timeout_ms: u64) -> anyhow::Result<()> {
+        // Loopback calls are answered (active) instantly on dial.
+        Ok(())
+    }
+
     fn pickup(&mut self) -> anyhow::Result<()> {
         // If a call is already tracked, mark active; else synthesize an inbound one.
         let call = match self.current_call_id() {

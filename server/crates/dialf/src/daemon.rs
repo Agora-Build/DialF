@@ -176,6 +176,13 @@ pub async fn handle(state: &DaemonState, req: ControlRequest) -> ControlResponse
 async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<ControlResponse> {
     let id = req.id.clone();
     match req.op {
+        ControlOp::ServerInfo => Ok(ok_data(
+            &id,
+            json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "ten_vad": ten_vad_sys::version().unwrap_or_else(|| "stub".to_string()),
+            }),
+        )),
         ControlOp::DevicesList => {
             let list = state.registry.lock().unwrap().list();
             Ok(ok_data(&id, json!(list)))
@@ -441,6 +448,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 }
                 DeviceKind::Phone => {
                     let hub = state.hub.clone();
+                    let registry = state.registry.clone();
                     let rt = tokio::runtime::Handle::current();
                     tokio::task::spawn_blocking(move || -> JobResult {
                         let session = match (dry, record_dir) {
@@ -451,7 +459,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                             )?),
                             _ => None,
                         };
-                        let mut io = PhoneJobIo::new(hub, engine, rt, device_id, dry, session);
+                        let mut io = PhoneJobIo::new(hub, engine, rt, registry, device_id, dry, session);
                         // Always finalize the recording, even if the job errored partway —
                         // otherwise mix.wav is never written and the legs are left unpadded.
                         let run = runner::run_job(&job, &mut io);

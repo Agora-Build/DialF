@@ -61,8 +61,11 @@ object Dialf {
         val id = idFor(call)
         val state = when (call.state) {
             Call.STATE_RINGING -> "ringing"
+            // Outbound call placed but not yet answered — keep distinct from "active" so the
+            // daemon's call.wait_answered can block until the callee actually picks up.
+            Call.STATE_DIALING, Call.STATE_CONNECTING -> "dialing"
             Call.STATE_DISCONNECTED -> "ended"
-            else -> "active" // dialing/connecting/active/holding
+            else -> "active" // active / holding
         }
         val details = call.details
         val number = details?.handle?.schemeSpecificPart

@@ -13,6 +13,7 @@
 #
 # Step reference:
 #   call.dial {number}        place an outbound call
+#   call.wait_answered {timeout_ms}  block until the callee actually answers (active)
 #   call.pickup               answer the ringing call (use this for inbound jobs)
 #   call.hangup               end the call
 #   audio.play {file}         inject a WAV into the call (-> callee hears it)
@@ -27,9 +28,9 @@
   number: "+15555550123"
   description: place the outbound call
 
-- type: wait
-  ms: 6000
-  description: allow time for the callee to pick up
+- type: call.wait_answered
+  timeout_ms: 30000
+  description: wait until the callee actually answers (errors if no answer in 30s)
 
 - type: audio.play
   file: ../../samples/prompt-en-1.wav

@@ -27,7 +27,11 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallState {
+    /// Outbound call placed; the far end is ringing but hasn't answered yet.
+    Dialing,
+    /// Inbound call ringing.
     Ringing,
+    /// Connected (the call is answered and audio is flowing).
     Active,
     Ended,
 }
@@ -196,6 +200,9 @@ pub struct ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlOp {
+    /// Report the daemon's version (and ten-vad availability).
+    #[serde(rename = "server.info")]
+    ServerInfo,
     /// List connected devices.
     #[serde(rename = "devices.list")]
     DevicesList,

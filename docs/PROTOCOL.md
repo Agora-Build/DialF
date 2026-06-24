@@ -22,7 +22,7 @@ closed.
 |--------------|-----------------------------------------------------------------------|
 | `hello`      | `device_id`, `name`, `key`, `caps[]`, `app_version?`                   |
 | `heartbeat`  | `ts`, `battery?` — sent ~every 30s                                     |
-| `call_state` | `call_id`, `state` (`ringing`/`active`/`ended`), `number?`, `direction` (`in`/`out`) |
+| `call_state` | `call_id`, `state` (`dialing`/`ringing`/`active`/`ended`), `number?`, `direction` (`in`/`out`). `dialing` = outbound, far end ringing, not yet answered; `active` = answered/connected |
 | `sms`        | `direction` (`in`/`out`), `from?`, `to?`, `body`, `ts`                 |
 | `calls`      | `entries[]` of `{number?, kind, ts, duration}` — reply to `list_calls` |
 | `sims`       | `entries[]` of `{slot, sub_id, name?, carrier?, number?, is_default}` — reply to `list_sims` |
@@ -62,6 +62,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
+| `server.info`  | —                               | `{version, ten_vad}` (the daemon's own) |
 | `devices.list` | —                               | array of devices                       |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.pickup`  | `device`                        | ok                                     |
@@ -117,6 +118,7 @@ Flags:
 | `type`                  | Fields                                  |
 |-------------------------|-----------------------------------------|
 | `call.dial`             | `number`                                |
+| `call.wait_answered`    | `timeout_ms` — block until the call is answered (active) |
 | `call.pickup`           | —                                       |
 | `call.hangup`           | —                                       |
 | `audio.play`            | `file`                                  |

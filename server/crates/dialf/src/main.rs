@@ -207,6 +207,16 @@ async fn main() -> anyhow::Result<()> {
 
     ensure_model_env();
 
+    // `dialf --version` reports both the CLI and the running daemon (dialfd) version, so a
+    // CLI/daemon mismatch after an upgrade is obvious. Handle it before clap so we can query
+    // the control socket (clap's built-in version flag is build-time only).
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let wants_version = argv.iter().any(|a| a == "-V" || a == "--version");
+    let wants_help = argv.iter().any(|a| a == "-h" || a == "--help");
+    if wants_version && !wants_help {
+        return print_versions(&argv).await;
+    }
+
     let cli = Cli::parse();
     let config_path = cli.config.clone().unwrap_or_else(Config::default_path);
     let config = Config::load(&config_path)?;
@@ -449,6 +459,49 @@ fn ensure_model_env() {
             }
         }
     }
+}
+
+/// Print the CLI version, and the running daemon's version if it's reachable.
+async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
+    println!("dialf  (CLI):    {}", env!("CARGO_PKG_VERSION"));
+    // Resolve the control socket the way main() does (honor `--config <path>`).
+    let cfg_path = argv
+        .iter()
+        .position(|a| a == "--config")
+        .and_then(|i| argv.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::default_path);
+    let socket = match Config::load(&cfg_path) {
+        Ok(c) => c.control_socket,
+        Err(_) => {
+            println!("dialfd (daemon): unknown (no config at {})", cfg_path.display());
+            return Ok(());
+        }
+    };
+    // Cap the query so `--version` can never hang on an unresponsive daemon.
+    let q = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        call(&socket, ControlOp::ServerInfo),
+    )
+    .await;
+    match q {
+        Ok(Ok(resp)) => match resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("version"))
+            .and_then(|v| v.as_str())
+        {
+            Some(v) => println!("dialfd (daemon): {v}"),
+            // Reachable but doesn't report a version => an older daemon. This is the exact
+            // CLI/daemon mismatch worth surfacing — point at the fix.
+            None => println!(
+                "dialfd (daemon): running, older than the CLI — re-run `dialf service install` to update"
+            ),
+        },
+        Ok(Err(_)) => println!("dialfd (daemon): not running"),
+        Err(_) => println!("dialfd (daemon): not responding"),
+    }
+    Ok(())
 }
 
 /// Send one control request and read one response line.

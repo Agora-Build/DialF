@@ -5,8 +5,8 @@
 //! calls are bridged via a captured [`tokio::runtime::Handle`].
 
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 
@@ -15,13 +15,15 @@ use crate::audio::record::{DuplexSession, RecordOutput};
 use crate::audio::vad::{EndReason, TurnConfig};
 use crate::hub::Hub;
 use crate::jobs::runner::JobIo;
-use crate::protocol::Action;
+use crate::protocol::{Action, CallState};
+use crate::registry::Registry;
 
 /// Drives a connected phone for a job.
 pub struct PhoneJobIo {
     hub: Arc<Hub>,
     engine: Arc<AudioEngine>,
     rt: Handle,
+    registry: Arc<Mutex<Registry>>,
     device_id: String,
     dry_audio: bool,
     session: Option<DuplexSession>,
@@ -30,10 +32,12 @@ pub struct PhoneJobIo {
 impl PhoneJobIo {
     /// Build a phone JobIo. `rt` is the tokio handle used to drive async hub calls from
     /// the blocking job thread.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hub: Arc<Hub>,
         engine: Arc<AudioEngine>,
         rt: Handle,
+        registry: Arc<Mutex<Registry>>,
         device_id: impl Into<String>,
         dry_audio: bool,
         session: Option<DuplexSession>,
@@ -42,6 +46,7 @@ impl PhoneJobIo {
             hub,
             engine,
             rt,
+            registry,
             device_id: device_id.into(),
             dry_audio,
             session,
@@ -85,6 +90,32 @@ impl JobIo for PhoneJobIo {
             number: number.to_string(),
             sim_sub_id: None, // job-driven dials use the default SIM
         })
+    }
+
+    fn wait_for_answer(&mut self, timeout_ms: u64) -> anyhow::Result<()> {
+        // Poll the registry (updated by the phone's call_state frames) until the call is
+        // active. dialing/ringing -> keep waiting; ended after it appeared -> the callee
+        // never answered; timeout -> give up.
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut seen = false;
+        loop {
+            let state = self
+                .registry
+                .lock()
+                .unwrap()
+                .get(&self.device_id)
+                .and_then(|d| d.current_call.as_ref().map(|c| c.state));
+            match state {
+                Some(CallState::Active) => return Ok(()),
+                Some(_) => seen = true, // dialing / ringing
+                None if seen => anyhow::bail!("call ended before it was answered"),
+                None => {} // not placed yet — keep waiting
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("call not answered within {timeout_ms}ms");
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
     }
 
     fn pickup(&mut self) -> anyhow::Result<()> {
