@@ -21,9 +21,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 
@@ -40,6 +41,10 @@ pub const RECORD_RATE: u32 = 16_000;
 /// consuming (turn ended / between turns), where the frame is irrelevant. rx is written
 /// before the send attempt, so recording is unaffected regardless.
 const VAD_CHANNEL_BOUND: usize = 64;
+
+/// How long [`VadFrameSource::read`] waits for a frame before reporting `WouldBlock`, so the
+/// caller can apply its own stall deadline instead of blocking forever on a dead capture.
+const VAD_RECV_POLL: Duration = Duration::from_millis(200);
 
 /// Paths produced by a finished recording.
 #[derive(Debug, Clone)]
@@ -221,12 +226,18 @@ impl CaptureSource for VadFrameSource<'_> {
             return Ok(0);
         }
         while self.pos >= self.leftover.len() {
-            match self.rx.recv() {
+            match self.rx.recv_timeout(VAD_RECV_POLL) {
                 Ok(f) => {
                     self.leftover = f;
                     self.pos = 0;
                 }
-                Err(_) => return Ok(0), // capture ended / channel disconnected
+                // No frame yet: report `WouldBlock` so the caller can enforce a stall
+                // deadline rather than block forever if the capture is dead.
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "no capture frame yet"));
+                }
+                // Capture ended (bg thread exited / sender dropped) -> end of stream.
+                Err(RecvTimeoutError::Disconnected) => return Ok(0),
             }
         }
         let avail = self.leftover.len() - self.pos;
@@ -513,6 +524,22 @@ mod tests {
         fn sample_rate(&self) -> u32 {
             RECORD_RATE
         }
+    }
+
+    #[test]
+    fn vad_frame_source_would_block_then_delivers_then_eof() {
+        let (tx, mut rx) = sync_channel::<Vec<i16>>(4);
+        let mut src = VadFrameSource::new(&mut rx);
+        let mut buf = [0i16; 256];
+        // No frame yet but the sender is alive -> WouldBlock (not EOF).
+        let err = src.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // A frame arrives -> delivered.
+        tx.send(vec![5i16; 100]).unwrap();
+        assert_eq!(src.read(&mut buf).unwrap(), 100);
+        // Sender dropped (capture ended) -> end of stream.
+        drop(tx);
+        assert_eq!(src.read(&mut buf).unwrap(), 0);
     }
 
     #[test]

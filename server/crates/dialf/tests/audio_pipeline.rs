@@ -81,6 +81,30 @@ fn wait_for_speech_over_vad_frame_channel() {
     );
 }
 
+/// A dead/stalled capture (channel open but no frames) must make `wait_for_speech` fail
+/// with a clear error instead of hanging forever — the hop-based timeout can't fire without
+/// frames, so the wall-clock stall guard has to.
+#[test]
+fn wait_for_speech_bails_on_dead_capture() {
+    if !dialf::vad_linked() {
+        eprintln!("ten-vad not linked; skipping dead-capture test");
+        return;
+    }
+    let (tx, mut rx) = sync_channel::<Vec<i16>>(1); // keep tx alive: recv times out, not disconnects
+    let mut src = VadFrameSource::new(&mut rx);
+    let turn = TurnConfig {
+        silence_duration_ms: 300,
+        end_timeout_ms: 60_000,
+        ..TurnConfig::default()
+    };
+    let err = run_wait_for_speech(&mut src, turn).expect_err("dead capture must error, not hang");
+    assert!(
+        err.to_string().contains("no audio"),
+        "expected a clear capture error, got: {err}"
+    );
+    drop(tx);
+}
+
 /// Full-duplex recording: a WAV "card" (the fixture) is captured continuously to rx.wav,
 /// tx.wav stays silent (we inject nothing), and the mix equals rx. All three the same
 /// length. No sound card and no VAD needed — recording is independent of VAD.

@@ -7,6 +7,7 @@
 //! All methods are synchronous; the daemon calls them on a blocking task.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::config::AudioConfig;
 
@@ -157,8 +158,29 @@ pub fn run_wait_for_speech<S: CaptureSource>(
     let mut read_buf = vec![0i16; 4096];
     let mut pending: Vec<i16> = Vec::with_capacity(hop * 4);
 
+    // Wall-clock stall guard: a live capture delivers frames continuously (silence is still
+    // frames of zeros), so if no data arrives for this long the capture is dead — fail with
+    // a clear error instead of blocking forever (the hop-based timeout can't fire with no
+    // frames to advance it). Only sources that report `WouldBlock` (the duplex VAD stream)
+    // are subject to this; blocking sources are unaffected.
+    let stall_limit = Duration::from_millis(3_000);
+    let mut last_data = Instant::now();
+
     let reason = 'outer: loop {
-        let n = src.read(&mut read_buf)?;
+        let n = match src.read(&mut read_buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_data.elapsed() >= stall_limit {
+                    anyhow::bail!(
+                        "capture produced no audio for {} ms — is the sound card / microphone working?",
+                        stall_limit.as_millis()
+                    );
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        last_data = Instant::now();
         if n == 0 {
             // Drain any final whole hop, then signal end-of-stream.
             if pending.len() >= hop {
