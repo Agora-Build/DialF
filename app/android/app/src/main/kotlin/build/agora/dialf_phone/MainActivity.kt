@@ -167,17 +167,28 @@ class MainActivity : FlutterActivity() {
 
     private fun requestDialerRole() {
         val rm = getSystemService(RoleManager::class.java) ?: return
-        if (rm.isRoleAvailable(RoleManager.ROLE_DIALER) && !rm.isRoleHeld(RoleManager.ROLE_DIALER)) {
+        // Gate on the authoritative check (Telecom.isDefaultDialer), not RoleManager.isRoleHeld,
+        // which can be stale after a reinstall — otherwise we'd skip the prompt and wrongly
+        // report "granted" while the app isn't actually the default dialer.
+        if (rm.isRoleAvailable(RoleManager.ROLE_DIALER) && !Telecom.isDefaultDialer(this)) {
             startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_DIALER), reqRole)
         } else {
-            Dialf.emit(mapOf("type" to "dialer_role", "granted" to rm.isRoleHeld(RoleManager.ROLE_DIALER)))
+            Dialf.emit(mapOf("type" to "dialer_role", "granted" to Telecom.isDefaultDialer(this)))
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == reqRole) {
-            Dialf.emit(mapOf("type" to "dialer_role", "granted" to (resultCode == RESULT_OK)))
+            // Re-read the real role rather than trusting the result code.
+            Dialf.emit(mapOf("type" to "dialer_role", "granted" to Telecom.isDefaultDialer(this)))
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-sync the dialer-role status every time the app is shown, so a role lost to a
+        // reinstall (or revoked in Settings) is reflected immediately instead of staying "✓".
+        Dialf.emit(mapOf("type" to "dialer_role", "granted" to Telecom.isDefaultDialer(this)))
     }
 }

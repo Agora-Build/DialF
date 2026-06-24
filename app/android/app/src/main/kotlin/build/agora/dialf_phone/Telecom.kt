@@ -22,8 +22,12 @@ import android.telephony.TelephonyManager
 object Telecom {
 
     fun isDefaultDialer(ctx: Context): Boolean {
-        val rm = ctx.getSystemService(android.app.role.RoleManager::class.java)
-        return rm?.isRoleHeld(android.app.role.RoleManager.ROLE_DIALER) == true
+        // Authoritative: are we the *active* default dialer package? RoleManager.isRoleHeld
+        // can report stale/incorrect state after an app reinstall (showing "held" when the
+        // app is no longer the default dialer and its InCallService won't bind), so check
+        // the package the system actually uses.
+        val tm = ctx.getSystemService(TelecomManager::class.java)
+        return tm?.defaultDialerPackage == ctx.packageName
     }
 
     /** Place a call; if [simSubId] is given, route it to that SIM, else the system default. */
