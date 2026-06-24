@@ -23,11 +23,22 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        // Stable *sideload* key (committed, not a Play Store key). Gives every release APK
+        // the same signature so sideloaded updates install over each other instead of
+        // failing with INSTALL_FAILED_UPDATE_INCOMPATIBLE (the auto-generated debug key
+        // differs per CI runner).
+        create("sideload") {
+            storeFile = file("dialf-sideload.keystore")
+            storePassword = "dialfsideload"
+            keyAlias = "dialf"
+            keyPassword = "dialfsideload"
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("sideload")
         }
     }
 }

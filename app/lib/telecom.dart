@@ -30,6 +30,10 @@ class Native {
   static Future<bool> isDefaultDialer() async =>
       (await _m.invokeMethod<bool>('isDefaultDialer')) ?? false;
 
+  /// App version for the title bar, e.g. "0.1.18(123)".
+  static Future<String> appVersion() async =>
+      (await _m.invokeMethod<String>('appVersion')) ?? '';
+
   /// Whether calls are routed to the wired headset (the USB sound-card bridge).
   static Future<bool> getWiredHeadset() async =>
       (await _m.invokeMethod<bool>('getWiredHeadset')) ?? true;

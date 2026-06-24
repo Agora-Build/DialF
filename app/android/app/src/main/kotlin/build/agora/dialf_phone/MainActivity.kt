@@ -63,6 +63,7 @@ class MainActivity : FlutterActivity() {
                             result.success(null)
                         }
                         "isServiceEnabled" -> result.success(prefs().getBoolean("enabled", false))
+                        "appVersion" -> result.success(appVersion())
                         "isDefaultDialer" -> result.success(Telecom.isDefaultDialer(this))
                         "requestDialerRole" -> {
                             requestDialerRole()
@@ -163,6 +164,16 @@ class MainActivity : FlutterActivity() {
 
     private fun setEnabled(enabled: Boolean) {
         prefs().edit().putBoolean("enabled", enabled).apply()
+    }
+
+    /** "<versionName>(<versionCode>)" for the title, e.g. "0.1.18(123)". */
+    private fun appVersion(): String = try {
+        val pi = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pi.longVersionCode
+        else @Suppress("DEPRECATION") pi.versionCode.toLong()
+        "${pi.versionName}($code)"
+    } catch (e: Exception) {
+        ""
     }
 
     private fun requestDialerRole() {

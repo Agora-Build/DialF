@@ -41,6 +41,7 @@ class _HomePageState extends State<HomePage> {
   bool _connected = false;
   String? _server;
   bool _running = false;
+  String _appVersion = '';
   final List<String> _log = [];
   StreamSubscription<Map<String, dynamic>>? _sub;
 
@@ -60,6 +61,7 @@ class _HomePageState extends State<HomePage> {
     _wiredHeadset = await Native.getWiredHeadset();
     _keepRunning = await Native.getKeepRunning();
     _running = await Native.isServiceEnabled(); // reflect the actual service state
+    _appVersion = await Native.appVersion();
     if (mounted) setState(() {});
   }
 
@@ -125,7 +127,9 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('DialF Phone')),
+      appBar: AppBar(
+        title: Text(_appVersion.isEmpty ? 'DialF Phone' : 'DialF Phone/$_appVersion'),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

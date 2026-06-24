@@ -12,3 +12,6 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# Exception: the committed *sideload* signing key. Not a Play Store key — its only job is
+# a STABLE signature so sideloaded APK updates install over each other (no uninstall).
+!app/dialf-sideload.keystore
