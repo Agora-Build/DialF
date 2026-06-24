@@ -495,7 +495,7 @@ async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
             // Reachable but doesn't report a version => an older daemon. This is the exact
             // CLI/daemon mismatch worth surfacing — point at the fix.
             None => println!(
-                "dialfd (daemon): running, older than the CLI — re-run `dialf service install` to update"
+                "dialfd (daemon): running, older than the CLI — re-run `dialf service install` or `dialf service install --user` to update"
             ),
         },
         Ok(Err(_)) => println!("dialfd (daemon): not running"),
