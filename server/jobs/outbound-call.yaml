@@ -1,11 +1,11 @@
-# DialF — end-to-end outbound call (a short scripted survey).
+# DialF — outbound call (a short scripted survey).
 #
 # Flow: place a call -> wait for the callee to be connected -> greet -> ask two
 # questions, each followed by a VAD-gated wait for the answer -> say goodbye ->
 # text a confirmation -> hang up.
 #
 # Run it against a connected phone:
-#   dialf run jobs/end-to-end-call.yaml --device phone1
+#   dialf run jobs/outbound-call.yaml --device phone1
 #
 # Audio is bridged through the host's USB sound card (see config audio.*). If
 # `audio.record_dir` is set, the whole call is recorded to <job>-rx/tx/mix.wav.
@@ -14,7 +14,7 @@
 # Step reference:
 #   call.dial {number}        place an outbound call
 #   call.wait_answered {timeout_ms}  block until the callee actually answers (active)
-#   call.pickup               answer the ringing call (use this for inbound jobs)
+#   call.answer               answer the ringing call (use this for inbound jobs)
 #   call.hangup               end the call
 #   audio.play {file}         inject a WAV into the call (-> callee hears it)
 #   audio.wait_for_speech {end_timeout_ms, silence_duration_ms}

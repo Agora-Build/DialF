@@ -2,7 +2,7 @@
 //!
 //! Tracks each connected phone's outbound command channel and pending-ack waiters, and
 //! turns an [`Action`] into a `cmd` frame whose [`PhoneToServer::Ack`] is matched back by
-//! [`Hub::resolve_ack`]. The loopback test device does not go through the hub.
+//! [`Hub::resolve_ack`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,7 +111,7 @@ impl Hub {
         }
     }
 
-    /// Send a command without awaiting the ack (e.g. auto-pickup from the read loop).
+    /// Send a command without awaiting the ack (e.g. auto-answer from the read loop).
     pub async fn fire(&self, device_id: &str, action: Action) -> anyhow::Result<()> {
         let conn = self.conn(device_id)?;
         let frame = ServerToPhone::Cmd {

@@ -50,7 +50,7 @@ dialf daemon                       # run dialfd in the foreground
 dialf devices                      # list connected phones
 dialf sims <device>                # list SIMs (default tagged)
 dialf call dial   <device> <number> [--sim <sub_id>]   # place a call (default SIM if omitted)
-dialf call pickup <device>            # answer the ringing call
+dialf call answer <device>            # answer the ringing call
 dialf call hangup <device>            # end the active call
 dialf call reject <device> [--drop]   # decline ringing call (--drop = answer+hangup, no voicemail)
 dialf call list   <device>            # read the call log (JSON)
@@ -58,7 +58,8 @@ dialf voicemail off|on <device> [--sim N]   # toggle carrier voicemail (MMI)
 dialf mmi <device> <code> [--sim N]   # (advanced) raw MMI/USSD code
 dialf sms send <device> <to> <body>
 dialf sms list <device>
-dialf run  <job.yaml> [--device <id>]
+dialf run  <job.yaml> [--device <id>]                  # run a job once
+dialf run  <job.yaml> --autoanswer <numbers>           # serve a job for inbound calls (Ctrl-C reverts)
 dialf play <file>
 ```
 

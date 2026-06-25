@@ -11,7 +11,6 @@ pub mod config;
 pub mod daemon;
 pub mod hub;
 pub mod jobs;
-pub mod loopback;
 pub mod phone;
 pub mod protocol;
 pub mod registry;

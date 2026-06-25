@@ -5,7 +5,6 @@
 #   dialf run jobs/record-only.yaml --device <device>
 #
 # The --device is just the job target; audio steps use the sound card, not the phone.
-# (Run `dialf daemon --with-loopback` and use `--device loopback` for a phone-free run.)
 
 - type: audio.play
   file: ../../samples/prompt-en-1.wav

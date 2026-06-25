@@ -7,15 +7,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio_tungstenite::tungstenite::Message;
 
 use dialf::config::Config;
-use dialf::protocol::{
-    CallState, ControlOp, ControlRequest, ControlResponse, Direction, PhoneToServer, ServerToPhone,
-};
+use dialf::protocol::{ControlOp, ControlRequest, ControlResponse};
 
 #[derive(Parser)]
 #[command(name = "dialf", version, about = "Drive a phone's calls via dialfd")]
@@ -31,14 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the dialfd daemon (control socket + audio engine + phone WS plane).
-    Daemon {
-        /// Simulate audio steps (no sound card / ten-vad needed).
-        #[arg(long)]
-        dry_audio: bool,
-        /// Also register the in-process simulated phone (off by default; real phones only).
-        #[arg(long)]
-        with_loopback: bool,
-    },
+    Daemon,
     /// List connected phones.
     Devices,
     /// Place/answer/hang up calls and read the call log.
@@ -66,13 +55,18 @@ enum Command {
         #[arg(long)]
         sim: Option<i32>,
     },
-    /// Run a YAML job against a device.
+    /// Run a YAML job against a device — or, with `--autoanswer`, serve it for inbound calls.
     Run {
         /// Path to the YAML job file.
         path: PathBuf,
         /// Target device id (defaults to the only connected device).
         #[arg(long)]
         device: Option<String>,
+        /// Numbers to auto-answer with this job (comma-separated or repeated). When set,
+        /// `dialf run` serves in the foreground: it answers matching inbound calls with this
+        /// job (overriding config.yaml) and reverts on exit. Otherwise the job runs once.
+        #[arg(long, value_delimiter = ',')]
+        autoanswer: Vec<String>,
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
@@ -83,28 +77,6 @@ enum Command {
         /// Install for the current user (login) instead of system-wide (boot).
         #[arg(long, global = true)]
         user: bool,
-    },
-    /// (testing) Run a mock phone that connects to dialfd and acks commands.
-    #[command(hide = true)]
-    MockPhone {
-        /// dialfd phone WS address (host:port).
-        #[arg(long, default_value = "127.0.0.1:8765")]
-        server: String,
-        /// Shared key (defaults to the config's shared_key).
-        #[arg(long)]
-        key: Option<String>,
-        /// Device id to register as.
-        #[arg(long, default_value = "mock-phone")]
-        id: String,
-        /// Friendly device name.
-        #[arg(long, default_value = "Mock Phone")]
-        name: String,
-        /// Emit an inbound ringing call from this number on connect (tests auto-pickup).
-        #[arg(long)]
-        ring: Option<String>,
-        /// Emit an inbound SMS on connect, formatted "from:body" (tests receive).
-        #[arg(long)]
-        incoming_sms: Option<String>,
     },
 }
 
@@ -176,8 +148,8 @@ enum CallAction {
         #[arg(long)]
         sim: Option<i32>,
     },
-    /// Answer the ringing call: dialf call pickup <device>.
-    Pickup { device: String },
+    /// Answer the ringing call: dialf call answer <device>.
+    Answer { device: String },
     /// Hang up the active call: dialf call hangup <device>.
     Hangup { device: String },
     /// Decline the ringing call: dialf call reject <device> [--drop].
@@ -223,10 +195,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = config.control_socket.clone();
 
     match cli.command {
-        Command::Daemon {
-            dry_audio,
-            with_loopback,
-        } => dialf::daemon::run(config, dry_audio, with_loopback).await,
+        Command::Daemon => dialf::daemon::run(config, config_path).await,
 
         Command::Devices => {
             let resp = call(&socket, ControlOp::DevicesList).await?;
@@ -241,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
                     number,
                     sim_sub_id: sim,
                 },
-                CallAction::Pickup { device } => ControlOp::CallPickup { device },
+                CallAction::Answer { device } => ControlOp::CallAnswer { device },
                 CallAction::Hangup { device } => ControlOp::CallHangup { device },
                 CallAction::Reject { device, drop } => ControlOp::CallReject { device, drop },
                 CallAction::List { device, human: h } => {
@@ -314,19 +283,29 @@ async fn main() -> anyhow::Result<()> {
             print_response(&resp);
             ok_or_err(resp)
         }
-        Command::Run { path, device } => {
+        Command::Run {
+            path,
+            device,
+            autoanswer,
+        } => {
             // dialfd reads the job file from *its* working directory (often a service with
             // cwd=/), so resolve the path against the CLI's cwd before sending it.
             let abs = std::fs::canonicalize(&path)
-                .with_context(|| format!("job file not found: {}", path.display()))?;
-            let op = ControlOp::JobRun {
-                path: Some(abs.to_string_lossy().to_string()),
-                steps: None,
-                device,
-            };
-            let resp = call(&socket, op).await?;
-            print_response(&resp);
-            ok_or_err(resp)
+                .with_context(|| format!("job file not found: {}", path.display()))?
+                .to_string_lossy()
+                .to_string();
+            if autoanswer.is_empty() {
+                let op = ControlOp::JobRun {
+                    path: Some(abs),
+                    steps: None,
+                    device,
+                };
+                let resp = call(&socket, op).await?;
+                print_response(&resp);
+                ok_or_err(resp)
+            } else {
+                serve_autoanswer(&socket, autoanswer, abs, device).await
+            }
         }
         Command::Play { file } => {
             // Resolve against the CLI's cwd — dialfd opens the file in its own dir.
@@ -355,90 +334,7 @@ async fn main() -> anyhow::Result<()> {
             };
             dialf::service::run(act, scope, config)
         }
-        Command::MockPhone {
-            server,
-            key,
-            id,
-            name,
-            ring,
-            incoming_sms,
-        } => {
-            let key = key.unwrap_or_else(|| config.shared_key.clone());
-            mock_phone(server, key, id, name, ring, incoming_sms).await
-        }
     }
-}
-
-/// A minimal phone: connect, hello, optionally ring / deliver an SMS, then ack commands.
-async fn mock_phone(
-    server: String,
-    key: String,
-    id: String,
-    name: String,
-    ring: Option<String>,
-    incoming_sms: Option<String>,
-) -> anyhow::Result<()> {
-    let url = format!("ws://{server}");
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .with_context(|| format!("connect {url}"))?;
-    let (mut sink, mut stream) = ws.split();
-
-    let hello = PhoneToServer::Hello {
-        device_id: id.clone(),
-        name,
-        key,
-        caps: vec!["call".into(), "sms".into()],
-        app_version: Some("mock".into()),
-    };
-    sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
-        .await?;
-    println!("[mock {id}] connected to {server}");
-
-    if let Some(number) = ring {
-        let cs = PhoneToServer::CallState {
-            call_id: "ring-1".into(),
-            state: CallState::Ringing,
-            number: Some(number.clone()),
-            direction: Direction::In,
-        };
-        sink.send(Message::Text(serde_json::to_string(&cs)?.into()))
-            .await?;
-        println!("[mock {id}] ringing from {number}");
-    }
-
-    if let Some(s) = incoming_sms {
-        let (from, body) = s.split_once(':').unwrap_or(("unknown", s.as_str()));
-        let sms = PhoneToServer::Sms {
-            direction: Direction::In,
-            from: Some(from.to_string()),
-            to: None,
-            body: body.to_string(),
-            ts: 0,
-        };
-        sink.send(Message::Text(serde_json::to_string(&sms)?.into()))
-            .await?;
-        println!("[mock {id}] incoming sms from {from}");
-    }
-
-    while let Some(msg) = stream.next().await {
-        let msg = msg?;
-        if msg.is_close() {
-            break;
-        }
-        let Ok(text) = msg.to_text() else { continue };
-        if text.is_empty() {
-            continue;
-        }
-        if let Ok(ServerToPhone::Cmd { cmd_id, action }) = serde_json::from_str(text) {
-            println!("[mock {id}] cmd: {action:?}");
-            let ack = PhoneToServer::Ack { cmd_id, ok: true };
-            sink.send(Message::Text(serde_json::to_string(&ack)?.into()))
-                .await?;
-        }
-    }
-    println!("[mock {id}] disconnected");
-    Ok(())
 }
 
 /// For prebuilt distributions: if `TEN_VAD_MODEL` is unset and a `ten-vad.onnx` sits next
@@ -502,6 +398,71 @@ async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
         Err(_) => println!("dialfd (daemon): not responding"),
     }
     Ok(())
+}
+
+/// Foreground serve: register an auto-answer override (this job for these numbers), stream the
+/// daemon's event lines, and revert on exit. Ctrl-C (or the daemon closing) ends the session —
+/// the held connection drops, so the daemon removes the override. A call already in progress
+/// finishes its script on the daemon (the job runs there, not in this CLI).
+async fn serve_autoanswer(
+    socket: &Path,
+    numbers: Vec<String>,
+    path: String,
+    device: Option<String>,
+) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket).await.with_context(|| {
+        format!(
+            "connect control socket {} — is dialfd running? (dialf daemon)",
+            socket.display()
+        )
+    })?;
+    let req = ControlRequest {
+        id: "1".to_string(),
+        op: ControlOp::AutoanswerServe {
+            numbers,
+            path,
+            device,
+        },
+    };
+    let mut line = serde_json::to_string(&req)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await?;
+    stream.flush().await?;
+
+    let (read, _write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    println!("(Ctrl-C to stop; an in-progress call finishes on the daemon)");
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nstopped serving — reverted to config.yaml");
+                return Ok(());
+            }
+            next = lines.next_line() => match next? {
+                Some(l) => {
+                    let resp: ControlResponse = match serde_json::from_str(&l) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    if resp.ok == Some(false) {
+                        anyhow::bail!(resp.error.unwrap_or_else(|| "serve rejected".to_string()));
+                    }
+                    if let Some(ev) = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("event"))
+                        .and_then(|v| v.as_str())
+                    {
+                        println!("{ev}");
+                    }
+                }
+                None => {
+                    println!("daemon closed the connection");
+                    return Ok(());
+                }
+            },
+        }
+    }
 }
 
 /// Send one control request and read one response line.

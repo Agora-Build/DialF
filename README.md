@@ -13,7 +13,7 @@ dialf (CLI) ──▶ dialfd (host daemon) ──WiFi──▶ mobile app  ─�
 
 - Make / answer / hang up / **reject** calls — `reject --drop` answers then instantly hangs
   up so callers can't reach voicemail (when the carrier won't disable it).
-- **Auto-answer** an allow-list (`autopickup`); **dual-SIM aware** (`sims`, `call dial --sim`).
+- **Auto-answer** an allow-list (`autoanswer`); **dual-SIM aware** (`sims`, `call dial --sim`).
 - Read the **call log**, send & receive **SMS**.
 - **Carrier controls**: `voicemail` on/off and raw `mmi`/USSD (reply captured headlessly).
 - **Scripted audio conversations** (YAML + ten-vad), call recording, runtime audio injection.
@@ -130,7 +130,7 @@ Host (the computer running `dialfd`) and phone on the **same WiFi**. Minimal man
    dialf call list <device> --human            # read the call log
    ```
 9. **Run a scripted call** (needs the audio bridge):
-   `dialf run server/jobs/end-to-end-call.yaml --device <device>`.
+   `dialf run server/jobs/outbound-call.yaml --device <device>`.
 
 (`<device>` is the id from `dialf devices`; omit `--device`/`<device>` when exactly one phone
 is connected.)
@@ -140,13 +140,12 @@ is connected.)
 Start the daemon (or install it as a service, above), then drive it with `dialf`:
 
 ```sh
-dialf daemon [--dry-audio] [--with-loopback]   # run dialfd; --dry-audio = no sound card,
-                                               #   --with-loopback = in-process test phone
+dialf daemon                                   # run dialfd (control socket + WS + mDNS)
 dialf devices                                  # list connected phones
 dialf sims <device>                            # list SIMs (slot/number/carrier, default tagged)
 
 dialf call dial   <device> <number> [--sim N]  # place a call (default SIM if --sim omitted)
-dialf call pickup <device>                     # answer the ringing call
+dialf call answer <device>                     # answer the ringing call
 dialf call hangup <device>                     # end the active call
 dialf call reject <device> [--drop]            # decline ringing call (--drop = answer+hangup)
 dialf call list   <device> [--human]           # read the call log (JSON, or --human)
@@ -158,7 +157,8 @@ dialf voicemail off <device> [--sim N]                  # disable carrier voicem
 dialf voicemail on  <device> [--number <vm#>] [--sim N] # re-enable
 dialf mmi <device> <code> [--sim N]            # (advanced) raw MMI/USSD code, returns the reply
 
-dialf run  <job.yaml> [--device <id>]          # run a scripted job
+dialf run  <job.yaml> [--device <id>]          # run a scripted job once
+dialf run  <job.yaml> --autoanswer <numbers>   # serve: answer those numbers with this job (Ctrl-C reverts)
 dialf play <file>                              # inject audio out the sound card
 dialf --version                                # CLI + running daemon (dialfd) versions
 ```
@@ -167,20 +167,12 @@ dialf --version                                # CLI + running daemon (dialfd) v
 over a local control socket, so it must run on the same host. `--human` formats
 times/numbers/durations; omit it for JSON (scriptable).
 
-### Try it without hardware
-
-```sh
-dialf daemon --dry-audio --with-loopback &
-dialf call dial loopback 5551234
-dialf run server/jobs/sample.yaml
-```
-
 ## How It Works
 
 Two independent planes:
 
 - **Control plane (WiFi):** app ↔ `dialfd` over WebSocket (mDNS discovery + shared key) —
-  dial / pickup / reject / SMS / call-log / heartbeat. No audio. The app runs a native
+  dial / answer / reject / SMS / call-log / heartbeat. No audio. The app runs a native
   foreground service, so it works while the phone is locked and resumes on reboot.
 - **Audio plane (physical):** phone headset jack ↔ USB sound card on the host. `dialfd` owns
   the audio engine, VAD, recording, and the YAML job runner. (Android blocks apps from
@@ -189,10 +181,10 @@ Two independent planes:
 ### Scripted jobs (YAML)
 
 A job is a list of steps run in order. See `server/jobs/sample.yaml` (two-turn exchange) and
-`server/jobs/end-to-end-call.yaml` (dial → greet → Q&A → SMS → hangup).
+`server/jobs/outbound-call.yaml` (dial → greet → Q&A → SMS → hangup).
 
 ```yaml
-- type: call.dial            # also: call.pickup, call.hangup
+- type: call.dial            # also: call.answer, call.hangup
   number: "5551234"
 - type: call.wait_answered   # block until the callee actually answers
   timeout_ms: 30000
@@ -208,10 +200,35 @@ A job is a list of steps run in order. See `server/jobs/sample.yaml` (two-turn e
 ```
 
 `call.wait_answered` waits for the outbound call to reach the answered (`active`) state, so
-prompts play only after a real pickup (not on a fixed timer). `audio.wait_for_speech` captures
+prompts play only after a real answer (not on a fixed timer). `audio.wait_for_speech` captures
 from the card → resamples to 16 kHz → runs ten-vad per 256-sample hop; speech onset (a
 continuous `onset_duration_ms` voiced run, so noise/echo doesn't false-trigger) followed by
 `silence_duration_ms` of non-speech ends the turn (`end_timeout_ms` is the overall cap).
+
+### Auto-answer inbound calls
+
+`dialfd` can answer incoming calls and run a job in response. An inbound job is an ordinary
+job that **starts with `call.answer`** (see `server/jobs/inbound-call.yaml`). Two ways to wire
+which numbers it answers:
+
+```yaml
+# Persistent — in config.yaml. Number → optional job path; null = answer only.
+autoanswer:
+  "+15551234": jobs/inbound-call.yaml   # answer, then run this job
+  "+15559876":                          # answer only (no job)
+```
+
+```sh
+# Ad-hoc — no config edit, no file change. Foreground "serve": answers these numbers with
+# this job (overriding config.yaml) and reverts when you press Ctrl-C.
+dialf run server/jobs/inbound-call.yaml --autoanswer +15551234,+15559876
+```
+
+Notes: one phone + one sound card, so DialF runs **one call at a time** — a second call that
+arrives while one is in progress is **skipped and logged** (it rings/goes to voicemail; only a
+brief call-waiting beep, if any, bleeds into the active recording). For the same reason only
+**one `dialf run --autoanswer` session** may run at a time; a second is refused. If the
+configured job file fails to load, the call is still answered (plain answer, logged).
 
 ### Sound-card bridge + recording
 
@@ -249,7 +266,9 @@ must emit raw little-endian s16 mono PCM on stdout.
 shared_key: change-me              # must match the app's shared key
 ws_bind: "0.0.0.0:8765"            # phone WebSocket server bind
 instance_name: dialfd              # mDNS instance name
-autopickup: ["+15551234"]          # numbers auto-answered when they ring
+autoanswer:                        # inbound routing: number → optional job path
+  "+15551234": jobs/inbound-call.yaml   # answer, then run this job
+  "+15559876":                          # answer only
 audio:
   capture_device: "plughw:1,0"     # macOS: the CoreAudio device name, e.g. "USB Audio Device"
   playback_device: "plughw:1,0"

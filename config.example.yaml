@@ -5,9 +5,16 @@
 # shared_key: change-me            # must match the phone app's shared key
 # ws_bind: "0.0.0.0:8765"          # phone WebSocket server bind
 # instance_name: dialfd            # mDNS instance name
-# autopickup: ["+15551234"]        # numbers auto-answered when they ring
 control_socket: /tmp/dialfd.sock    # dialf <-> dialfd control socket (pin it so all
                                     # contexts agree, e.g. ssh vs GUI session)
+
+# Inbound routing: each number is auto-answered when it rings. A null/empty value just
+# answers; a job path answers AND runs that job (which should start with `call.answer`).
+# Relative job paths resolve against THIS config file's directory. For a temporary,
+# no-config override use `dialf run <job>.yaml --autoanswer <numbers>` instead.
+# autoanswer:
+#   "+15551234": jobs/inbound-call.yaml   # answer, then run this job
+#   "+15559876":                          # answer only (no job)
 
 audio:
   sample_rate: 48000                # card native rate (resampled to 16k for VAD/recording)

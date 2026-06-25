@@ -131,7 +131,7 @@ pub enum ServerToPhone {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
     /// Answer a ringing call. `call_id` omitted ⇒ the phone answers the ringing call.
-    Pickup {
+    Answer {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<CallId>,
     },
@@ -180,8 +180,8 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sim_sub_id: Option<i32>,
     },
-    /// Replace the phone's local auto-pickup number list.
-    SetAutopickup { numbers: Vec<String> },
+    /// Replace the phone's local auto-answer number list.
+    SetAutoanswer { numbers: Vec<String> },
 }
 
 // ---------------------------------------------------------------------------
@@ -215,8 +215,8 @@ pub enum ControlOp {
         sim_sub_id: Option<i32>,
     },
     /// Answer the ringing call on `device`.
-    #[serde(rename = "call.pickup")]
-    CallPickup { device: String },
+    #[serde(rename = "call.answer")]
+    CallAnswer { device: String },
     /// Hang up the active call on `device`.
     #[serde(rename = "call.hangup")]
     CallHangup { device: String },
@@ -275,6 +275,17 @@ pub enum ControlOp {
         path: Option<String>,
         #[serde(default)]
         steps: Option<Vec<crate::jobs::schema::Step>>,
+        #[serde(default)]
+        device: Option<String>,
+    },
+    /// Register a foreground auto-answer override: answer `numbers` with the job at `path`
+    /// (absolute), taking precedence over `config.autoanswer`. The override lives only as
+    /// long as the issuing connection stays open — disconnect reverts to config. The daemon
+    /// streams event lines back on the same connection (`done: false` frames).
+    #[serde(rename = "autoanswer.serve")]
+    AutoanswerServe {
+        numbers: Vec<String>,
+        path: String,
         #[serde(default)]
         device: Option<String>,
     },

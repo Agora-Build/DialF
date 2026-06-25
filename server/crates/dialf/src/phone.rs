@@ -1,8 +1,8 @@
 //! [`JobIo`] for a real connected phone.
 //!
-//! Audio steps use the [`AudioEngine`] (same as loopback); call/SMS steps become hub
-//! commands. The job runner is synchronous and runs on a blocking task, so async hub
-//! calls are bridged via a captured [`tokio::runtime::Handle`].
+//! Audio steps use the [`AudioEngine`]; call/SMS steps become hub commands. The job runner
+//! is synchronous and runs on a blocking task, so async hub calls are bridged via a captured
+//! [`tokio::runtime::Handle`].
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -25,21 +25,18 @@ pub struct PhoneJobIo {
     rt: Handle,
     registry: Arc<Mutex<Registry>>,
     device_id: String,
-    dry_audio: bool,
     session: Option<DuplexSession>,
 }
 
 impl PhoneJobIo {
     /// Build a phone JobIo. `rt` is the tokio handle used to drive async hub calls from
     /// the blocking job thread.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hub: Arc<Hub>,
         engine: Arc<AudioEngine>,
         rt: Handle,
         registry: Arc<Mutex<Registry>>,
         device_id: impl Into<String>,
-        dry_audio: bool,
         session: Option<DuplexSession>,
     ) -> Self {
         Self {
@@ -48,7 +45,6 @@ impl PhoneJobIo {
             rt,
             registry,
             device_id: device_id.into(),
-            dry_audio,
             session,
         }
     }
@@ -70,18 +66,10 @@ impl PhoneJobIo {
 
 impl JobIo for PhoneJobIo {
     fn play(&mut self, file: &str) -> anyhow::Result<()> {
-        if self.dry_audio {
-            tracing::info!(file, "audio.play (dry): skipped");
-            return Ok(());
-        }
         self.engine.play_file(Path::new(file), self.session.as_mut())
     }
 
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason> {
-        if self.dry_audio {
-            tracing::info!("audio.wait_for_speech (dry): returning Silence immediately");
-            return Ok(EndReason::Silence);
-        }
         self.engine.wait_for_speech(turn, self.session.as_mut())
     }
 
@@ -118,8 +106,8 @@ impl JobIo for PhoneJobIo {
         }
     }
 
-    fn pickup(&mut self) -> anyhow::Result<()> {
-        self.cmd(Action::Pickup { call_id: None })
+    fn answer(&mut self) -> anyhow::Result<()> {
+        self.cmd(Action::Answer { call_id: None })
     }
 
     fn hangup(&mut self) -> anyhow::Result<()> {

@@ -294,7 +294,7 @@ class ConnForegroundService : Service() {
                     msg.getString("number"),
                     if (msg.has("sim_sub_id") && !msg.isNull("sim_sub_id")) msg.getInt("sim_sub_id") else null,
                 )
-                "pickup" -> Telecom.answer(msg.optString("call_id").ifEmpty { null })
+                "answer" -> Telecom.answer(msg.optString("call_id").ifEmpty { null })
                 "hangup" -> Telecom.hangup(msg.optString("call_id").ifEmpty { null })
                 "reject" -> Telecom.reject(msg.optString("call_id").ifEmpty { null }, msg.optBoolean("drop", false))
                 "send_sms" -> Telecom.sendSms(this, msg.getString("to"), msg.getString("body"))
@@ -333,7 +333,7 @@ class ConnForegroundService : Service() {
                         ws?.send(o.toString())
                     }
                 }
-                "set_autopickup" -> {} // dialfd owns the picklist
+                "set_autoanswer" -> {} // dialfd owns the answer list
                 else -> {
                     sendError(cmdId, "unknown action $action")
                     return

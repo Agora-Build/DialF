@@ -2,7 +2,7 @@
 # Audio plays out the host's sound card; audio.wait_for_speech uses ten-vad to
 # detect when the human finishes each turn.
 
-- type: call.pickup
+- type: call.answer
   description: answer the inbound call
 
 - type: audio.play

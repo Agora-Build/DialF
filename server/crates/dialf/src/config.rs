@@ -4,6 +4,7 @@
 //! sensible default so a zero-config run works. Audio command templates are overridable
 //! here so no specific tool is hardcoded (see [`AudioConfig`]).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -27,8 +28,11 @@ pub struct Config {
     pub ws_bind: String,
     /// Friendly instance name advertised via mDNS.
     pub instance_name: String,
-    /// Numbers that are auto-answered when they ring.
-    pub autopickup: Vec<String>,
+    /// Inbound routing: number → optional job path. The number is auto-answered when it
+    /// rings; `None` (a null/empty value) just answers, while `Some(path)` answers *and*
+    /// runs that job (which should begin with `call.answer`). Relative job paths resolve
+    /// against this config file's directory.
+    pub autoanswer: BTreeMap<String, Option<String>>,
     /// Audio engine / sound-card settings.
     pub audio: AudioConfig,
 }
@@ -64,7 +68,7 @@ impl Default for Config {
             control_socket: default_control_socket(),
             ws_bind: DEFAULT_WS_BIND.to_string(),
             instance_name: "dialfd".to_string(),
-            autopickup: Vec::new(),
+            autoanswer: BTreeMap::new(),
             audio: AudioConfig::default(),
         }
     }
@@ -117,4 +121,28 @@ fn default_control_socket() -> PathBuf {
         return PathBuf::from(dir).join("dialfd.sock");
     }
     std::env::temp_dir().join("dialfd.sock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autoanswer_map_parses_jobs_and_answer_only() {
+        // A path runs a job; `~` and an empty value both mean answer-only.
+        let yaml = r#"
+autoanswer:
+  "+15551234": jobs/inbound.yaml
+  "+15559876": ~
+  "+15550000":
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.autoanswer.get("+15551234"),
+            Some(&Some("jobs/inbound.yaml".to_string()))
+        );
+        assert_eq!(cfg.autoanswer.get("+15559876"), Some(&None)); // answer only
+        assert_eq!(cfg.autoanswer.get("+15550000"), Some(&None)); // answer only
+        assert_eq!(cfg.autoanswer.get("+10000000"), None); // not configured
+    }
 }

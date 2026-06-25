@@ -4,7 +4,7 @@
 //! carries an optional human-readable `description` that the runner logs.
 //!
 //! ```yaml
-//! - type: call.pickup
+//! - type: call.answer
 //!   description: answer the inbound call
 //! - type: audio.play
 //!   file: samples/prompt-en-1.wav
@@ -74,8 +74,8 @@ pub enum StepKind {
     },
 
     /// Answer the ringing call.
-    #[serde(rename = "call.pickup")]
-    CallPickup,
+    #[serde(rename = "call.answer")]
+    CallAnswer,
 
     /// Hang up the active call.
     #[serde(rename = "call.hangup")]

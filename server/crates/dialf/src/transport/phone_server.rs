@@ -3,7 +3,7 @@
 //! A phone connects, sends [`PhoneToServer::Hello`] with the shared key (or the socket is
 //! closed), then exchanges JSON frames. We register the device, spawn a writer task fed by
 //! the hub's command channel, and run a reader loop that updates state, resolves command
-//! acks, and triggers auto-pickup.
+//! acks, and triggers auto-answer.
 
 use std::net::SocketAddr;
 
@@ -12,9 +12,9 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::daemon::{now_ms, DaemonState};
+use crate::daemon::{self, now_ms, DaemonState, InboundHandler};
 use crate::protocol::{Action, CallState, Direction, PhoneToServer};
-use crate::registry::{CallInfo, DeviceInfo, DeviceKind};
+use crate::registry::{CallInfo, DeviceInfo};
 
 /// Bind and serve the phone WebSocket endpoint until cancelled.
 pub async fn serve(state: DaemonState) -> anyhow::Result<()> {
@@ -68,7 +68,6 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
     state.registry.lock().unwrap().upsert(DeviceInfo {
         id: device_id.clone(),
         name,
-        kind: DeviceKind::Phone,
         last_seen_ms: now_ms(),
         current_call: None,
     });
@@ -149,18 +148,10 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
                     };
                 }
             }
-            // Auto-pickup: inbound ringing call whose number is on the list.
+            // Auto-answer: inbound ringing call whose number is configured (or overridden).
             if cs == CallState::Ringing && direction == Direction::In {
-                let matches = number
-                    .as_ref()
-                    .map(|n| state.config.autopickup.iter().any(|a| a == n))
-                    .unwrap_or(false);
-                if matches {
-                    tracing::info!(%device_id, ?number, "auto-pickup");
-                    let _ = state
-                        .hub
-                        .fire(device_id, Action::Pickup { call_id: Some(call_id) })
-                        .await;
+                if let Some(handler) = number.as_deref().and_then(|n| state.resolve_inbound(n)) {
+                    trigger_autoanswer(state, device_id, call_id, number, handler).await;
                 }
             }
         }
@@ -232,4 +223,73 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
             tracing::warn!(%device_id, "unexpected second hello");
         }
     }
+}
+
+/// Act on a matched inbound ringing call: answer only, or answer + run a job.
+async fn trigger_autoanswer(
+    state: &DaemonState,
+    device_id: &str,
+    call_id: String,
+    number: Option<String>,
+    handler: InboundHandler,
+) {
+    let (path, want_device) = match handler {
+        InboundHandler::AnswerOnly => {
+            tracing::info!(%device_id, ?number, "auto-answer");
+            let _ = state
+                .hub
+                .fire(device_id, Action::Answer { call_id: Some(call_id) })
+                .await;
+            return;
+        }
+        InboundHandler::Job { path, device } => (path, device),
+    };
+
+    // An override may pin to one phone; ignore calls landing on a different device.
+    if let Some(want) = &want_device {
+        if want != device_id {
+            return;
+        }
+    }
+    // One sound card → one call at a time. Skip + log if the card is already in use. This
+    // also dedupes repeated `ringing` frames for the same call.
+    let Some(card) = state.acquire_card() else {
+        let n = number.as_deref().unwrap_or("?");
+        tracing::warn!(%device_id, number = %n, "auto-answer skipped: phone busy");
+        state.emit(format!("skipped {n} (phone busy)"));
+        return;
+    };
+
+    let n = number.unwrap_or_default();
+    tracing::info!(%device_id, number = %n, job = %path, "auto-answer job");
+    state.emit(format!("answered {n} → running {path}"));
+
+    // Detached: the reader loop MUST keep flowing so the job's wait_for_answer /
+    // wait_for_speech observe later call_state frames. Never await the job inline here.
+    let state = state.clone();
+    let device_id = device_id.to_string();
+    tokio::spawn(async move {
+        // Hold the card lock for the whole job; released when this task ends (any path).
+        let _card = card;
+        let job = match daemon::load_job_file(&path) {
+            Ok(j) => j,
+            Err(e) => {
+                // Don't leave the call ringing — fall back to a plain answer.
+                tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed; answering only");
+                state.emit(format!("job load failed ({path}): {e:#}; answered only"));
+                let _ = state
+                    .hub
+                    .fire(&device_id, Action::Answer { call_id: Some(call_id) })
+                    .await;
+                return;
+            }
+        };
+        match daemon::run_job_on_device(&state, device_id.clone(), job).await {
+            Ok(_) => state.emit(format!("{n} → done")),
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "auto-answer job failed");
+                state.emit(format!("{n} → job error: {e:#}"));
+            }
+        }
+    });
 }

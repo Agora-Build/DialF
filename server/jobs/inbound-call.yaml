@@ -1,0 +1,40 @@
+# DialF — inbound auto-answer job.
+#
+# Use this with auto-answer, two ways:
+#   • Persistent (config.yaml):
+#       autoanswer:
+#         "+15551234": jobs/inbound-call.yaml
+#   • Ad-hoc, no config edit (foreground; reverts on Ctrl-C):
+#       dialf run server/jobs/inbound-call.yaml --autoanswer +15551234,+15559876
+#
+# It MUST start with `call.answer` — that's what picks up the ringing call. Everything
+# after runs the same as an outbound job: prompts play out the sound card into the call,
+# and audio.wait_for_speech captures the caller until they stop talking (ten-vad).
+# Audio is bridged through the host's USB sound card (see config audio.*); if
+# `audio.record_dir` is set, the whole call is recorded to dialf-job-<ts>-rx/tx/mix.wav.
+
+- type: call.answer
+  description: pick up the ringing call
+
+- type: audio.play
+  file: ../../samples/prompt-en-1.wav
+  description: greeting
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 45000
+  silence_duration_ms: 3000
+  description: let the caller respond
+
+- type: audio.play
+  file: ../../samples/prompt-en-2.wav
+  description: closing
+
+- type: wait
+  ms: 800
+  description: let the closing audio finish playing out the card
+
+- type: call.hangup
+  description: end the call
+
+- type: log
+  message: inbound call complete

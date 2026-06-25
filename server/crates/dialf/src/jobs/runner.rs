@@ -2,7 +2,7 @@
 //!
 //! The runner is pure control flow — all side effects go through [`JobIo`]. The real
 //! implementation ties the audio engine to a connected phone; the [`tests`] mock here
-//! doubles as the loopback used for hardware-free runs.
+//! exercises the runner without hardware.
 
 use serde::Serialize;
 
@@ -20,7 +20,7 @@ pub trait JobIo {
     /// Block until the current call is answered (active), or `timeout_ms` elapses.
     fn wait_for_answer(&mut self, timeout_ms: u64) -> anyhow::Result<()>;
     /// Answer the ringing call.
-    fn pickup(&mut self) -> anyhow::Result<()>;
+    fn answer(&mut self) -> anyhow::Result<()>;
     /// Hang up the active call.
     fn hangup(&mut self) -> anyhow::Result<()>;
     /// Send a text message.
@@ -84,9 +84,9 @@ fn run_step(kind: &StepKind, io: &mut dyn JobIo) -> anyhow::Result<String> {
             io.wait_for_answer(*timeout_ms)?;
             "call answered".to_string()
         }
-        StepKind::CallPickup => {
-            io.pickup()?;
-            "picked up".to_string()
+        StepKind::CallAnswer => {
+            io.answer()?;
+            "answered".to_string()
         }
         StepKind::CallHangup => {
             io.hangup()?;
@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::jobs::schema;
 
-    /// Records calls; stands in for the loopback phone + a no-op audio engine.
+    /// Records the steps the runner invoked; stands in for a phone + audio engine in tests.
     #[derive(Default)]
     struct MockIo {
         events: Vec<String>,
@@ -137,8 +137,8 @@ mod tests {
             self.events.push("wait_answered".into());
             Ok(())
         }
-        fn pickup(&mut self) -> anyhow::Result<()> {
-            self.events.push("pickup".into());
+        fn answer(&mut self) -> anyhow::Result<()> {
+            self.events.push("answer".into());
             Ok(())
         }
         fn hangup(&mut self) -> anyhow::Result<()> {
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn runs_sample_job_in_order() {
         let yaml = r#"
-- type: call.pickup
+- type: call.answer
   description: answer
 - type: audio.play
   file: q1.wav
@@ -178,7 +178,7 @@ mod tests {
             io.events,
             vec![
                 "log:answer", // description logged before the step
-                "pickup",
+                "answer",
                 "play:q1.wav",
                 "wait",
                 "hangup",
@@ -202,7 +202,7 @@ mod tests {
             fn wait_for_answer(&mut self, _: u64) -> anyhow::Result<()> {
                 Ok(())
             }
-            fn pickup(&mut self) -> anyhow::Result<()> {
+            fn answer(&mut self) -> anyhow::Result<()> {
                 Ok(())
             }
             fn hangup(&mut self) -> anyhow::Result<()> {

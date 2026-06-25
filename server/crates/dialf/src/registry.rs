@@ -1,23 +1,12 @@
 //! In-memory registry of connected devices and their call state.
 //!
-//! Real phones register/unregister here over WebSocket on connect/disconnect; an optional
-//! in-process [`crate::loopback`] test device is added when `--with-loopback` is passed.
+//! Real phones register/unregister here over WebSocket on connect/disconnect.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{CallState, Direction};
-
-/// How a device is attached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeviceKind {
-    /// In-process fake phone (no hardware).
-    Loopback,
-    /// Real phone over WebSocket.
-    Phone,
-}
 
 /// State of the device's current call, if any.
 #[derive(Debug, Clone, Serialize)]
@@ -104,7 +93,6 @@ pub struct VoicemailResult {
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,
-    pub kind: DeviceKind,
     pub last_seen_ms: i64,
     pub current_call: Option<CallInfo>,
 }
