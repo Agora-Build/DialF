@@ -136,8 +136,19 @@ Flags:
 | `wait`                  | `ms`                                    |
 | `log`                   | `message`                               |
 
-See `server/jobs/sample.yaml`, `server/jobs/outbound-call.yaml` (dial → Q&A → SMS), and
-`server/jobs/inbound-call.yaml` (auto-answer; starts with `call.answer`).
+Example jobs in `server/jobs/`:
+
+| File | What it does |
+|------|--------------|
+| `sample.yaml` | answer, then a two-turn VAD exchange |
+| `outbound-call.yaml` | dial → greet → Q&A → SMS → hang up |
+| `inbound-call.yaml` | auto-answer conversation (the daemon answers; no `call.answer` needed) |
+| `live-call-pilot.yaml` | answer → play → wait → text → hang up |
+| `record-only.yaml` | record the sound card only — no call; captures any app's audio |
+
+In **auto-answer** mode the daemon answers the call itself, so `call.dial` /
+`call.wait_answered` / `call.answer` in the job are skipped (with a warning). In normal
+`dialf run … --device` mode they run as written.
 
 ---
 

@@ -7,14 +7,12 @@
 #   • Ad-hoc, no config edit (foreground; reverts on Ctrl-C):
 #       dialf run server/jobs/inbound-call.yaml --autoanswer +15551234,+15559876
 #
-# It MUST start with `call.answer` — that's what picks up the ringing call. Everything
-# after runs the same as an outbound job: prompts play out the sound card into the call,
-# and audio.wait_for_speech captures the caller until they stop talking (ten-vad).
-# Audio is bridged through the host's USB sound card (see config audio.*); if
-# `audio.record_dir` is set, the whole call is recorded to dialf-job-<ts>-rx/tx/mix.wav.
-
-- type: call.answer
-  description: pick up the ringing call
+# In auto-answer mode the daemon answers the inbound call for you, so the job is just the
+# conversation — no call.answer needed. (call.dial / call.wait_answered / call.answer are
+# ignored with a warning if present, so a job can be shared with outbound use.) Prompts play
+# out the sound card into the call; audio.wait_for_speech captures the caller until they stop
+# talking (ten-vad). Audio is bridged through the host's USB sound card (see config audio.*);
+# if `audio.record_dir` is set, the whole call is recorded to dialf-job-<ts>-rx/tx/mix.wav.
 
 - type: audio.play
   file: ../../samples/prompt-en-1.wav

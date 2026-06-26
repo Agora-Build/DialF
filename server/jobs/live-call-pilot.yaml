@@ -1,0 +1,37 @@
+# DialF — live-call pilot: answer an incoming call, play a prompt, hold, then text.
+#
+# A minimal end-to-end check of the answer → audio → SMS path on a real call.
+#
+# Normal mode — answer a call that is ringing right now:
+#   dialf run server/jobs/live-call-pilot.yaml --device <phone>
+#
+# Auto-answer mode — the daemon answers, so the call.answer below is skipped with a
+# warning (the rest runs the same):
+#   dialf run server/jobs/live-call-pilot.yaml --autoanswer +15551234
+#   (or map the number to this file under `autoanswer:` in config.yaml)
+#
+# Audio plays out the host's USB sound card into the call; with `audio.record_dir`
+# set, the whole call is recorded to dialf-job-<ts>-rx/tx/mix.wav. Replace the WAV
+# path and the SMS recipient/body with your own.
+
+- type: call.answer
+  description: answer the incoming call
+
+- type: audio.play
+  file: ../../samples/prompt-en-1.wav
+  description: play a prompt to the caller
+
+- type: wait
+  ms: 3000
+  description: hold the line briefly
+
+- type: sms.send
+  to: "+15551234"
+  body: "Thanks for the call — this is a DialF pilot."
+  description: text a confirmation
+
+- type: call.hangup
+  description: end the call
+
+- type: log
+  message: live-call pilot complete

@@ -1,10 +1,14 @@
-# DialF — record-only (no call). Plays a prompt and records both directions through
-# the sound card; nothing is dialed. With audio.record_dir set, writes <job>-rx.wav
-# (sound-card input), <job>-tx.wav (what we play) and <job>-mix.wav.
+# DialF — record-only: capture the sound card. No call is placed or answered.
+#
+# Source-agnostic: it records whatever audio is on the card, from ANY app — a call in
+# any dialer (DialF *or* the stock Phone app), a media player, a meeting, etc. DialF
+# isn't driving the call here, only recording the bridge. With audio.record_dir set it
+# writes <job>-rx.wav (card input), <job>-tx.wav (what this job plays) and <job>-mix.wav.
 #
 #   dialf run jobs/record-only.yaml --device <device>
 #
-# The --device is just the job target; audio steps use the sound card, not the phone.
+# `--device` is only the job target for `dialf run` to resolve (a phone must be connected),
+# but the audio steps use the sound card, not the phone — no call is involved.
 
 - type: audio.play
   file: ../../samples/prompt-en-1.wav

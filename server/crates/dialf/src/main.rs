@@ -482,7 +482,7 @@ async fn serve_autoanswer(
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("\nstopped serving — reverted to config.yaml");
+                println!("\n--autoanswer stopped serving — reverted to config.yaml");
                 return Ok(());
             }
             next = lines.next_line() => match next? {

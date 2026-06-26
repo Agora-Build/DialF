@@ -180,8 +180,11 @@ Two independent planes:
 
 ### Scripted jobs (YAML)
 
-A job is a list of steps run in order. See `server/jobs/sample.yaml` (two-turn exchange) and
-`server/jobs/outbound-call.yaml` (dial → greet → Q&A → SMS → hangup).
+A job is a list of steps run in order. Examples in `server/jobs/`:
+`sample.yaml` (answer + two-turn exchange), `outbound-call.yaml` (dial → greet → Q&A → SMS →
+hangup), `inbound-call.yaml` (auto-answer conversation), `live-call-pilot.yaml`
+(answer → play → wait → text → hangup), `record-only.yaml` (record the sound card only — no
+call; any app's audio).
 
 ```yaml
 - type: call.dial            # also: call.answer, call.hangup
@@ -207,9 +210,11 @@ continuous `onset_duration_ms` voiced run, so noise/echo doesn't false-trigger) 
 
 ### Auto-answer inbound calls
 
-`dialfd` can answer incoming calls and run a job in response. An inbound job is an ordinary
-job that **starts with `call.answer`** (see `server/jobs/inbound-call.yaml`). Two ways to wire
-which numbers it answers:
+`dialfd` can answer incoming calls and run a job in response. In auto-answer mode the **daemon
+answers the call itself**, so the job is just the conversation — `call.dial` /
+`call.wait_answered` / `call.answer` are skipped (with a warning) if present, so a job can be
+shared with normal outbound use (see `server/jobs/inbound-call.yaml`). Two ways to wire which
+numbers it answers:
 
 ```yaml
 # Persistent — in config.yaml. Number → optional job path; null = answer only.
