@@ -88,6 +88,7 @@ impl Hub {
     pub async fn command(&self, device_id: &str, action: Action) -> anyhow::Result<()> {
         let conn = self.conn(device_id)?;
         let cmd_id = self.next_cmd_id();
+        let kind = action.kind();
         let (ack_tx, ack_rx) = oneshot::channel();
         conn.acks.lock().unwrap().insert(cmd_id.clone(), ack_tx);
 
@@ -97,16 +98,19 @@ impl Hub {
         };
         if conn.tx.send(frame).await.is_err() {
             conn.acks.lock().unwrap().remove(&cmd_id);
-            anyhow::bail!("device `{device_id}` send channel closed");
+            anyhow::bail!("`{kind}` to `{device_id}`: send channel closed (phone disconnected)");
         }
 
         match tokio::time::timeout(self.cmd_timeout, ack_rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => anyhow::bail!("phone error: {e}"),
-            Ok(Err(_)) => anyhow::bail!("ack channel dropped"),
+            Ok(Ok(Err(e))) => anyhow::bail!("`{kind}` to `{device_id}`: phone reported error: {e}"),
+            Ok(Err(_)) => anyhow::bail!("`{kind}` to `{device_id}`: ack channel dropped"),
             Err(_) => {
                 conn.acks.lock().unwrap().remove(&cmd_id);
-                anyhow::bail!("command to `{device_id}` timed out")
+                anyhow::bail!(
+                    "`{kind}` to `{device_id}` timed out (no ack within {}s — phone may be asleep or its connection stale)",
+                    self.cmd_timeout.as_secs()
+                )
             }
         }
     }

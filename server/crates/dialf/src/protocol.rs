@@ -184,6 +184,26 @@ pub enum Action {
     SetAutoanswer { numbers: Vec<String> },
 }
 
+impl Action {
+    /// The wire action name (matches the serde tag), for logs and error messages. Carries no
+    /// payload, so it never leaks a phone number into a message.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Action::Answer { .. } => "answer",
+            Action::Dial { .. } => "dial",
+            Action::Hangup { .. } => "hangup",
+            Action::Reject { .. } => "reject",
+            Action::SendSms { .. } => "send_sms",
+            Action::ListSms { .. } => "list_sms",
+            Action::ListCalls {} => "list_calls",
+            Action::ListSims {} => "list_sims",
+            Action::Mmi { .. } => "mmi",
+            Action::SetVoicemail { .. } => "set_voicemail",
+            Action::SetAutoanswer { .. } => "set_autoanswer",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Control API (dialf / other tools -> dialfd)
 // ---------------------------------------------------------------------------

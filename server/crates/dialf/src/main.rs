@@ -358,8 +358,38 @@ fn ensure_model_env() {
 }
 
 /// Print the CLI version, and the running daemon's version if it's reachable.
+/// Parse a `MAJOR.MINOR.PATCH` version (ignoring any pre-release/build suffix) for comparison.
+fn parse_ver(s: &str) -> Option<(u64, u64, u64)> {
+    let core = s.split(['-', '+']).next().unwrap_or(s);
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next().map_or(Ok(0), str::parse).ok()?;
+    let patch = it.next().map_or(Ok(0), str::parse).ok()?;
+    Some((major, minor, patch))
+}
+
+/// How the running daemon's version relates to this CLI's.
+#[derive(Debug, PartialEq, Eq)]
+enum VerRel {
+    Older,
+    Newer,
+    Same,
+    /// Either side didn't parse as a version — say nothing about which is ahead.
+    Unknown,
+}
+
+fn ver_rel(daemon: &str, cli: &str) -> VerRel {
+    match (parse_ver(daemon), parse_ver(cli)) {
+        (Some(d), Some(c)) if d < c => VerRel::Older,
+        (Some(d), Some(c)) if d > c => VerRel::Newer,
+        (Some(_), Some(_)) => VerRel::Same,
+        _ => VerRel::Unknown,
+    }
+}
+
 async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
-    println!("dialf  (CLI):    {}", env!("CARGO_PKG_VERSION"));
+    let cli = env!("CARGO_PKG_VERSION");
+    println!("dialf  (CLI):    {cli}");
     // Resolve the control socket the way main() does (honor `--config <path>`).
     let cfg_path = argv
         .iter()
@@ -387,11 +417,23 @@ async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
             .and_then(|d| d.get("version"))
             .and_then(|v| v.as_str())
         {
-            Some(v) => println!("dialfd (daemon): {v}"),
-            // Reachable but doesn't report a version => an older daemon. This is the exact
-            // CLI/daemon mismatch worth surfacing — point at the fix.
+            Some(v) => match ver_rel(v, cli) {
+                VerRel::Older => {
+                    println!("dialfd (daemon): {v}  (older than the CLI {cli})");
+                    println!(
+                        "  ↳ update the service: `dialf service install` (add `--user` if you installed it per-user)"
+                    );
+                }
+                VerRel::Newer => {
+                    println!("dialfd (daemon): {v}  (newer than the CLI {cli})");
+                    println!("  ↳ update the CLI: `npm i -g @agora-build/dialf`");
+                }
+                VerRel::Same => println!("dialfd (daemon): {v}  (up to date)"),
+                VerRel::Unknown => println!("dialfd (daemon): {v}"),
+            },
+            // Reachable but doesn't report a version => a daemon older than `server.info`.
             None => println!(
-                "dialfd (daemon): running, older than the CLI — re-run `dialf service install` or `dialf service install --user` to update"
+                "dialfd (daemon): running, older than the CLI — re-run `dialf service install` (add `--user` if you installed it per-user) to update"
             ),
         },
         Ok(Err(_)) => println!("dialfd (daemon): not running"),
@@ -595,7 +637,20 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_duration, fmt_number};
+    use super::{fmt_duration, fmt_number, ver_rel, VerRel};
+
+    #[test]
+    fn version_relation() {
+        // The `dialf --version` upgrade prompt hinges on these comparisons.
+        assert_eq!(ver_rel("0.1.19", "0.1.20"), VerRel::Older); // daemon behind → reinstall service
+        assert_eq!(ver_rel("0.1.20", "0.1.20"), VerRel::Same);
+        assert_eq!(ver_rel("0.2.0", "0.1.20"), VerRel::Newer); // daemon ahead → upgrade CLI
+        assert_eq!(ver_rel("1.0.0", "0.9.9"), VerRel::Newer);
+        // Pre-release/build suffixes are ignored; the core compares.
+        assert_eq!(ver_rel("0.1.20-dev", "0.1.20"), VerRel::Same);
+        // Unparseable either side → Unknown (no claim about which is ahead).
+        assert_eq!(ver_rel("unknown", "0.1.20"), VerRel::Unknown);
+    }
 
     #[test]
     fn duration_units() {
