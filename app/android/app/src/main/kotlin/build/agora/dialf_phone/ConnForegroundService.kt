@@ -48,6 +48,10 @@ class ConnForegroundService : Service() {
         private const val MAX_RECONNECT_BATTERY_MS = 120_000L
         // How long to leave NSD discovery (multicast) running per attempt before backing off.
         private const val DISCOVERY_WINDOW_MS = 20_000L
+        // App-level liveness: heartbeat cadence, and how long the daemon may go silent (missed
+        // heartbeat acks) before we treat the link as dead and reconnect (~3 missed beats).
+        private const val HEARTBEAT_MS = 30_000L
+        private const val LIVENESS_TIMEOUT_MS = 90_000L
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -59,6 +63,11 @@ class ConnForegroundService : Service() {
     private var discovery: NsdManager.DiscoveryListener? = null
     @Volatile private var ws: WebSocket? = null
     @Volatile private var running = false
+    // Last time we heard anything from the daemon, and whether it acks heartbeats. The liveness
+    // check only applies once the daemon has proven it acks, so a new app against an older daemon
+    // (which never acks) doesn't reconnect-loop.
+    @Volatile private var lastDaemonResponseMs = 0L
+    @Volatile private var daemonAcksHeartbeats = false
     private var heartbeat: Runnable? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var statusText = "Starting…"
@@ -241,6 +250,9 @@ class ConnForegroundService : Service() {
                 .put("caps", org.json.JSONArray(listOf("call", "sms")))
                 .put("app_version", "0.1")
             webSocket.send(hello.toString())
+            // Fresh connection: assume alive now; re-learn whether this daemon acks heartbeats.
+            lastDaemonResponseMs = System.currentTimeMillis()
+            daemonAcksHeartbeats = false
             startHeartbeat()
             // Connected — reset the backoff and cancel any pending retry.
             reconnectDelayMs = MIN_RECONNECT_MS
@@ -249,12 +261,19 @@ class ConnForegroundService : Service() {
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
         }
 
-        override fun onMessage(webSocket: WebSocket, text: String) = handle(webSocket, text)
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = dropped()
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = dropped()
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            lastDaemonResponseMs = System.currentTimeMillis() // heard from the daemon
+            handle(webSocket, text)
+        }
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = dropped(webSocket)
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = dropped(webSocket)
     }
 
-    private fun dropped() {
+    private fun dropped(socket: WebSocket) {
+        // Ignore a close/failure from a socket that isn't our current one — a stale/superseded
+        // socket dying must not tear down the live connection (that bug stopped heartbeats and
+        // got the device reaped).
+        if (socket !== ws) return
         cancelHeartbeat()
         ws = null
         notify("Reconnecting…")
@@ -266,14 +285,24 @@ class ConnForegroundService : Service() {
         cancelHeartbeat()
         val r = object : Runnable {
             override fun run() {
-                ws?.send(
+                val sock = ws ?: return
+                // Liveness: if the daemon (which acks heartbeats) has gone silent past the
+                // timeout, the link is dead even if the socket looks open — close it so we
+                // reconnect (onClosed -> dropped -> scheduleReconnect).
+                if (daemonAcksHeartbeats &&
+                    System.currentTimeMillis() - lastDaemonResponseMs > LIVENESS_TIMEOUT_MS
+                ) {
+                    sock.close(1001, "no response from daemon")
+                    return
+                }
+                sock.send(
                     JSONObject().put("type", "heartbeat").put("ts", System.currentTimeMillis()).toString()
                 )
-                main.postDelayed(this, 30_000)
+                main.postDelayed(this, HEARTBEAT_MS)
             }
         }
         heartbeat = r
-        main.postDelayed(r, 30_000)
+        main.postDelayed(r, HEARTBEAT_MS)
     }
 
     private fun cancelHeartbeat() {
@@ -289,7 +318,14 @@ class ConnForegroundService : Service() {
         } catch (_: Exception) {
             return
         }
-        if (msg.optString("type") != "cmd") return
+        when (msg.optString("type")) {
+            "heartbeat_ack" -> {
+                daemonAcksHeartbeats = true // daemon supports liveness acks; arm the check
+                return
+            }
+            "cmd" -> {} // fall through to dispatch
+            else -> return
+        }
         val cmdId = msg.optString("cmd_id", "")
         val action = msg.optString("action")
         try {
