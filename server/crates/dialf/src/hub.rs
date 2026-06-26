@@ -97,12 +97,23 @@ impl Hub {
     }
 
     /// Unconditionally drop a device's connection (used by the stale-connection reaper, which
-    /// has already confirmed the device is gone). Fails any pending acks.
+    /// has already confirmed the device is gone). Fails any pending acks and closes the socket
+    /// (via the connection's cancel) so a reaped-but-still-open connection can't linger and
+    /// block the phone from reconnecting.
     pub fn drop_device(&self, device_id: &str) {
         if let Some(conn) = self.conns.lock().unwrap().remove(device_id) {
             for (_, tx) in conn.acks.lock().unwrap().drain() {
                 let _ = tx.send(Err("device disconnected".to_string()));
             }
+            conn.cancel.notify_one();
+        }
+    }
+
+    /// Send a frame to a device's current connection, best-effort and non-blocking (used for
+    /// heartbeat acks). Dropped if the device is gone or its send queue is full.
+    pub fn send_frame(&self, device_id: &str, frame: ServerToPhone) {
+        if let Some(conn) = self.conns.lock().unwrap().get(device_id).cloned() {
+            let _ = conn.tx.try_send(frame);
         }
     }
 

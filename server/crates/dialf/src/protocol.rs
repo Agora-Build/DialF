@@ -124,6 +124,9 @@ pub enum ServerToPhone {
         #[serde(flatten)]
         action: Action,
     },
+    /// Liveness reply to a phone `heartbeat`, so the app can tell the daemon is alive and
+    /// reconnect if it goes silent. Additive — older apps ignore unknown frame types.
+    HeartbeatAck,
 }
 
 /// The concrete action carried by a [`ServerToPhone::Cmd`].

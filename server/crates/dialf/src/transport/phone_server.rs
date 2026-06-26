@@ -14,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::daemon::{self, now_ms, DaemonState, InboundHandler};
-use crate::protocol::{Action, CallState, Direction, PhoneToServer};
+use crate::protocol::{Action, CallState, Direction, PhoneToServer, ServerToPhone};
 use crate::registry::{CallInfo, DeviceInfo};
 
 /// Phones heartbeat every 30s; treat one as gone after it misses ~3 (no frame for this long).
@@ -164,6 +164,8 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
             if let Some(dev) = state.registry.lock().unwrap().get_mut(device_id) {
                 dev.last_seen_ms = now_ms();
             }
+            // Reply so the app can confirm the daemon is alive and reconnect if it goes silent.
+            state.hub.send_frame(device_id, ServerToPhone::HeartbeatAck);
         }
         PhoneToServer::CallState {
             call_id,
