@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::protocol::{Action, CmdId, ServerToPhone};
 
@@ -22,6 +22,9 @@ struct WsConn {
     gen: u64,
     tx: mpsc::Sender<ServerToPhone>,
     acks: Mutex<HashMap<CmdId, AckTx>>,
+    /// Fired when a newer connection supersedes this one, so its reader loop closes the socket
+    /// instead of lingering (a half-open reader holds the TCP open forever otherwise).
+    cancel: Arc<Notify>,
 }
 
 /// Manages all connected phone WebSocket connections.
@@ -46,18 +49,24 @@ impl Hub {
     /// Register a connection's command channel; supersedes any existing entry. Returns this
     /// connection's generation, which the caller passes back to [`Hub::unregister`] on
     /// disconnect so only the *current* socket is ever torn down.
-    pub fn register(&self, device_id: &str, tx: mpsc::Sender<ServerToPhone>) -> u64 {
+    pub fn register(
+        &self,
+        device_id: &str,
+        tx: mpsc::Sender<ServerToPhone>,
+        cancel: Arc<Notify>,
+    ) -> u64 {
         let gen = self.conn_gen.fetch_add(1, Ordering::Relaxed);
         let conn = Arc::new(WsConn {
             gen,
             tx,
             acks: Mutex::new(HashMap::new()),
+            cancel,
         });
         let prev = self.conns.lock().unwrap().insert(device_id.to_string(), conn);
         if let Some(prev) = prev {
             // The phone opened a new socket without closing the old one. Commands now target the
-            // new socket; fail any acks still pending on the old one so they don't hang. (Its
-            // writer also shuts down as the old WsConn drops.)
+            // new socket; fail any acks still pending on the old one so they don't hang, and
+            // signal its reader to close the socket so connections can't pile up.
             tracing::warn!(
                 %device_id, old_gen = prev.gen, new_gen = gen,
                 "phone reconnected without closing its previous socket — superseding it"
@@ -65,6 +74,7 @@ impl Hub {
             for (_, tx) in prev.acks.lock().unwrap().drain() {
                 let _ = tx.send(Err("connection superseded".to_string()));
             }
+            prev.cancel.notify_one();
         }
         gen
     }
@@ -188,8 +198,8 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(4);
         let (tx2, _rx2) = mpsc::channel(4);
 
-        let gen1 = hub.register("dev", tx1);
-        let gen2 = hub.register("dev", tx2); // phone reconnected; supersedes gen1
+        let gen1 = hub.register("dev", tx1, Arc::new(Notify::new()));
+        let gen2 = hub.register("dev", tx2, Arc::new(Notify::new())); // reconnected; supersedes gen1
         assert_ne!(gen1, gen2);
 
         // The OLD socket tearing down must NOT remove the current (newer) connection —

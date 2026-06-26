@@ -88,8 +88,10 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
 
     // Register: command channel + device record. `gen` identifies *this* socket so a later
     // reconnect supersedes us cleanly (and our own teardown can't clobber a newer connection).
+    // `cancel` lets a superseding reconnect tell this reader to close the socket.
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let gen = state.hub.register(&device_id, tx);
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let gen = state.hub.register(&device_id, tx, cancel.clone());
     state.registry.lock().unwrap().upsert(DeviceInfo {
         id: device_id.clone(),
         name,
@@ -112,8 +114,15 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
         }
     });
 
-    // Reader loop.
-    let result = reader_loop(&mut read, &state, &device_id).await;
+    // Reader loop — but stop early if a newer connection supersedes us, so this socket closes
+    // instead of lingering half-open (which is how connections used to pile up).
+    let result = tokio::select! {
+        r = reader_loop(&mut read, &state, &device_id) => r,
+        _ = cancel.notified() => {
+            tracing::info!(%device_id, gen, "connection superseded by a newer one; closing socket");
+            Ok(())
+        }
+    };
 
     // Cleanup — but only drop the device if we're still the current connection. If a newer
     // reconnect has superseded us, `unregister` is a no-op and we must leave its record intact
