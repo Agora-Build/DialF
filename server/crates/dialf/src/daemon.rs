@@ -477,7 +477,8 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let _card = state
                 .acquire_card()
                 .context("phone busy: a call or recording is already in progress")?;
-            let (outcomes, recording) = run_job_on_device(state, device_id, job).await?;
+            // `dialf run` is outbound/one-shot: the job owns call setup (call.dial, etc.).
+            let (outcomes, recording) = run_job_on_device(state, device_id, job, false).await?;
             let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
             Ok(ok_data(&id, json!({ "steps": outcomes, "recording": recording })))
         }
@@ -527,6 +528,7 @@ pub async fn run_job_on_device(
     state: &DaemonState,
     device_id: String,
     job: Vec<schema::Step>,
+    inbound: bool,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
     let record_dir = state.config.audio.record_dir.clone();
@@ -543,7 +545,7 @@ pub async fn run_job_on_device(
             }
             None => None,
         };
-        let mut io = PhoneJobIo::new(hub, engine, rt, registry, device_id, session);
+        let mut io = PhoneJobIo::new(hub, engine, rt, registry, device_id, session, inbound);
         let run = runner::run_job(&job, &mut io);
         let recording = io.finish()?;
         Ok((run?, recording))

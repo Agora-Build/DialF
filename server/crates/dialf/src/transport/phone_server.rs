@@ -320,20 +320,27 @@ async fn trigger_autoanswer(
     tokio::spawn(async move {
         // Hold the card lock for the whole job; released when this task ends (any path).
         let _card = card;
+        // Answer the inbound call ourselves — this is the "auto" in auto-answer. The job's own
+        // call.answer / call.dial / call.wait_answered then become no-ops (inbound mode).
+        if let Err(e) = state
+            .hub
+            .command(&device_id, Action::Answer { call_id: Some(call_id) })
+            .await
+        {
+            tracing::warn!(error = %format!("{e:#}"), "auto-answer: failed to answer; not running job");
+            state.emit(format!("{n} → answer failed: {e:#}"));
+            return;
+        }
         let job = match daemon::load_job_file(&path) {
             Ok(j) => j,
             Err(e) => {
-                // Don't leave the call ringing — fall back to a plain answer.
-                tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed; answering only");
-                state.emit(format!("job load failed ({path}): {e:#}; answered only"));
-                let _ = state
-                    .hub
-                    .fire(&device_id, Action::Answer { call_id: Some(call_id) })
-                    .await;
+                // Call is answered; we just have no script to run.
+                tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed (call answered, no script)");
+                state.emit(format!("{n} → job load failed: {e:#} (call answered, no script)"));
                 return;
             }
         };
-        match daemon::run_job_on_device(&state, device_id.clone(), job).await {
+        match daemon::run_job_on_device(&state, device_id.clone(), job, true).await {
             Ok((outcomes, _)) => {
                 match outcomes
                     .iter()

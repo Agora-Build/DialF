@@ -37,6 +37,13 @@ pub trait JobIo {
     fn call_ended(&mut self) -> bool {
         false
     }
+
+    /// Whether this run is for an auto-answered inbound call (the daemon already answered it).
+    /// In that mode the runner skips the call-setup steps (call.dial / call.wait_answered /
+    /// call.answer) — the call already exists — and warns. Default `false` (outbound / one-shot).
+    fn inbound_mode(&self) -> bool {
+        false
+    }
 }
 
 /// Outcome of a single executed step (for status reporting / streaming).
@@ -55,6 +62,22 @@ pub const CALL_ENDED_SUMMARY: &str = "caller hung up — remaining steps skipped
 pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOutcome>> {
     let mut outcomes = Vec::with_capacity(steps.len());
     for (index, step) in steps.iter().enumerate() {
+        // In auto-answer mode the daemon already set up (answered) the call, so call-setup steps
+        // are meaningless — skip them with a warning rather than, e.g., placing a second call.
+        if io.inbound_mode()
+            && matches!(
+                step.kind,
+                StepKind::CallDial { .. } | StepKind::CallWaitAnswered { .. } | StepKind::CallAnswer
+            )
+        {
+            tracing::warn!(target: "job", "{} skipped — auto-answer mode (the call is already inbound)", step.kind.name());
+            outcomes.push(StepOutcome {
+                index,
+                description: step.description.clone(),
+                summary: format!("{} skipped (auto-answer mode)", step.kind.name()),
+            });
+            continue;
+        }
         if let Some(d) = &step.description {
             io.log(d);
         }
@@ -302,5 +325,58 @@ mod tests {
         assert_eq!(outcomes[1].summary, CALL_ENDED_SUMMARY);
         assert_eq!(outcomes[2].summary, "audio.play skipped");
         assert_eq!(outcomes[3].summary, "call.hangup skipped");
+    }
+
+    #[test]
+    fn inbound_mode_skips_call_setup_steps() {
+        // In auto-answer mode the daemon already answered, so call.answer/dial/wait_answered are
+        // no-ops (warned); conversation steps still run.
+        #[derive(Default)]
+        struct InboundIo {
+            ran: Vec<String>,
+        }
+        impl JobIo for InboundIo {
+            fn play(&mut self, file: &str) -> anyhow::Result<()> {
+                self.ran.push(format!("play:{file}"));
+                Ok(())
+            }
+            fn wait_for_speech(&mut self, _: TurnConfig) -> anyhow::Result<EndReason> {
+                Ok(EndReason::Silence)
+            }
+            fn dial(&mut self, _: &str) -> anyhow::Result<()> {
+                self.ran.push("dial".into());
+                Ok(())
+            }
+            fn wait_for_answer(&mut self, _: u64) -> anyhow::Result<()> {
+                self.ran.push("wait_answered".into());
+                Ok(())
+            }
+            fn answer(&mut self) -> anyhow::Result<()> {
+                self.ran.push("answer".into());
+                Ok(())
+            }
+            fn hangup(&mut self) -> anyhow::Result<()> {
+                self.ran.push("hangup".into());
+                Ok(())
+            }
+            fn send_sms(&mut self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn sleep(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn log(&mut self, _: &str) {}
+            fn inbound_mode(&self) -> bool {
+                true
+            }
+        }
+        let yaml = "- type: call.answer\n- type: call.dial\n  number: \"1\"\n- type: audio.play\n  file: x.wav\n- type: call.hangup\n";
+        let job = schema::parse(yaml).unwrap();
+        let mut io = InboundIo::default();
+        let outcomes = run_job(&job, &mut io).unwrap();
+        // Setup steps were skipped (never invoked); only play + hangup actually ran.
+        assert_eq!(io.ran, vec!["play:x.wav".to_string(), "hangup".to_string()]);
+        assert_eq!(outcomes[0].summary, "call.answer skipped (auto-answer mode)");
+        assert_eq!(outcomes[1].summary, "call.dial skipped (auto-answer mode)");
     }
 }

@@ -31,6 +31,8 @@ pub struct PhoneJobIo {
     /// True once we've observed the call go active, so a later `None` means it really ended
     /// (not just "not connected yet").
     saw_active: bool,
+    /// Auto-answer (inbound) run: the daemon already answered, so call-setup steps are skipped.
+    inbound: bool,
 }
 
 impl PhoneJobIo {
@@ -43,6 +45,7 @@ impl PhoneJobIo {
         registry: Arc<Mutex<Registry>>,
         device_id: impl Into<String>,
         session: Option<DuplexSession>,
+        inbound: bool,
     ) -> Self {
         Self {
             hub,
@@ -51,8 +54,10 @@ impl PhoneJobIo {
             registry,
             device_id: device_id.into(),
             session,
-            in_call: false,
+            // Inbound (auto-answered): the call already exists, so watch it for end immediately.
+            in_call: inbound,
             saw_active: false,
+            inbound,
         }
     }
 
@@ -148,6 +153,10 @@ impl JobIo for PhoneJobIo {
     fn call_ended(&mut self) -> bool {
         let state = self.call_state();
         call_ended_decision(self.in_call, &mut self.saw_active, state)
+    }
+
+    fn inbound_mode(&self) -> bool {
+        self.inbound
     }
 
     fn send_sms(&mut self, to: &str, body: &str) -> anyhow::Result<()> {
