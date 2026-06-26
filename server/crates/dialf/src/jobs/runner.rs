@@ -29,6 +29,14 @@ pub trait JobIo {
     fn sleep(&mut self, ms: u64) -> anyhow::Result<()>;
     /// Emit a log line.
     fn log(&mut self, message: &str);
+
+    /// Whether the call this job was running has ended (e.g. the far end hung up). The runner
+    /// checks this between steps and stops early so the job doesn't keep playing prompts into a
+    /// dead call, hold the sound card, or fail on a `hangup` that has nothing to hang up.
+    /// Default `false` for IO backends without a phone (e.g. record-only / tests).
+    fn call_ended(&mut self) -> bool {
+        false
+    }
 }
 
 /// Outcome of a single executed step (for status reporting / streaming).
@@ -52,6 +60,12 @@ pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOut
             description: step.description.clone(),
             summary,
         });
+        // The far end hung up — stop here rather than run the remaining steps (more prompts, a
+        // doomed hangup) against a call that no longer exists.
+        if io.call_ended() {
+            tracing::info!(target: "job", "call ended (far end hung up) — stopping after step {index}");
+            break;
+        }
     }
     Ok(outcomes)
 }

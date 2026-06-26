@@ -26,6 +26,11 @@ pub struct PhoneJobIo {
     registry: Arc<Mutex<Registry>>,
     device_id: String,
     session: Option<DuplexSession>,
+    /// True once this job placed/answered a call, so `call_ended` knows to watch the call.
+    in_call: bool,
+    /// True once we've observed the call go active, so a later `None` means it really ended
+    /// (not just "not connected yet").
+    saw_active: bool,
 }
 
 impl PhoneJobIo {
@@ -46,7 +51,18 @@ impl PhoneJobIo {
             registry,
             device_id: device_id.into(),
             session,
+            in_call: false,
+            saw_active: false,
         }
+    }
+
+    /// The device's current call state, if any (read from the registry the reader loop updates).
+    fn call_state(&self) -> Option<CallState> {
+        self.registry
+            .lock()
+            .unwrap()
+            .get(&self.device_id)
+            .and_then(|d| d.current_call.as_ref().map(|c| c.state))
     }
 
     /// Finalize any recording, returning the written file paths.
@@ -74,6 +90,8 @@ impl JobIo for PhoneJobIo {
     }
 
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {
+        self.in_call = true;
+        self.saw_active = false; // fresh call
         self.cmd(Action::Dial {
             number: number.to_string(),
             sim_sub_id: None, // job-driven dials use the default SIM
@@ -107,11 +125,22 @@ impl JobIo for PhoneJobIo {
     }
 
     fn answer(&mut self) -> anyhow::Result<()> {
+        self.in_call = true;
+        self.saw_active = false; // fresh call
         self.cmd(Action::Answer { call_id: None })
     }
 
     fn hangup(&mut self) -> anyhow::Result<()> {
+        // We're ending the call ourselves, so stop watching for "ended" — otherwise steps
+        // after call.hangup (a final log, a follow-up SMS) would be skipped.
+        self.in_call = false;
+        self.saw_active = false;
         self.cmd(Action::Hangup { call_id: None })
+    }
+
+    fn call_ended(&mut self) -> bool {
+        let state = self.call_state();
+        call_ended_decision(self.in_call, &mut self.saw_active, state)
     }
 
     fn send_sms(&mut self, to: &str, body: &str) -> anyhow::Result<()> {
@@ -128,5 +157,45 @@ impl JobIo for PhoneJobIo {
 
     fn log(&mut self, message: &str) {
         tracing::info!(target: "job", "{message}");
+    }
+}
+
+/// Decide whether the call has ended, given whether this job is in a call, whether we've ever
+/// seen it active (updated in place), and the current call state. Pure so it can be tested
+/// without a live phone: only a call that was once active and is now gone counts as ended —
+/// "not connected yet" and "no call at all" (record-only) do not.
+fn call_ended_decision(in_call: bool, saw_active: &mut bool, state: Option<CallState>) -> bool {
+    if !in_call {
+        return false;
+    }
+    match state {
+        Some(CallState::Active) => {
+            *saw_active = true;
+            false
+        }
+        None if *saw_active => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_ended_only_after_active_then_gone() {
+        // Not in a call (record-only) -> never "ended", even with no call state.
+        let mut seen = false;
+        assert!(!call_ended_decision(false, &mut seen, None));
+
+        // In a call but not yet active (dialing/ringing) -> not ended.
+        let mut seen = false;
+        assert!(!call_ended_decision(true, &mut seen, Some(CallState::Ringing)));
+        assert!(!call_ended_decision(true, &mut seen, None)); // not connected yet, not ended
+
+        // Goes active, then disappears -> ended.
+        assert!(!call_ended_decision(true, &mut seen, Some(CallState::Active)));
+        assert!(seen);
+        assert!(call_ended_decision(true, &mut seen, None));
     }
 }
