@@ -131,10 +131,17 @@ impl JobIo for PhoneJobIo {
     }
 
     fn hangup(&mut self) -> anyhow::Result<()> {
-        // We're ending the call ourselves, so stop watching for "ended" — otherwise steps
-        // after call.hangup (a final log, a follow-up SMS) would be skipped.
+        // If we saw the call go active and it's now gone, the far end already hung up — there's
+        // nothing to hang up, so succeed instead of erroring on the phone's "no call to hang up".
+        // (Only skipped when the call is demonstrably gone; an active call is still hung up.)
+        let already_ended = self.saw_active && self.call_state().is_none();
+        // We're ending the call ourselves, so stop watching for "ended" — otherwise steps after
+        // call.hangup (a final log, a follow-up SMS) would be skipped.
         self.in_call = false;
         self.saw_active = false;
+        if already_ended {
+            return Ok(());
+        }
         self.cmd(Action::Hangup { call_id: None })
     }
 

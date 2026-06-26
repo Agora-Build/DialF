@@ -47,6 +47,10 @@ pub struct StepOutcome {
     pub summary: String,
 }
 
+/// Summary recorded as the final outcome when a job stops because the far end hung up.
+/// Callers (e.g. the auto-answer serve stream) can match on it to report "caller hung up".
+pub const CALL_ENDED_SUMMARY: &str = "caller hung up — remaining steps skipped";
+
 /// Run all `steps`, stopping at the first error. Returns per-step outcomes.
 pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOutcome>> {
     let mut outcomes = Vec::with_capacity(steps.len());
@@ -61,9 +65,23 @@ pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOut
             summary,
         });
         // The far end hung up — stop here rather than run the remaining steps (more prompts, a
-        // doomed hangup) against a call that no longer exists.
+        // doomed hangup) against a call that no longer exists. Record it as a visible outcome so
+        // it shows up in `dialf run` output / the serve stream, not just the daemon log.
         if io.call_ended() {
             tracing::info!(target: "job", "call ended (far end hung up) — stopping after step {index}");
+            outcomes.push(StepOutcome {
+                index: index + 1,
+                description: Some("call ended".to_string()),
+                summary: CALL_ENDED_SUMMARY.to_string(),
+            });
+            // Record each remaining step as skipped, so it's clear what didn't run.
+            for (j, skipped) in steps.iter().enumerate().skip(index + 1) {
+                outcomes.push(StepOutcome {
+                    index: j,
+                    description: skipped.description.clone(),
+                    summary: format!("{} skipped", skipped.kind.name()),
+                });
+            }
             break;
         }
     }
@@ -233,5 +251,56 @@ mod tests {
         let job = schema::parse("- type: call.dial\n  number: \"123\"\n").unwrap();
         let mut io = FailDial;
         assert!(run_job(&job, &mut io).is_err());
+    }
+
+    #[test]
+    fn stops_and_marks_when_call_ends() {
+        // call_ended() true after the first step: the job records the answer, then a synthetic
+        // "caller hung up" outcome, and skips the remaining steps (no doomed play/hangup).
+        #[derive(Default)]
+        struct EndingIo {
+            steps: usize,
+        }
+        impl JobIo for EndingIo {
+            fn play(&mut self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn wait_for_speech(&mut self, _: TurnConfig) -> anyhow::Result<EndReason> {
+                Ok(EndReason::Silence)
+            }
+            fn dial(&mut self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn wait_for_answer(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn answer(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn hangup(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn send_sms(&mut self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn sleep(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn log(&mut self, _: &str) {}
+            fn call_ended(&mut self) -> bool {
+                self.steps += 1;
+                self.steps >= 1 // ended right after the first step
+            }
+        }
+        let yaml = "- type: call.answer\n- type: audio.play\n  file: x.wav\n- type: call.hangup\n";
+        let job = schema::parse(yaml).unwrap();
+        let mut io = EndingIo::default();
+        let outcomes = run_job(&job, &mut io).unwrap();
+        // answer ran; then the marker + one "skipped" line per remaining step.
+        assert_eq!(outcomes.len(), 4);
+        assert_eq!(outcomes[0].summary, "answered");
+        assert_eq!(outcomes[1].summary, CALL_ENDED_SUMMARY);
+        assert_eq!(outcomes[2].summary, "audio.play skipped");
+        assert_eq!(outcomes[3].summary, "call.hangup skipped");
     }
 }

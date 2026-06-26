@@ -94,6 +94,23 @@ pub enum StepKind {
     Log { message: String },
 }
 
+impl StepKind {
+    /// The step's wire name (matches the YAML `type:`), for logs and skip messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            StepKind::AudioPlay { .. } => "audio.play",
+            StepKind::AudioWaitForSpeech { .. } => "audio.wait_for_speech",
+            StepKind::CallDial { .. } => "call.dial",
+            StepKind::CallWaitAnswered { .. } => "call.wait_answered",
+            StepKind::CallAnswer => "call.answer",
+            StepKind::CallHangup => "call.hangup",
+            StepKind::SmsSend { .. } => "sms.send",
+            StepKind::Wait { .. } => "wait",
+            StepKind::Log { .. } => "log",
+        }
+    }
+}
+
 fn default_end_timeout() -> u64 {
     DEFAULT_END_TIMEOUT_MS
 }
