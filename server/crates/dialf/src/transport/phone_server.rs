@@ -251,10 +251,18 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
                 },
             );
         }
-        PhoneToServer::Ack { cmd_id, ok } => state.hub.resolve_ack(device_id, &cmd_id, ok),
+        PhoneToServer::Ack { cmd_id, ok } => {
+            let result = if ok {
+                Ok(())
+            } else {
+                Err("phone reported failure".to_string())
+            };
+            state.hub.resolve_ack(device_id, &cmd_id, result);
+        }
         PhoneToServer::Error { cmd_id, msg } => {
+            // Propagate the phone's own reason to the waiting command (not a generic failure).
             if let Some(id) = cmd_id {
-                state.hub.resolve_ack(device_id, &id, false);
+                state.hub.resolve_ack(device_id, &id, Err(msg.clone()));
             }
             tracing::warn!(%device_id, "phone error: {msg}");
         }

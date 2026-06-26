@@ -106,17 +106,15 @@ impl Hub {
         }
     }
 
-    /// Resolve a pending command ack (called from the phone read loop).
-    pub fn resolve_ack(&self, device_id: &str, cmd_id: &str, ok: bool) {
+    /// Resolve a pending command ack (called from the phone read loop). `result` carries the
+    /// phone's outcome — `Err(msg)` propagates the phone's own reason (e.g. "no call to answer")
+    /// back to the caller rather than a generic failure.
+    pub fn resolve_ack(&self, device_id: &str, cmd_id: &str, result: Result<(), String>) {
         let conn = self.conns.lock().unwrap().get(device_id).cloned();
         let waiter = conn.and_then(|c| c.acks.lock().unwrap().remove(cmd_id));
         match waiter {
             Some(tx) => {
-                let _ = tx.send(if ok {
-                    Ok(())
-                } else {
-                    Err("phone reported failure".to_string())
-                });
+                let _ = tx.send(result);
             }
             // The ack arrived but no command is waiting on the current connection — typically
             // the command was sent on a now-superseded socket, or it already timed out.
@@ -156,7 +154,7 @@ impl Hub {
 
         match tokio::time::timeout(self.cmd_timeout, ack_rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => anyhow::bail!("`{kind}` to `{device_id}`: phone reported error: {e}"),
+            Ok(Ok(Err(e))) => anyhow::bail!("`{kind}` to `{device_id}`: phone reported: {e}"),
             Ok(Err(_)) => anyhow::bail!("`{kind}` to `{device_id}`: ack channel dropped"),
             Err(_) => {
                 conn.acks.lock().unwrap().remove(&cmd_id);
