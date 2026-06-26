@@ -265,6 +265,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     tokio::try_join!(
         control_server::serve(state.clone()),
         phone_server::serve(state.clone()),
+        phone_server::reap_stale(state.clone()),
     )?;
     Ok(())
 }

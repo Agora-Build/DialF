@@ -6,6 +6,7 @@
 //! acks, and triggers auto-answer.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +16,29 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::daemon::{self, now_ms, DaemonState, InboundHandler};
 use crate::protocol::{Action, CallState, Direction, PhoneToServer};
 use crate::registry::{CallInfo, DeviceInfo};
+
+/// Phones heartbeat every 30s; treat one as gone after it misses ~3 (no frame for this long).
+/// A half-open TCP socket doesn't error on its own, so the reader loop can block forever — this
+/// is how a silently-dropped phone leaves `dialf devices` and stops timing out commands.
+const STALE_AFTER_MS: i64 = 90_000;
+/// How often the reaper scans for stale phones.
+const REAP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Periodically drop phones whose connection has gone silent (mirrors the clean-disconnect
+/// cleanup: unregister from the hub + remove from the registry). Runs for the daemon's life.
+pub async fn reap_stale(state: DaemonState) -> anyhow::Result<()> {
+    let mut tick = tokio::time::interval(REAP_INTERVAL);
+    loop {
+        tick.tick().await;
+        let cutoff = now_ms() - STALE_AFTER_MS;
+        let reaped = state.registry.lock().unwrap().reap_older_than(cutoff);
+        for id in reaped {
+            tracing::warn!(device = %id, "reaping stale phone: no heartbeat in ~{}s", STALE_AFTER_MS / 1000);
+            state.hub.unregister(&id);
+            state.emit(format!("device {id} dropped (stale connection — no heartbeat)"));
+        }
+    }
+}
 
 /// Bind and serve the phone WebSocket endpoint until cancelled.
 pub async fn serve(state: DaemonState) -> anyhow::Result<()> {

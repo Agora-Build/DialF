@@ -136,6 +136,21 @@ impl Registry {
         v
     }
 
+    /// Remove every device whose `last_seen_ms` is strictly older than `cutoff_ms`; returns
+    /// the removed ids. Used to reap phones whose connection went silent (half-open sockets).
+    pub fn reap_older_than(&mut self, cutoff_ms: i64) -> Vec<String> {
+        let stale: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|(_, d)| d.last_seen_ms < cutoff_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            self.devices.remove(id);
+        }
+        stale
+    }
+
     /// Pick the sole device id if exactly one is registered (for `--device`-less calls).
     pub fn sole_device_id(&self) -> Option<String> {
         if self.devices.len() == 1 {
@@ -143,5 +158,33 @@ impl Registry {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(id: &str, last_seen_ms: i64) -> DeviceInfo {
+        DeviceInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            last_seen_ms,
+            current_call: None,
+        }
+    }
+
+    #[test]
+    fn reap_older_than_removes_only_stale() {
+        let mut reg = Registry::new();
+        reg.upsert(dev("fresh", 10_000));
+        reg.upsert(dev("stale", 1_000));
+        reg.upsert(dev("edge", 5_000)); // exactly at cutoff → kept (strictly older only)
+
+        let reaped = reg.reap_older_than(5_000);
+        assert_eq!(reaped, vec!["stale".to_string()]);
+        assert!(reg.get("fresh").is_some());
+        assert!(reg.get("edge").is_some());
+        assert!(reg.get("stale").is_none());
     }
 }
