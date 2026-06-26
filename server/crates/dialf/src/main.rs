@@ -302,6 +302,11 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let resp = call(&socket, op).await?;
                 print_response(&resp);
+                if job_ended_on_hangup(&resp) {
+                    println!(
+                        "\ncaller hung up — ran once, exiting. Use `--autoanswer <numbers>` to keep answering calls."
+                    );
+                }
                 ok_or_err(resp)
             } else {
                 serve_autoanswer(&socket, autoanswer, abs, device).await
@@ -626,6 +631,21 @@ fn print_response(resp: &ControlResponse) {
     } else {
         println!("ok");
     }
+}
+
+/// True if a `job.run` response stopped early because the far end hung up (the runner records a
+/// marker outcome). Used to print a one-shot "exiting" hint.
+fn job_ended_on_hangup(resp: &ControlResponse) -> bool {
+    resp.data
+        .as_ref()
+        .and_then(|d| d.get("steps"))
+        .and_then(|s| s.as_array())
+        .is_some_and(|steps| {
+            steps.iter().any(|o| {
+                o.get("summary").and_then(|v| v.as_str())
+                    == Some(dialf::jobs::runner::CALL_ENDED_SUMMARY)
+            })
+        })
 }
 
 fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {

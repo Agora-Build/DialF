@@ -108,12 +108,14 @@ pub enum InboundHandler {
 }
 
 impl DaemonState {
-    /// Emit a timestamped, human-readable event line to any foreground-serve clients
-    /// (best-effort). The local-time prefix lets `dialf run --autoanswer` output be correlated
-    /// with call activity at a glance.
+    /// Emit a human-readable event line. It goes to the daemon log (so config-based autoanswer,
+    /// which has no attached client, is still observable) and, timestamped, to any
+    /// foreground-serve clients (`dialf run --autoanswer`). Best-effort on both.
     pub fn emit(&self, line: impl Into<String>) {
+        let line = line.into();
+        tracing::info!(target: "event", "{line}");
         let ts = chrono::Local::now().format("%H:%M:%S");
-        let _ = self.events.send(format!("{ts}  {}", line.into()));
+        let _ = self.events.send(format!("{ts}  {line}"));
     }
 
     /// Allocate a fresh override-registration token.

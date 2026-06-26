@@ -332,7 +332,21 @@ async fn trigger_autoanswer(
             }
         };
         match daemon::run_job_on_device(&state, device_id.clone(), job).await {
-            Ok(_) => state.emit(format!("{n} → done")),
+            Ok((outcomes, _)) => {
+                match outcomes
+                    .iter()
+                    .position(|o| o.summary == crate::jobs::runner::CALL_ENDED_SUMMARY)
+                {
+                    Some(pos) => {
+                        state.emit(format!("{n} → caller hung up"));
+                        for o in outcomes.iter().skip(pos + 1) {
+                            state.emit(format!("  {}", o.summary)); // "audio.play skipped", …
+                        }
+                        state.emit("waiting for the next call".to_string());
+                    }
+                    None => state.emit(format!("{n} → done")),
+                }
+            }
             Err(e) => {
                 tracing::error!(error = %format!("{e:#}"), "auto-answer job failed");
                 state.emit(format!("{n} → job error: {e:#}"));
