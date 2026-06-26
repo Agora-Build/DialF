@@ -205,7 +205,12 @@ class ConnForegroundService : Service() {
     }
 
     private fun connect(host: String, port: Int) {
-        if (!running) return
+        // Never open a second socket while one is live. mDNS re-announces repeatedly, so
+        // onServiceFound -> resolve -> connect can fire many times; without this guard each
+        // call leaked another WebSocket (the daemon then saw several connections for one
+        // device, and replies/heartbeats went out on a different socket than commands came in
+        // on — commands "worked" but acks never matched). `ws` is cleared in dropped().
+        if (!running || ws != null) return
         val url = "ws://$host:$port"
         val req = Request.Builder().url(url).build()
         ws = client.newWebSocket(req, Listener(url))
@@ -244,7 +249,7 @@ class ConnForegroundService : Service() {
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
         }
 
-        override fun onMessage(webSocket: WebSocket, text: String) = handle(text)
+        override fun onMessage(webSocket: WebSocket, text: String) = handle(webSocket, text)
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = dropped()
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = dropped()
     }
@@ -278,7 +283,7 @@ class ConnForegroundService : Service() {
 
     // --- command dispatch -----------------------------------------------------
 
-    private fun handle(text: String) {
+    private fun handle(socket: WebSocket, text: String) {
         val msg = try {
             JSONObject(text)
         } catch (_: Exception) {
@@ -307,12 +312,12 @@ class ConnForegroundService : Service() {
                 "list_calls" -> {
                     val arr = org.json.JSONArray()
                     Telecom.listCallLog(this, 50).forEach { arr.put(JSONObject(it)) }
-                    ws?.send(JSONObject().put("type", "calls").put("entries", arr).toString())
+                    socket.send(JSONObject().put("type", "calls").put("entries", arr).toString())
                 }
                 "list_sims" -> {
                     val arr = org.json.JSONArray()
                     Telecom.listSims(this).forEach { arr.put(JSONObject(it)) }
-                    ws?.send(JSONObject().put("type", "sims").put("entries", arr).toString())
+                    socket.send(JSONObject().put("type", "sims").put("entries", arr).toString())
                 }
                 "mmi" -> {
                     val code = msg.getString("code")
@@ -320,7 +325,7 @@ class ConnForegroundService : Service() {
                     Telecom.sendMmi(this, code, sim) { ok, resp ->
                         val o = JSONObject().put("type", "mmi_result").put("code", code).put("success", ok)
                         if (resp != null) o.put("response", resp)
-                        ws?.send(o.toString())
+                        socket.send(o.toString())
                     }
                 }
                 "set_voicemail" -> {
@@ -330,23 +335,23 @@ class ConnForegroundService : Service() {
                     Telecom.setVoicemail(this, enabled, number, sim) { ok, resp ->
                         val o = JSONObject().put("type", "voicemail_result").put("enabled", enabled).put("success", ok)
                         if (resp != null) o.put("response", resp)
-                        ws?.send(o.toString())
+                        socket.send(o.toString())
                     }
                 }
                 "set_autoanswer" -> {} // dialfd owns the answer list
                 else -> {
-                    sendError(cmdId, "unknown action $action")
+                    sendError(socket, cmdId, "unknown action $action")
                     return
                 }
             }
-            ws?.send(JSONObject().put("type", "ack").put("cmd_id", cmdId).put("ok", true).toString())
+            socket.send(JSONObject().put("type", "ack").put("cmd_id", cmdId).put("ok", true).toString())
         } catch (e: Exception) {
-            sendError(cmdId, e.message ?: "command failed")
+            sendError(socket, cmdId, e.message ?: "command failed")
         }
     }
 
-    private fun sendError(cmdId: String, msg: String) {
-        ws?.send(JSONObject().put("type", "error").put("cmd_id", cmdId).put("msg", msg).toString())
+    private fun sendError(socket: WebSocket, cmdId: String, msg: String) {
+        socket.send(JSONObject().put("type", "error").put("cmd_id", cmdId).put("msg", msg).toString())
     }
 
     /** Forward a phone-side event to dialfd. Only frames dialfd understands are sent;
