@@ -1,6 +1,6 @@
 {
   "name": "@agora-build/dialf",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "DialF — autonomous phone pick/call daemon (dialfd) + CLI",
   "bin": {
     "dialf": "bin/dialf.js"
