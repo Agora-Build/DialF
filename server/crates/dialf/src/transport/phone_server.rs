@@ -34,7 +34,7 @@ pub async fn reap_stale(state: DaemonState) -> anyhow::Result<()> {
         let reaped = state.registry.lock().unwrap().reap_older_than(cutoff);
         for id in reaped {
             tracing::warn!(device = %id, "reaping stale phone: no heartbeat in ~{}s", STALE_AFTER_MS / 1000);
-            state.hub.unregister(&id);
+            state.hub.drop_device(&id);
             state.emit(format!("device {id} dropped (stale connection — no heartbeat)"));
         }
     }
@@ -86,9 +86,10 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
         other => anyhow::bail!("expected hello, got {other:?}"),
     };
 
-    // Register: command channel + device record.
+    // Register: command channel + device record. `gen` identifies *this* socket so a later
+    // reconnect supersedes us cleanly (and our own teardown can't clobber a newer connection).
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    state.hub.register(&device_id, tx);
+    let gen = state.hub.register(&device_id, tx);
     state.registry.lock().unwrap().upsert(DeviceInfo {
         id: device_id.clone(),
         name,
@@ -114,11 +115,16 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
     // Reader loop.
     let result = reader_loop(&mut read, &state, &device_id).await;
 
-    // Cleanup.
-    state.hub.unregister(&device_id);
-    state.registry.lock().unwrap().remove(&device_id);
+    // Cleanup — but only drop the device if we're still the current connection. If a newer
+    // reconnect has superseded us, `unregister` is a no-op and we must leave its record intact
+    // (this is the bug that made commands time out after a silent reconnect).
+    if state.hub.unregister(&device_id, gen) {
+        state.registry.lock().unwrap().remove(&device_id);
+        tracing::info!(%device_id, "phone disconnected");
+    } else {
+        tracing::info!(%device_id, gen, "old socket closed; a newer connection is active");
+    }
     writer.abort();
-    tracing::info!(%device_id, "phone disconnected");
     result
 }
 

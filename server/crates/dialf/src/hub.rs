@@ -17,6 +17,9 @@ type AckTx = oneshot::Sender<Result<(), String>>;
 
 /// One connected phone's send side + pending acks.
 struct WsConn {
+    /// Generation: a unique id for this socket, so a later reconnection can supersede this one
+    /// and a dying older socket can't clobber the current registration (see `unregister`).
+    gen: u64,
     tx: mpsc::Sender<ServerToPhone>,
     acks: Mutex<HashMap<CmdId, AckTx>>,
 }
@@ -25,6 +28,7 @@ struct WsConn {
 pub struct Hub {
     conns: Mutex<HashMap<String, Arc<WsConn>>>,
     seq: AtomicU64,
+    conn_gen: AtomicU64,
     cmd_timeout: Duration,
 }
 
@@ -34,24 +38,59 @@ impl Hub {
         Self {
             conns: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
+            conn_gen: AtomicU64::new(1),
             cmd_timeout: Duration::from_secs(10),
         }
     }
 
-    /// Register a connection's command channel; replaces any existing entry.
-    pub fn register(&self, device_id: &str, tx: mpsc::Sender<ServerToPhone>) {
+    /// Register a connection's command channel; supersedes any existing entry. Returns this
+    /// connection's generation, which the caller passes back to [`Hub::unregister`] on
+    /// disconnect so only the *current* socket is ever torn down.
+    pub fn register(&self, device_id: &str, tx: mpsc::Sender<ServerToPhone>) -> u64 {
+        let gen = self.conn_gen.fetch_add(1, Ordering::Relaxed);
         let conn = Arc::new(WsConn {
+            gen,
             tx,
             acks: Mutex::new(HashMap::new()),
         });
-        self.conns.lock().unwrap().insert(device_id.to_string(), conn);
+        let prev = self.conns.lock().unwrap().insert(device_id.to_string(), conn);
+        if let Some(prev) = prev {
+            // The phone opened a new socket without closing the old one. Commands now target the
+            // new socket; fail any acks still pending on the old one so they don't hang. (Its
+            // writer also shuts down as the old WsConn drops.)
+            tracing::warn!(
+                %device_id, old_gen = prev.gen, new_gen = gen,
+                "phone reconnected without closing its previous socket — superseding it"
+            );
+            for (_, tx) in prev.acks.lock().unwrap().drain() {
+                let _ = tx.send(Err("connection superseded".to_string()));
+            }
+        }
+        gen
     }
 
-    /// Remove a connection and fail any pending acks.
-    pub fn unregister(&self, device_id: &str) {
+    /// Remove a connection (identified by its `gen`) and fail its pending acks. A no-op if a
+    /// newer connection has already taken over — returns whether this call actually removed it,
+    /// so the caller knows whether to also drop the device from the registry.
+    pub fn unregister(&self, device_id: &str, gen: u64) -> bool {
+        let mut conns = self.conns.lock().unwrap();
+        match conns.get(device_id) {
+            Some(conn) if conn.gen == gen => {
+                let conn = conns.remove(device_id).unwrap();
+                for (_, tx) in conn.acks.lock().unwrap().drain() {
+                    let _ = tx.send(Err("device disconnected".to_string()));
+                }
+                true
+            }
+            _ => false, // a newer connection owns this device now; leave it alone
+        }
+    }
+
+    /// Unconditionally drop a device's connection (used by the stale-connection reaper, which
+    /// has already confirmed the device is gone). Fails any pending acks.
+    pub fn drop_device(&self, device_id: &str) {
         if let Some(conn) = self.conns.lock().unwrap().remove(device_id) {
-            let mut acks = conn.acks.lock().unwrap();
-            for (_, tx) in acks.drain() {
+            for (_, tx) in conn.acks.lock().unwrap().drain() {
                 let _ = tx.send(Err("device disconnected".to_string()));
             }
         }
@@ -60,14 +99,18 @@ impl Hub {
     /// Resolve a pending command ack (called from the phone read loop).
     pub fn resolve_ack(&self, device_id: &str, cmd_id: &str, ok: bool) {
         let conn = self.conns.lock().unwrap().get(device_id).cloned();
-        if let Some(conn) = conn {
-            if let Some(tx) = conn.acks.lock().unwrap().remove(cmd_id) {
+        let waiter = conn.and_then(|c| c.acks.lock().unwrap().remove(cmd_id));
+        match waiter {
+            Some(tx) => {
                 let _ = tx.send(if ok {
                     Ok(())
                 } else {
                     Err("phone reported failure".to_string())
                 });
             }
+            // The ack arrived but no command is waiting on the current connection — typically
+            // the command was sent on a now-superseded socket, or it already timed out.
+            None => tracing::warn!(%device_id, %cmd_id, "ack with no matching pending command"),
         }
     }
 
@@ -132,5 +175,30 @@ impl Hub {
 impl Default for Hub {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_connection_supersedes_and_old_teardown_is_noop() {
+        let hub = Hub::new();
+        let (tx1, _rx1) = mpsc::channel(4);
+        let (tx2, _rx2) = mpsc::channel(4);
+
+        let gen1 = hub.register("dev", tx1);
+        let gen2 = hub.register("dev", tx2); // phone reconnected; supersedes gen1
+        assert_ne!(gen1, gen2);
+
+        // The OLD socket tearing down must NOT remove the current (newer) connection —
+        // this is the bug that made commands time out after a silent reconnect.
+        assert!(!hub.unregister("dev", gen1));
+        assert!(hub.conn("dev").is_ok(), "newer connection stays registered");
+
+        // The current connection's own teardown does remove it.
+        assert!(hub.unregister("dev", gen2));
+        assert!(hub.conn("dev").is_err(), "device gone after current connection closes");
     }
 }
