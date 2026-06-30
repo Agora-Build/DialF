@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.nsd.NsdManager
@@ -17,6 +19,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -52,6 +56,7 @@ class ConnForegroundService : Service() {
         // heartbeat acks) before we treat the link as dead and reconnect (~3 missed beats).
         private const val HEARTBEAT_MS = 30_000L
         private const val LIVENESS_TIMEOUT_MS = 90_000L
+        private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -74,9 +79,43 @@ class ConnForegroundService : Service() {
     private var reconnectDelayMs = MIN_RECONNECT_MS
     private var reconnectRunnable: Runnable? = null
     private var discoveryTimeout: Runnable? = null
+    // Held only while charging, to keep the CPU out of deep sleep so the heartbeat keeps flowing
+    // and the daemon can place calls / send SMS the moment it's docked. Released the instant it's
+    // unplugged, so it never costs battery in normal use. PARTIAL = CPU only; the screen stays off.
+    private var wakeLock: PowerManager.WakeLock? = null
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.i(TAG, "power changed: ${intent?.action}")
+            updateWakeLock()
+        }
+    }
 
     private fun isCharging() =
         getSystemService(BatteryManager::class.java)?.isCharging == true
+
+    /** Acquire a CPU-only wake lock while charging; release it otherwise. Keeping the phone out of
+     *  Doze while docked means the heartbeat never stalls and the daemon stays able to operate the
+     *  phone on demand (it can't wake a sleeping phone otherwise). On battery we release immediately
+     *  so the phone Dozes normally — no drain. Idempotent; safe on any power/lifecycle change. */
+    private fun updateWakeLock() {
+        if (running && isCharging()) {
+            if (wakeLock == null) {
+                wakeLock = getSystemService(PowerManager::class.java)
+                    ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DialF:charging")
+                    ?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+                Log.i(TAG, "charging -> wake lock held (CPU awake, screen off)")
+            }
+        } else {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+                Log.i(TAG, "on battery/stopped -> wake lock released")
+            }
+            wakeLock = null
+        }
+    }
 
     private fun keepRunning() =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("keep_running", true)
@@ -91,15 +130,37 @@ class ConnForegroundService : Service() {
         val cm = getSystemService(ConnectivityManager::class.java)
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (running && ws == null) main.post {
-                    reconnectDelayMs = MIN_RECONNECT_MS // network's back — try right away
-                    connectOrDiscover()
+                if (!running) return
+                main.post {
+                    // Network (re)appeared. Reconnect if we have no socket, OR if we have one
+                    // that's gone stale (no daemon response in a while) — after the phone wakes
+                    // from sleep the old socket is usually dead while `ws` still looks set, which
+                    // otherwise leaves us "Connected" but unreachable until a manual Stop/Start.
+                    val stale = ws != null && daemonAcksHeartbeats &&
+                        System.currentTimeMillis() - lastDaemonResponseMs > LIVENESS_TIMEOUT_MS
+                    if (ws == null || stale) {
+                        Log.i(TAG, "network available -> reconnect (stale=$stale)")
+                        forceReconnect()
+                    }
                 }
             }
         }
         try {
             cm?.registerDefaultNetworkCallback(cb)
             netCallback = cb
+        } catch (_: Exception) {}
+        // Track charge state so we hold/release the wake lock as the cable goes in/out.
+        try {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(powerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(powerReceiver, filter)
+            }
         } catch (_: Exception) {}
     }
 
@@ -112,6 +173,7 @@ class ConnForegroundService : Service() {
             reconnectDelayMs = MIN_RECONNECT_MS
             connectOrDiscover()
         }
+        updateWakeLock() // hold the lock now if we're already plugged in
         return START_STICKY
     }
 
@@ -145,6 +207,8 @@ class ConnForegroundService : Service() {
         netCallback = null
         ws?.close(1000, "service stopping")
         ws = null
+        try { unregisterReceiver(powerReceiver) } catch (_: Exception) {}
+        updateWakeLock() // running=false above -> releases the lock
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -221,6 +285,7 @@ class ConnForegroundService : Service() {
         // on — commands "worked" but acks never matched). `ws` is cleared in dropped().
         if (!running || ws != null) return
         val url = "ws://$host:$port"
+        Log.i(TAG, "connecting to $url")
         val req = Request.Builder().url(url).build()
         ws = client.newWebSocket(req, Listener(url))
     }
@@ -242,13 +307,19 @@ class ConnForegroundService : Service() {
     private inner class Listener(private val url: String) : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            // Report the real installed version (versionName) rather than a hardcoded string.
+            val appVersion = try {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+            } catch (_: Exception) {
+                "?"
+            }
             val hello = JSONObject()
                 .put("type", "hello")
                 .put("device_id", prefs.getString("device_id", "phone1"))
                 .put("name", prefs.getString("name", "DialF Phone"))
                 .put("key", prefs.getString("key", "change-me"))
                 .put("caps", org.json.JSONArray(listOf("call", "sms")))
-                .put("app_version", "0.1")
+                .put("app_version", appVersion)
             webSocket.send(hello.toString())
             // Fresh connection: assume alive now; re-learn whether this daemon acks heartbeats.
             lastDaemonResponseMs = System.currentTimeMillis()
@@ -258,6 +329,7 @@ class ConnForegroundService : Service() {
             reconnectDelayMs = MIN_RECONNECT_MS
             reconnectRunnable?.let { main.removeCallbacks(it) }
             notify("Connected · $url")
+            Log.i(TAG, "connected to $url")
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
         }
 
@@ -274,11 +346,26 @@ class ConnForegroundService : Service() {
         // socket dying must not tear down the live connection (that bug stopped heartbeats and
         // got the device reaped).
         if (socket !== ws) return
+        Log.i(TAG, "dropped current socket -> reconnecting")
         cancelHeartbeat()
         ws = null
         notify("Reconnecting…")
         Dialf.emit(mapOf("type" to "status", "connected" to false))
         scheduleReconnect()
+    }
+
+    /** Tear down the current socket and reconnect now — used when we *know* the link is dead
+     *  (liveness timeout, or network back after sleep). Unlike waiting for a close callback, this
+     *  always clears `ws` so connect() isn't blocked by the `ws != null` guard. */
+    private fun forceReconnect() {
+        cancelHeartbeat()
+        ws?.close(1001, "reconnecting")
+        ws = null
+        notify("Reconnecting…")
+        Dialf.emit(mapOf("type" to "status", "connected" to false))
+        reconnectDelayMs = MIN_RECONNECT_MS
+        reconnectRunnable?.let { main.removeCallbacks(it) }
+        connectOrDiscover()
     }
 
     private fun startHeartbeat() {
@@ -287,12 +374,14 @@ class ConnForegroundService : Service() {
             override fun run() {
                 val sock = ws ?: return
                 // Liveness: if the daemon (which acks heartbeats) has gone silent past the
-                // timeout, the link is dead even if the socket looks open — close it so we
-                // reconnect (onClosed -> dropped -> scheduleReconnect).
+                // timeout, the link is dead even if the socket looks open (e.g. it died while the
+                // phone was asleep). Force a reconnect directly — a dead socket's close callback
+                // may never fire, which would otherwise leave us stuck "Connected".
                 if (daemonAcksHeartbeats &&
                     System.currentTimeMillis() - lastDaemonResponseMs > LIVENESS_TIMEOUT_MS
                 ) {
-                    sock.close(1001, "no response from daemon")
+                    Log.i(TAG, "liveness timeout (no daemon response) -> force reconnect")
+                    forceReconnect()
                     return
                 }
                 sock.send(

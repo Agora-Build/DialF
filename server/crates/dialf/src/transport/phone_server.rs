@@ -56,14 +56,14 @@ pub async fn serve(state: DaemonState) -> anyhow::Result<()> {
         let (stream, peer) = listener.accept().await?;
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, state).await {
+            if let Err(e) = handle_conn(stream, peer, state).await {
                 tracing::warn!(%peer, error = %e, "phone connection ended with error");
             }
         });
     }
 }
 
-async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()> {
+async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) -> anyhow::Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut sink, mut read) = ws.split();
 
@@ -95,6 +95,7 @@ async fn handle_conn(stream: TcpStream, state: DaemonState) -> anyhow::Result<()
     state.registry.lock().unwrap().upsert(DeviceInfo {
         id: device_id.clone(),
         name,
+        addr: Some(peer.ip().to_string()),
         last_seen_ms: now_ms(),
         current_call: None,
     });

@@ -4,7 +4,7 @@ members = ["crates/dialf", "crates/ten-vad-sys"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.26"
+version = "0.1.27"
 license = "MIT"
 rust-version = "1.75"
 
