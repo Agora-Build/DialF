@@ -16,6 +16,12 @@ object Dialf {
     @Volatile
     var eventSink: EventChannel.EventSink? = null
 
+    /** The most recent connection-status event. Replayed to a freshly-subscribing UI so it
+     *  reflects the live connection instead of its default "discovering": the headless service
+     *  usually connects long before the UI opens, and EventChannel doesn't replay past events. */
+    @Volatile
+    var lastStatus: Map<String, Any?>? = null
+
     /** Listener for the headless foreground service (forwards events over WS). Runs
      *  independent of the UI, so call/SMS events reach dialfd even when locked. */
     @Volatile
@@ -53,6 +59,7 @@ object Dialf {
 
     /** Emit an event to the Dart UI (if alive) and the headless service (if running). */
     fun emit(event: Map<String, Any?>) {
+        if (event["type"] == "status") lastStatus = event // remember for UI (re)subscribes
         main.post { eventSink?.success(event) }
         serviceListener?.invoke(event)
     }

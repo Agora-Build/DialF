@@ -79,9 +79,10 @@ class ConnForegroundService : Service() {
     private var reconnectDelayMs = MIN_RECONNECT_MS
     private var reconnectRunnable: Runnable? = null
     private var discoveryTimeout: Runnable? = null
-    // Held only while charging, to keep the CPU out of deep sleep so the heartbeat keeps flowing
-    // and the daemon can place calls / send SMS the moment it's docked. Released the instant it's
-    // unplugged, so it never costs battery in normal use. PARTIAL = CPU only; the screen stays off.
+    // Held whenever the phone is on external power, to keep the CPU out of deep sleep so the
+    // heartbeat keeps flowing and the daemon can place calls / send SMS the moment it's docked.
+    // Released the instant it's unplugged, so it never costs battery in normal use. PARTIAL = CPU
+    // only; the screen stays off.
     private var wakeLock: PowerManager.WakeLock? = null
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -93,25 +94,37 @@ class ConnForegroundService : Service() {
     private fun isCharging() =
         getSystemService(BatteryManager::class.java)?.isCharging == true
 
-    /** Acquire a CPU-only wake lock while charging; release it otherwise. Keeping the phone out of
-     *  Doze while docked means the heartbeat never stalls and the daemon stays able to operate the
-     *  phone on demand (it can't wake a sleeping phone otherwise). On battery we release immediately
-     *  so the phone Dozes normally — no drain. Idempotent; safe on any power/lifecycle change. */
+    /** True when the phone is on any external power source (AC/USB/wireless). NOT the same as
+     *  isCharging(), which goes false once the battery is full or held at a charge limit (e.g. an
+     *  80% cap) — at which point the phone is still powered but not "charging". We gate the wake
+     *  lock on this so a plugged-in-but-full phone still stays awake. */
+    private fun isPluggedIn(): Boolean {
+        val batt = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val plugged = batt?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        return plugged != 0
+    }
+
+    /** Acquire a CPU-only wake lock whenever the phone is on external power; release it otherwise.
+     *  Keeping the phone out of Doze while docked means the heartbeat never stalls and the daemon
+     *  stays able to operate the phone on demand (it can't wake a sleeping phone otherwise). Off
+     *  power we release immediately so the phone Dozes normally — no drain. Gated on plugged-in,
+     *  not isCharging(), so a full / charge-limited phone still stays awake. Idempotent; safe on
+     *  any power/lifecycle change. */
     private fun updateWakeLock() {
-        if (running && isCharging()) {
+        if (running && isPluggedIn()) {
             if (wakeLock == null) {
                 wakeLock = getSystemService(PowerManager::class.java)
-                    ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DialF:charging")
+                    ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DialF:powered")
                     ?.apply {
                         setReferenceCounted(false)
                         acquire()
                     }
-                Log.i(TAG, "charging -> wake lock held (CPU awake, screen off)")
+                Log.i(TAG, "on power -> wake lock held (CPU awake, screen off)")
             }
         } else {
             wakeLock?.let {
                 if (it.isHeld) it.release()
-                Log.i(TAG, "on battery/stopped -> wake lock released")
+                Log.i(TAG, "unplugged/stopped -> wake lock released")
             }
             wakeLock = null
         }

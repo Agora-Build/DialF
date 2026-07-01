@@ -32,6 +32,10 @@ class MainActivity : FlutterActivity() {
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                     Dialf.eventSink = events
+                    // Replay the current connection status so a freshly-opened UI reflects the
+                    // live connection — the service usually connected before this subscription
+                    // existed, and EventChannel doesn't replay past events.
+                    Dialf.lastStatus?.let { events?.success(it) }
                 }
                 override fun onCancel(arguments: Any?) {
                     Dialf.eventSink = null
