@@ -7,25 +7,47 @@ on a real SIM, over a real cellular network.*
 
 ## Why we built this
 
-We kept running into the same wall: **how do you automate a *real* phone call?**
+AI voice agents are everywhere now — and they **live and die by latency and audio quality.** A
+second of dead air, a stiff robotic voice, or choppy, fluctuating audio is the difference
+between "sounds human" and "obviously a bot." Yet before every release we were measuring those
+things *by hand*: dial in,
+read a script, listen for gaps, do it again on the next build. It didn't scale, and "sounds
+fine to me" is not a regression test.
 
-Not a VoIP call. Not a simulator. An actual call on an actual carrier — the kind that
-rings a normal phone, goes through the normal network, and behaves exactly like a human
-dialing. We wanted to:
+What we actually needed was to automate a *real* phone call. Not a VoIP call. Not a simulator.
+An actual call on an actual carrier — the kind that rings a normal phone, goes through the
+normal network, and behaves exactly like a human dialing. So we could:
 
-- **Test phone systems end to end** — IVRs, call centers, voicemail, carrier features — the
-  way a real caller experiences them.
+- **Test phone systems end to end** — voice agents, IVRs, call centers, voicemail — the way a
+  real caller experiences them.
 - **Run scripted conversations** — play a prompt, wait for the other side to finish talking,
   play the next one.
-- **Record both sides of the call** cleanly, on one timeline, so we could measure things like
-  **latency** ("how long after I speak does the other side respond?").
+- **Record both sides cleanly, on one timeline**, so we could measure **latency** ("how long
+  after I speak does the other side respond?") — as a number, on every build.
 
 The catch: **Android won't let an app record or inject the audio of a cellular call.** That
 path is locked to the system. So a pure software approach is impossible.
 
 DialF's answer is simple and a little old-school: **bridge the call audio through a real USB
 sound card.** The phone does the dialing; a sound card plays into the phone's mic and listens
-on its earpiece. Your computer drives the whole thing.
+on its earpiece. Your computer drives the whole thing — and we know you'll wire your own AI
+agents up to do the driving.
+
+---
+
+## Why not a programmable 4G module?
+
+It's the first thing every engineer suggests, and it's a fair instinct — a cellular module
+takes a SIM, speaks AT commands, and dials from a script. Cheap, headless, no human in the loop.
+
+But a module isn't a phone. It carries its own compatibility quirks and behaves in ways real
+handsets don't — so it can quietly alter the very thing you're trying to measure. You end up
+testing the module's behavior, not your users' calls.
+
+That's the crux: **a voice agent's audio path *is* the product, and a module only tests a
+synthetic version of it.** Your agent can sound flawless through a module and still ship
+stutter and echo through a real earpiece — and the module never warns you, because it was never
+on the path your callers actually hear. DialF drives a real phone for exactly that reason.
 
 ---
 
@@ -118,11 +140,16 @@ Then start the background daemon:
 dialf service install --user      # runs dialfd at login
 ```
 
+> On a Mac or laptop, keep `--user` — it runs as you, when you log in (needed so it can reach
+> the sound card and mic). Use plain `dialf service install` (with `sudo`) only on a headless
+> Linux server that should start at boot.
+
 ### 2. Install the phone app
 
 Sideload the APK on the Android phone (Android 9+):
 
-- Newest: <https://dl.agora.build/dialf/dialf-phone-latest.apk>
+- **Latest release (default):** <https://github.com/Agora-Build/DialF/releases>
+- or <https://dl.agora.build/dialf/dialf-phone-latest.apk>
 
 Open it, grant phone/SMS permissions, and **set it as the default dialer** (that's what lets
 it place and track calls).
@@ -160,7 +187,9 @@ Jobs are plain YAML — a list of steps run in order:
 - type: audio.wait_for_speech   # listen until the other side stops talking
   end_timeout_ms: 45000
   silence_duration_ms: 3000
-- type: sms.send  { to: "+15551234", body: "thanks!" }
+- type: sms.send
+  to: "+15551234"
+  body: "thanks!"
 - type: call.hangup
 ```
 
@@ -204,3 +233,12 @@ conversation, and hand you a clean recording.
 
 It runs on macOS and Linux, the CLI installs from npm, and the phone app is a sideloadable
 APK. If you've ever wanted to put a real phone call inside a `for` loop — that's the idea.
+
+---
+
+## License
+
+DialF is released under the **MIT License**.
+
+**Disclaimer:** This tool is strictly for engineering use only and must not be used for any
+illegal purposes. The user bears all legal consequences arising from its use.
