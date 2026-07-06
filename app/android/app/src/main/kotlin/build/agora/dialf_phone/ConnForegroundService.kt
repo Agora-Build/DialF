@@ -91,6 +91,22 @@ class ConnForegroundService : Service() {
         }
     }
 
+    // Fires when the device wakes — screen on, or exits Doze (which an incoming call forces). On
+    // wake we can't trust the socket: it may have gone half-open while the CPU was suspended, so we
+    // verify the dialfd link and rebuild it if it's stale (see verifyLink()).
+    private val wakeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            // ACTION_DEVICE_IDLE_MODE_CHANGED fires on both enter and exit — only act on exit.
+            if (action == PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED &&
+                getSystemService(PowerManager::class.java)?.isDeviceIdleMode == true
+            ) {
+                return
+            }
+            main.post { verifyLink(action) }
+        }
+    }
+
     private fun isCharging() =
         getSystemService(BatteryManager::class.java)?.isCharging == true
 
@@ -175,6 +191,20 @@ class ConnForegroundService : Service() {
                 registerReceiver(powerReceiver, filter)
             }
         } catch (_: Exception) {}
+        // On wake (screen on / Doze exit), verify the dialfd link is really alive — a socket that
+        // went half-open during sleep still looks connected but can't carry the next command/ring.
+        try {
+            val wakeFilter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(wakeReceiver, wakeFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(wakeReceiver, wakeFilter)
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -221,6 +251,7 @@ class ConnForegroundService : Service() {
         ws?.close(1000, "service stopping")
         ws = null
         try { unregisterReceiver(powerReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(wakeReceiver) } catch (_: Exception) {}
         updateWakeLock() // running=false above -> releases the lock
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
@@ -344,6 +375,13 @@ class ConnForegroundService : Service() {
             notify("Connected · $url")
             Log.i(TAG, "connected to $url")
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
+            // If a call is already ringing (e.g. an incoming call is what woke us and we just
+            // rebuilt the link), re-report it so the freshly-registered daemon can still
+            // auto-answer — the original "ringing" event may have gone out on the dead socket.
+            Dialf.ringingCall()?.let {
+                Log.i(TAG, "reconnected mid-ring -> re-reporting ringing call")
+                Dialf.emitCallState(it)
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -379,6 +417,34 @@ class ConnForegroundService : Service() {
         reconnectDelayMs = MIN_RECONNECT_MS
         reconnectRunnable?.let { main.removeCallbacks(it) }
         connectOrDiscover()
+    }
+
+    /** On wake, make sure the dialfd link is genuinely alive. A socket that went half-open while
+     *  the CPU was suspended still looks "connected" (`ws != null`) but can't carry the next
+     *  command or the incoming-call ring. If we can't vouch for it — no socket, or the daemon has
+     *  been silent longer than a heartbeat interval — rebuild it; otherwise poke a heartbeat so a
+     *  silently-dead socket surfaces at once instead of waiting for the next scheduled beat. */
+    private fun verifyLink(reason: String) {
+        if (!running) return
+        val silentMs = System.currentTimeMillis() - lastDaemonResponseMs
+        val suspect = ws == null || (daemonAcksHeartbeats && silentMs > HEARTBEAT_MS)
+        if (suspect) {
+            Log.i(TAG, "$reason -> link suspect (ws=${ws != null}, silent=${silentMs}ms) -> reconnect")
+            forceReconnect()
+        } else {
+            Log.i(TAG, "$reason -> link looks alive (silent=${silentMs}ms); poking heartbeat")
+            pokeHeartbeat()
+        }
+    }
+
+    /** Send a heartbeat right now (out of the normal cadence) to probe the socket. */
+    private fun pokeHeartbeat() {
+        val sock = ws ?: return
+        try {
+            sock.send(
+                JSONObject().put("type", "heartbeat").put("ts", System.currentTimeMillis()).toString()
+            )
+        } catch (_: Exception) {}
     }
 
     private fun startHeartbeat() {
