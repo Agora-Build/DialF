@@ -106,6 +106,7 @@ audio:
   playback_device: "MiniFuse 2"
   record_dir: /Users/you/dialf/recordings
   mix_recording: true
+  mix_channels: tx_rx    # mix.wav stereo: left=tx / right=rx (default); rx_tx swaps
   # Pin sox by full path + explicit device so a stripped PATH can't fall back to a
   # default-output tool. `gain 20` boosts a quiet far-end capture ~20 dB (optional).
   # `remix 1` selects ONE capture channel (see "Loopback channels" below).
@@ -146,15 +147,16 @@ and every channel reads silent.)
 
 Each recorded job writes (paths returned by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (far end)
-- `<job>-tx.wav` — audio injected into the card (our prompts)
-- `<job>-mix.wav` — both summed (when `mix_recording: true`)
+- `<job>-rx.wav` — captured from the card (far end), mono
+- `<job>-tx.wav` — audio injected into the card (our prompts), mono
+- `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two
+  voices stay separated. Set `mix_channels: rx_tx` to swap the channels.
 
 Recording is **full-duplex on a single clock**: rx is captured continuously for the whole
 job — including while a prompt plays and across `wait`/dial gaps — and tx carries each prompt
 at its true offset (silence elsewhere). The master clock is the rx sample count (the card's
-own clock), so the three files are the **same length and sample-aligned**: index *i* is the
-same instant in rx, tx, and mix.
+own clock), so the legs are the **same length and sample-aligned**: frame *i* is the same
+instant in `rx`, `tx`, and each channel of the stereo `mix`.
 
 ```sh
 dialf run server/jobs/live-call.yaml   --device <id>   # call + record

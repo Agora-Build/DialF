@@ -241,9 +241,10 @@ A USB sound card bridges the phone and host: card **output → phone mic** (inje
 card **input ← phone earpiece** (capture the far end). A recorded job writes (paths returned
 by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (the phone / far end)
-- `<job>-tx.wav` — audio injected into the card (our prompts)
-- `<job>-mix.wav` — the two summed (when `mix_recording: true`)
+- `<job>-rx.wav` — captured from the card (the phone / far end), mono
+- `<job>-tx.wav` — audio injected into the card (our prompts), mono
+- `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two
+  voices stay separated. Swap with `mix_channels: rx_tx`.
 
 Recording is **full-duplex on a single clock** — rx records continuously for the whole job
 (including during playback and `wait` gaps), tx carries each prompt at its true offset, and
@@ -279,6 +280,7 @@ audio:
   playback_device: "plughw:1,0"
   record_dir: /var/lib/dialf/recordings
   mix_recording: true
+  mix_channels: tx_rx              # mix.wav: left=tx / right=rx (default); rx_tx swaps
 ```
 
 The app's shared key / device id / optional fixed `dialfd` address are set in its UI — see

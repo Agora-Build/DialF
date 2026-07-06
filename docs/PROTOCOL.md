@@ -161,4 +161,4 @@ In **auto-answer** mode the daemon answers the call itself, so `call.dial` /
 | `ws_bind`        | `host:port` for the phone WebSocket server (`0.0.0.0:8765`) |
 | `instance_name`  | name advertised via mDNS                                  |
 | `autoanswer`     | map: number → optional job path (null = answer only; path = answer + run that job) |
-| `audio`          | sound-card devices, commands, `record_dir`, `mix_recording` |
+| `audio`          | sound-card devices, commands, `record_dir`, `mix_recording`, `mix_channels` |
