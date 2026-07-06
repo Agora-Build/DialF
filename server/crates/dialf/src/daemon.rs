@@ -533,6 +533,7 @@ pub async fn run_job_on_device(
     let engine = state.engine.clone();
     let record_dir = state.config.audio.record_dir.clone();
     let mix_recording = state.config.audio.mix_recording;
+    let mix_tx_left = state.config.audio.mix_channels.tx_left();
     let hub = state.hub.clone();
     let registry = state.registry.clone();
     let rt = tokio::runtime::Handle::current();
@@ -541,7 +542,12 @@ pub async fn run_job_on_device(
     tokio::task::spawn_blocking(move || -> JobResult {
         let session = match record_dir {
             Some(dir) => {
-                Some(engine.start_duplex(dir, format!("dialf-job-{}", now_ms()), mix_recording)?)
+                Some(engine.start_duplex(
+                    dir,
+                    format!("dialf-job-{}", now_ms()),
+                    mix_recording,
+                    mix_tx_left,
+                )?)
             }
             None => None,
         };

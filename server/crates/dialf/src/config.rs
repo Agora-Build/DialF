@@ -38,6 +38,24 @@ pub struct Config {
 }
 
 /// Sound-card + external-tool settings.
+/// Stereo channel assignment for the mixed recording (`*-mix.wav`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MixChannels {
+    /// Left = tx (local / our prompts), right = rx (remote / far end). The default.
+    #[default]
+    TxRx,
+    /// Left = rx (remote / far end), right = tx (local / our prompts).
+    RxTx,
+}
+
+impl MixChannels {
+    /// True when tx belongs in the left channel (the default layout).
+    pub fn tx_left(self) -> bool {
+        matches!(self, MixChannels::TxRx)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
@@ -59,6 +77,8 @@ pub struct AudioConfig {
     pub record_dir: Option<PathBuf>,
     /// When recording, mix played + captured audio into one file (else keep two legs).
     pub mix_recording: bool,
+    /// Stereo channel layout for the mixed file. Default: tx (local) left, rx (remote) right.
+    pub mix_channels: MixChannels,
 }
 
 impl Default for Config {
@@ -85,6 +105,7 @@ impl Default for AudioConfig {
             playback_cmd: None,
             record_dir: None,
             mix_recording: false,
+            mix_channels: MixChannels::default(),
         }
     }
 }
@@ -144,5 +165,23 @@ autoanswer:
         assert_eq!(cfg.autoanswer.get("+15559876"), Some(&None)); // answer only
         assert_eq!(cfg.autoanswer.get("+15550000"), Some(&None)); // answer only
         assert_eq!(cfg.autoanswer.get("+10000000"), None); // not configured
+    }
+
+    #[test]
+    fn mix_channels_defaults_to_tx_left() {
+        // Default (unset in YAML) is tx-left / rx-right.
+        assert_eq!(MixChannels::default(), MixChannels::TxRx);
+        assert!(MixChannels::TxRx.tx_left());
+        assert!(!MixChannels::RxTx.tx_left());
+        // Omitting it in config leaves the default.
+        let cfg: Config = serde_yaml::from_str("audio: {}").unwrap();
+        assert_eq!(cfg.audio.mix_channels, MixChannels::TxRx);
+    }
+
+    #[test]
+    fn mix_channels_parses_snake_case() {
+        let cfg: Config = serde_yaml::from_str("audio:\n  mix_channels: rx_tx\n").unwrap();
+        assert_eq!(cfg.audio.mix_channels, MixChannels::RxTx);
+        assert!(!cfg.audio.mix_channels.tx_left());
     }
 }

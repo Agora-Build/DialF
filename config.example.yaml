@@ -23,6 +23,8 @@ audio:
   playback_device: "MiniFuse 2"
   record_dir: /Users/you/dialf/recordings   # set to enable rx/tx/mix recording
   mix_recording: true
+  mix_channels: tx_rx               # mix.wav stereo layout: tx_rx = left tx (local) / right rx
+                                    # (remote) [default]; rx_tx swaps them
 
   # Optional: pin the audio tool by full path + explicit device so a stripped PATH
   # can't fall back to a default-output tool (afplay). `gain N` adds N dB to the

@@ -80,6 +80,7 @@ impl AudioEngine {
         dir: PathBuf,
         session_name: String,
         mix: bool,
+        mix_tx_left: bool,
     ) -> anyhow::Result<DuplexSession> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("create record dir {}: {e}", dir.display()))?;
@@ -95,7 +96,7 @@ impl AudioEngine {
         let rx = WavFileSink::create(&rx_path, RECORD_RATE)?;
         let tx = WavFileSink::create(&tx_path, RECORD_RATE)?;
         let session = DuplexSession::start(
-            source, rx, tx, rx_path, tx_path, dir, session_name, mix, unblock,
+            source, rx, tx, rx_path, tx_path, dir, session_name, mix, mix_tx_left, unblock,
         )?;
 
         // The capture tool opens even when the mic is denied (macOS) or the card is dead,

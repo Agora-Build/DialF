@@ -7,10 +7,10 @@
 //! including while we play tx and during `wait`/dial gaps. tx is written at its true
 //! offset on the same timeline (silence elsewhere). The **master clock is the rx sample
 //! count** (driven by the capture card, so there is no wall-clock drift). On
-//! [`DuplexSession::finish`] both legs are padded to the same length and an optional summed
-//! `*-mix.wav` is produced. All three files are the same length and sample-aligned, so a
-//! tx↔rx cross-correlation yields round-trip (echo) latency, and the gap between a tx
-//! prompt and the rx reply yields response latency.
+//! [`DuplexSession::finish`] both legs are padded to the same length and an optional stereo
+//! `*-mix.wav` is produced with **left = tx, right = rx**. rx, tx, and the mix are the same
+//! length and sample-aligned, so a tx↔rx cross-correlation yields round-trip (echo) latency,
+//! and the gap between a tx prompt and the rx reply yields response latency.
 //!
 //! Note on scheduling: the real capture timing is owned by the external recording tool +
 //! the OS audio driver; the background thread here only drains that tool's stdout pipe and
@@ -72,19 +72,32 @@ fn pad_to(sink: &mut WavFileSink, have: u64, want: u64, scratch: &mut Vec<i16>) 
     Ok(())
 }
 
-/// Sum two mono 16 kHz WAVs into `out` (saturating). Shorter leg is zero-padded.
-fn mix_wavs(a: &Path, b: &Path, out: &Path) -> anyhow::Result<()> {
-    let sa = read_i16(a)?;
-    let sb = read_i16(b)?;
-    let n = sa.len().max(sb.len());
-    let mut sink = WavFileSink::create(out, RECORD_RATE)?;
-    let mut buf = Vec::with_capacity(n);
+/// Write a stereo 16 kHz mix at `out`. With `tx_left` (the default) the layout is
+/// **left = tx (local), right = rx (remote)**; otherwise the two channels are swapped. The
+/// shorter leg is zero-padded. Both legs share the recording clock, so left/right line up
+/// sample-for-sample — keeping the two voices separated for per-side analysis.
+fn mix_wavs(tx: &Path, rx: &Path, out: &Path, tx_left: bool) -> anyhow::Result<()> {
+    let tx_s = read_i16(tx)?;
+    let rx_s = read_i16(rx)?;
+    let (left, right): (&[i16], &[i16]) = if tx_left {
+        (&tx_s, &rx_s)
+    } else {
+        (&rx_s, &tx_s)
+    };
+    let n = left.len().max(right.len());
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: RECORD_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w =
+        hound::WavWriter::create(out, spec).with_context(|| format!("create {}", out.display()))?;
     for i in 0..n {
-        let x = *sa.get(i).unwrap_or(&0) as i32 + *sb.get(i).unwrap_or(&0) as i32;
-        buf.push(x.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
+        w.write_sample(*left.get(i).unwrap_or(&0))?;
+        w.write_sample(*right.get(i).unwrap_or(&0))?;
     }
-    sink.write(&buf)?;
-    sink.finalize()?;
+    w.finalize().context("finalize mix.wav")?;
     Ok(())
 }
 
@@ -103,6 +116,7 @@ pub struct DuplexRecorder {
     dir: PathBuf,
     session: String,
     mix: bool,
+    mix_tx_left: bool,
     rx_len: u64,
     tx_len: u64,
     silence: Vec<i16>,
@@ -115,6 +129,7 @@ impl DuplexRecorder {
         dir: impl Into<PathBuf>,
         session: impl Into<String>,
         mix: bool,
+        mix_tx_left: bool,
     ) -> anyhow::Result<Self> {
         let dir = dir.into();
         let session = session.into();
@@ -132,6 +147,7 @@ impl DuplexRecorder {
             dir,
             session,
             mix,
+            mix_tx_left,
             rx_len: 0,
             tx_len: 0,
             silence: vec![0i16; 4096],
@@ -175,6 +191,7 @@ impl DuplexRecorder {
             dir,
             session,
             mix,
+            mix_tx_left,
             rx_len,
             tx_len,
             mut silence,
@@ -186,7 +203,7 @@ impl DuplexRecorder {
         tx.finalize().context("finalize tx.wav")?;
         let mix_path = if mix {
             let p = dir.join(format!("{session}-mix.wav"));
-            mix_wavs(&rx_path, &tx_path, &p).context("write mix.wav")?;
+            mix_wavs(&tx_path, &rx_path, &p, mix_tx_left).context("write mix.wav")?;
             Some(p)
         } else {
             None
@@ -263,6 +280,7 @@ pub struct DuplexSession {
     dir: PathBuf,
     session: String,
     mix: bool,
+    mix_tx_left: bool,
     rx_len: Arc<AtomicU64>,
     vad_active: Arc<AtomicBool>,
     vad_rx: Receiver<Vec<i16>>,
@@ -287,6 +305,7 @@ impl DuplexSession {
         dir: PathBuf,
         session: String,
         mix: bool,
+        mix_tx_left: bool,
         unblock: Box<dyn Fn() + Send>,
     ) -> anyhow::Result<Self> {
         let rx_len = Arc::new(AtomicU64::new(0));
@@ -338,6 +357,7 @@ impl DuplexSession {
             dir,
             session,
             mix,
+            mix_tx_left,
             rx_len,
             vad_active,
             vad_rx,
@@ -399,7 +419,7 @@ impl DuplexSession {
         tx.finalize().context("finalize tx.wav")?;
         let mix_path = if self.mix {
             let p = self.dir.join(format!("{}-mix.wav", self.session));
-            mix_wavs(&self.rx_path, &self.tx_path, &p).context("write mix.wav")?;
+            mix_wavs(&self.tx_path, &self.rx_path, &p, self.mix_tx_left).context("write mix.wav")?;
             Some(p)
         } else {
             None
@@ -434,7 +454,7 @@ mod tests {
     #[test]
     fn tx_placed_at_offset_and_equal_length() {
         let dir = tmp().join("dr1");
-        let mut r = DuplexRecorder::new(&dir, "s1", true).unwrap();
+        let mut r = DuplexRecorder::new(&dir, "s1", true, true).unwrap();
         r.push_rx(&[10i16; 100]).unwrap();
         r.push_tx_at(40, &[100i16; 20]).unwrap();
         r.push_rx(&[20i16; 50]).unwrap();
@@ -453,12 +473,39 @@ mod tests {
         assert_eq!(&tx[..40], &[0i16; 40][..]);
         assert_eq!(&tx[40..60], &[100i16; 20][..]);
         assert_eq!(&tx[60..], &[0i16; 90][..]);
-        // mix = saturating sum
-        assert_eq!(mix[39], 10);
-        assert_eq!(mix[40], 110);
-        assert_eq!(mix[59], 110);
-        assert_eq!(mix[60], 10);
-        assert_eq!(mix[149], 20);
+        // mix is stereo, interleaved: default layout is left = tx (local), right = rx (remote)
+        let spec = hound::WavReader::open(out.mix.as_ref().unwrap())
+            .unwrap()
+            .spec();
+        assert_eq!(spec.channels, 2);
+        assert_eq!(mix.len(), 300); // 150 frames x 2 channels
+        let left: Vec<i16> = mix.iter().step_by(2).copied().collect();
+        let right: Vec<i16> = mix.iter().skip(1).step_by(2).copied().collect();
+        assert_eq!(left, tx); // left  = tx
+        assert_eq!(right, rx); // right = rx
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mix_channels_swap_puts_rx_left_tx_right() {
+        let dir = tmp().join("dr_swap");
+        // mix = true, mix_tx_left = false -> left = rx (remote), right = tx (local)
+        let mut r = DuplexRecorder::new(&dir, "sw", true, false).unwrap();
+        r.push_rx(&[11i16; 60]).unwrap();
+        r.push_tx_at(0, &[99i16; 60]).unwrap();
+        let out = r.finish().unwrap();
+
+        let mix = read_i16(out.mix.as_ref().unwrap()).unwrap();
+        let spec = hound::WavReader::open(out.mix.as_ref().unwrap())
+            .unwrap()
+            .spec();
+        assert_eq!(spec.channels, 2);
+        assert_eq!(mix.len(), 120); // 60 frames x 2 channels
+        let left: Vec<i16> = mix.iter().step_by(2).copied().collect();
+        let right: Vec<i16> = mix.iter().skip(1).step_by(2).copied().collect();
+        assert_eq!(left, vec![11i16; 60]); // left  = rx (remote)
+        assert_eq!(right, vec![99i16; 60]); // right = tx (local)
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -466,7 +513,7 @@ mod tests {
     #[test]
     fn tx_after_rx_pads_rx_to_max() {
         let dir = tmp().join("dr2");
-        let mut r = DuplexRecorder::new(&dir, "s2", false).unwrap();
+        let mut r = DuplexRecorder::new(&dir, "s2", false, true).unwrap();
         r.push_rx(&[1i16; 100]).unwrap();
         r.push_tx_at(100, &[5i16; 30]).unwrap();
         let out = r.finish().unwrap();
@@ -484,7 +531,7 @@ mod tests {
     #[test]
     fn empty_session_finishes() {
         let dir = tmp().join("dr3");
-        let r = DuplexRecorder::new(&dir, "s3", true).unwrap();
+        let r = DuplexRecorder::new(&dir, "s3", true, true).unwrap();
         let out = r.finish().unwrap();
         assert_eq!(read_i16(&out.rx).unwrap().len(), 0);
         assert_eq!(read_i16(&out.tx).unwrap().len(), 0);
@@ -562,6 +609,7 @@ mod tests {
             dir.clone(),
             "s".into(),
             true,
+            true,
             Box::new(|| {}),
         )
         .unwrap();
@@ -585,6 +633,18 @@ mod tests {
         assert_eq!(&rx[200..], &[0i16; 50][..]);
         assert_eq!(&tx[..200], &[0i16; 200][..]); // tx anchored at rx offset 200
         assert_eq!(&tx[200..250], &[9i16; 50][..]);
+
+        // the live session's mix is stereo, default layout left = tx / right = rx
+        let mix = read_i16(out.mix.as_ref().unwrap()).unwrap();
+        let spec = hound::WavReader::open(out.mix.as_ref().unwrap())
+            .unwrap()
+            .spec();
+        assert_eq!(spec.channels, 2);
+        assert_eq!(mix.len(), 500); // 250 frames x 2 channels
+        let left: Vec<i16> = mix.iter().step_by(2).copied().collect();
+        let right: Vec<i16> = mix.iter().skip(1).step_by(2).copied().collect();
+        assert_eq!(left, tx); // left  = tx
+        assert_eq!(right, rx); // right = rx
 
         let _ = std::fs::remove_dir_all(&dir);
     }

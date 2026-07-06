@@ -129,6 +129,7 @@ fn records_rx_tx_and_mix() {
         dir.clone(),
         "call".into(),
         true,
+        true, // mix_tx_left: default layout (left = tx, right = rx)
         Box::new(|| {}),
     )
     .expect("start session");
@@ -153,14 +154,18 @@ fn records_rx_tx_and_mix() {
 
     let (rx_len, rx_peak) = peak(&out.rx);
     let (tx_len, tx_peak) = peak(&out.tx);
-    let (mix_len, mix_peak) = peak(out.mix.as_ref().unwrap());
 
     assert!(rx_len > 50_000, "rx too short: {rx_len}");
     assert!(rx_peak > 1_000, "rx should contain speech, peak={rx_peak}");
     assert_eq!(tx_len, rx_len, "legs must be aligned/equal length");
     assert_eq!(tx_peak, 0, "tx should be silence when nothing is injected");
-    assert_eq!(mix_len, rx_len);
-    assert_eq!(mix_peak, rx_peak, "mix == rx when tx is silent");
+
+    // mix is stereo (left = tx, right = rx). WavFileSource downmixes to the left channel, which is
+    // tx here — silent, since nothing was injected. The full L/R layout is covered by the
+    // record.rs unit tests (deterministic + live session).
+    let (mix_len, mix_peak) = peak(out.mix.as_ref().unwrap());
+    assert_eq!(mix_len, rx_len, "mix frame count matches the aligned legs");
+    assert_eq!(mix_peak, 0, "mix left channel = tx (silent when nothing injected)");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
