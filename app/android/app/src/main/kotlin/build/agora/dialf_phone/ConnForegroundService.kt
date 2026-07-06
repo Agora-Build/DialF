@@ -88,6 +88,12 @@ class ConnForegroundService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.i(TAG, "power changed: ${intent?.action}")
             updateWakeLock()
+            // Plugging in wakes the phone — heal the dialfd link right away (even if it won't
+            // actually "charge": a data-only port, or a battery held at an 80% cap), so it's
+            // reachable the instant it's on the cable rather than after the next heartbeat.
+            if (intent?.action == Intent.ACTION_POWER_CONNECTED) {
+                verifyLink("power connected")
+            }
         }
     }
 
