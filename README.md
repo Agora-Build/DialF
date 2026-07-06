@@ -141,7 +141,7 @@ Start the daemon (or install it as a service, above), then drive it with `dialf`
 
 ```sh
 dialf daemon                                   # run dialfd (control socket + WS + mDNS)
-dialf devices                                  # list connected phones
+dialf devices                                  # list connected phones (add --human for a readable list)
 dialf sims <device>                            # list SIMs (slot/number/carrier, default tagged)
 
 dialf call dial   <device> <number> [--sim N]  # place a call (default SIM if --sim omitted)
@@ -266,7 +266,9 @@ must emit raw little-endian s16 mono PCM on stdout.
 
 ## Configuration
 
-`dialfd` reads `~/.config/dialf/config.yaml` (override with `--config`):
+`dialfd` reads `~/.config/dialf/config.yaml` (override with `dialf daemon --config <path>`, or
+bake it into the service with `dialf service install --config <path>` — `--config` is a daemon
+option; client commands like `dialf devices`/`run` don't take it):
 
 ```yaml
 shared_key: change-me              # must match the app's shared key

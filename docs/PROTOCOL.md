@@ -97,7 +97,7 @@ at a time — a second `autoanswer.serve` is rejected with an error response.
 
 ```
 dialf daemon                                   run dialfd (control socket + WS + mDNS)
-dialf devices                                  list connected phones
+dialf devices [--human]                        list connected phones
 dialf sims <device>                            list the device's active SIMs (default tagged)
 dialf call dial   <device> <number> [--sim N]  place a call (default SIM if --sim omitted)
 dialf call answer <device>                      answer the ringing call
@@ -112,7 +112,7 @@ dialf sms list <device> [--human]              read recent texts (--human = read
 dialf run  <job.yaml> [--device <id>]          run a YAML job once
 dialf run  <job.yaml> --autoanswer <numbers>   serve: answer those numbers with this job (foreground; Ctrl-C reverts)
 dialf play <file>                              inject audio out the sound card
-dialf service install|uninstall|start|stop|status [--user] [--config <path>]
+dialf service install|uninstall|start|stop|status [--user]   (install also takes --config <path>)
 dialf --version                                CLI + running daemon (dialfd) versions
 ```
 

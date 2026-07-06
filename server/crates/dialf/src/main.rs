@@ -16,10 +16,6 @@ use dialf::protocol::{ControlOp, ControlRequest, ControlResponse};
 #[derive(Parser)]
 #[command(name = "dialf", version, about = "Drive a phone's calls via dialfd")]
 struct Cli {
-    /// Path to the config file (defaults to ~/.config/dialf/config.yaml).
-    #[arg(long, global = true)]
-    config: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -27,9 +23,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the dialfd daemon (control socket + audio engine + phone WS plane).
-    Daemon,
-    /// List connected phones.
-    Devices,
+    Daemon {
+        /// Path to the config file (defaults to ~/.config/dialf/config.yaml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// List connected phones: dialf devices [--human].
+    Devices {
+        /// Pretty, human-readable output (one line per phone).
+        #[arg(long)]
+        human: bool,
+    },
     /// Place/answer/hang up calls and read the call log.
     Call {
         #[command(subcommand)]
@@ -186,20 +190,35 @@ async fn main() -> anyhow::Result<()> {
     let wants_version = argv.iter().any(|a| a == "-V" || a == "--version");
     let wants_help = argv.iter().any(|a| a == "-h" || a == "--help");
     if wants_version && !wants_help {
-        return print_versions(&argv).await;
+        return print_versions().await;
     }
 
     let cli = Cli::parse();
-    let config_path = cli.config.clone().unwrap_or_else(Config::default_path);
-    let config = Config::load(&config_path)?;
-    let socket = config.control_socket.clone();
+
+    // Client commands connect to the daemon's control socket. Config is a *daemon* concern —
+    // only `daemon` and `service install` take `--config` — so clients resolve the socket from the
+    // default config, falling back to the built-in default if there's no config file yet.
+    let socket = Config::load(&Config::default_path())
+        .map(|c| c.control_socket)
+        .unwrap_or_else(|_| Config::default().control_socket);
 
     match cli.command {
-        Command::Daemon => dialf::daemon::run(config, config_path).await,
+        Command::Daemon { config } => {
+            let config_path = config.unwrap_or_else(Config::default_path);
+            let cfg = Config::load(&config_path)?;
+            dialf::daemon::run(cfg, config_path).await
+        }
 
-        Command::Devices => {
+        Command::Devices { human } => {
             let resp = call(&socket, ControlOp::DevicesList).await?;
-            print_response(&resp);
+            if human && resp.ok != Some(false) {
+                match resp.data.as_ref().and_then(|v| v.as_array()) {
+                    Some(rows) if !rows.is_empty() => rows.iter().for_each(human_device),
+                    _ => println!("(no phones connected)"),
+                }
+            } else {
+                print_response(&resp);
+            }
             ok_or_err(resp)
         }
         Command::Call { action } => {
@@ -392,23 +411,14 @@ fn ver_rel(daemon: &str, cli: &str) -> VerRel {
     }
 }
 
-async fn print_versions(argv: &[String]) -> anyhow::Result<()> {
+async fn print_versions() -> anyhow::Result<()> {
     let cli = env!("CARGO_PKG_VERSION");
     println!("dialf  (CLI):    {cli}");
-    // Resolve the control socket the way main() does (honor `--config <path>`).
-    let cfg_path = argv
-        .iter()
-        .position(|a| a == "--config")
-        .and_then(|i| argv.get(i + 1))
-        .map(PathBuf::from)
-        .unwrap_or_else(Config::default_path);
-    let socket = match Config::load(&cfg_path) {
-        Ok(c) => c.control_socket,
-        Err(_) => {
-            println!("dialfd (daemon): unknown (no config at {})", cfg_path.display());
-            return Ok(());
-        }
-    };
+    // Resolve the control socket from the default config (config is a daemon concern; clients
+    // don't take `--config`).
+    let socket = Config::load(&Config::default_path())
+        .map(|c| c.control_socket)
+        .unwrap_or_else(|_| Config::default().control_socket);
     // Cap the query so `--version` can never hang on an unresponsive daemon.
     let q = tokio::time::timeout(
         std::time::Duration::from_millis(1500),
@@ -564,6 +574,27 @@ fn human_calls(c: &serde_json::Value) {
         fmt_number(num),
         fmt_duration(dur)
     );
+}
+
+fn human_device(d: &serde_json::Value) {
+    let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let name = d.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let addr = d.get("addr").and_then(|v| v.as_str()).unwrap_or("-");
+    let seen = d.get("last_seen_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|x| x.as_millis() as i64)
+        .unwrap_or(seen);
+    let ago = ((now - seen).max(0)) / 1000;
+    let call = match d.get("current_call") {
+        Some(c) if !c.is_null() => {
+            let num = c.get("number").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            let st = c.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("in call {} ({st})", fmt_number(num))
+        }
+        _ => "idle".to_string(),
+    };
+    println!("{id:<20} {name:<16} {addr:<16} seen {ago}s ago   {call}");
 }
 
 fn human_sms(m: &serde_json::Value) {
