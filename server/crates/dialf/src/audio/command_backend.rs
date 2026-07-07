@@ -9,7 +9,9 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::backend::CaptureSource;
 use super::tool_detect::{CaptureCommand, PlaybackCommand};
@@ -113,7 +115,11 @@ impl Drop for CommandCaptureSource {
 }
 
 /// Play an audio file via the resolved playback command, blocking until it finishes.
-pub fn play_file_blocking(cmd: &PlaybackCommand) -> io::Result<()> {
+/// Play a file to completion, but stop early if `force` flips true (a second Ctrl+C on
+/// `dialf run`). We poll the child rather than block on `status()` so a force-cancel can kill the
+/// playback mid-file; a deliberate force-kill returns `Ok` (it's an interrupt, not a failure) so
+/// the runner stops cleanly and the recording is still finalized.
+pub fn play_file_blocking(cmd: &PlaybackCommand, force: &AtomicBool) -> io::Result<()> {
     let argv = &cmd.argv;
     if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty playback argv"));
@@ -124,18 +130,28 @@ pub fn play_file_blocking(cmd: &PlaybackCommand) -> io::Result<()> {
             "play_file_blocking requires a file-based command, not a stdin template",
         ));
     }
-    let status = Command::new(&argv[0])
+    let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("playback tool {:?} exited with {status}", argv[0]),
-        ));
+        .spawn()?;
+    loop {
+        if force.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(()); // deliberate force-cancel — not a playback failure
+        }
+        match child.try_wait()? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("playback tool {:?} exited with {status}", argv[0]),
+                ))
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
     }
-    Ok(())
 }
 
 /// Stream raw mono s16 PCM to the playback tool's stdin, blocking until drained.
@@ -169,4 +185,46 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn cmd(argv: &[&str]) -> PlaybackCommand {
+        PlaybackCommand {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            via_stdin: false,
+        }
+    }
+
+    #[test]
+    fn play_file_blocking_runs_to_completion() {
+        // A quick command completes normally with force never set.
+        let force = AtomicBool::new(false);
+        play_file_blocking(&cmd(&["true"]), &force).expect("`true` should succeed");
+    }
+
+    #[test]
+    fn play_file_blocking_reports_nonzero_exit() {
+        let force = AtomicBool::new(false);
+        let err = play_file_blocking(&cmd(&["false"]), &force)
+            .expect_err("`false` exits non-zero -> error");
+        assert!(err.to_string().contains("exited"), "got: {err}");
+    }
+
+    #[test]
+    fn play_file_blocking_force_kills_playback() {
+        // force preset true: a `sleep 30` must be killed on the first poll and return Ok (a
+        // deliberate interrupt, not a failure) — well under the sleep duration.
+        let force = AtomicBool::new(true);
+        let start = Instant::now();
+        play_file_blocking(&cmd(&["sleep", "30"]), &force).expect("force-cancel returns Ok");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "force should kill playback promptly, took {:?}",
+            start.elapsed()
+        );
+    }
 }

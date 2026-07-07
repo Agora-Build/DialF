@@ -315,10 +315,16 @@ pub enum ControlOp {
     /// Query a running job's status.
     #[serde(rename = "job.status")]
     JobStatus { job_id: String },
-    /// Cancel the job currently running via `job.run` (sent by `dialf run` on Ctrl+C). The daemon
-    /// stops the runner at the next step boundary and interrupts an in-flight `wait_for_speech`.
+    /// Cancel the job currently running via `job.run` (sent by `dialf run` on Ctrl+C). Graceful
+    /// (`force: false`, the first Ctrl+C) stops the runner at the next step boundary and interrupts
+    /// an in-flight `wait_for_speech`, but lets a `play`/`wait` finish. Force (`force: true`, the
+    /// second Ctrl+C) also interrupts the current `play` (kills the playback child mid-file) and
+    /// `wait`. Either way the recording is finalized so the audio files are saved.
     #[serde(rename = "job.cancel")]
-    JobCancel,
+    JobCancel {
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 /// A response (or streamed event) on the control socket.

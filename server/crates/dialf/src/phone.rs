@@ -37,6 +37,11 @@ pub struct PhoneJobIo {
     /// Set by `job.cancel` (Ctrl+C on `dialf run`). The runner checks `cancelled()` between steps
     /// and `wait_for_speech` checks it in its read loop, so the job stops promptly.
     cancel: Arc<AtomicBool>,
+    /// Set by `job.cancel { force: true }` (a *second* Ctrl+C). Unlike `cancel`, this also
+    /// interrupts a mid-flight `play` (kills the playback child) and `wait` (sleep) so the current
+    /// step doesn't run to completion. The capture is never killed — `finish()` still saves the
+    /// recording.
+    force: Arc<AtomicBool>,
 }
 
 impl PhoneJobIo {
@@ -51,6 +56,7 @@ impl PhoneJobIo {
         session: Option<DuplexSession>,
         inbound: bool,
         cancel: Arc<AtomicBool>,
+        force: Arc<AtomicBool>,
     ) -> Self {
         Self {
             hub,
@@ -64,6 +70,7 @@ impl PhoneJobIo {
             saw_active: false,
             inbound,
             cancel,
+            force,
         }
     }
 
@@ -93,7 +100,9 @@ impl PhoneJobIo {
 
 impl JobIo for PhoneJobIo {
     fn play(&mut self, file: &str) -> anyhow::Result<()> {
-        self.engine.play_file(Path::new(file), self.session.as_mut())
+        // `force` (2nd Ctrl+C) kills the playback mid-file; a graceful cancel lets it finish.
+        self.engine
+            .play_file(Path::new(file), self.session.as_mut(), &self.force)
     }
 
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason> {
@@ -167,7 +176,9 @@ impl JobIo for PhoneJobIo {
     }
 
     fn cancelled(&self) -> bool {
-        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+        use std::sync::atomic::Ordering::Relaxed;
+        // Either a graceful cancel or a force stops the job between steps.
+        self.cancel.load(Relaxed) || self.force.load(Relaxed)
     }
 
     fn send_sms(&mut self, to: &str, body: &str) -> anyhow::Result<()> {
@@ -178,7 +189,16 @@ impl JobIo for PhoneJobIo {
     }
 
     fn sleep(&mut self, ms: u64) -> anyhow::Result<()> {
-        std::thread::sleep(Duration::from_millis(ms));
+        // Poll so a force cancel (2nd Ctrl+C) can cut a long `wait` short; a graceful cancel lets
+        // the wait run out (it's checked between steps, not here).
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < deadline {
+            if self.force.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
+        }
         Ok(())
     }
 

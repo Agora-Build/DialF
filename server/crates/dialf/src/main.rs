@@ -551,22 +551,36 @@ async fn call(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
 
 /// Send a `job.run` and await the result, but on Ctrl+C send `job.cancel` so the daemon actually
 /// stops the job — otherwise the CLI just detaches while the daemon runs the job to completion
-/// (holding the card, waiting out `wait_for_speech` timeouts). A second Ctrl+C force-quits.
+/// (holding the card, waiting out `wait_for_speech` timeouts).
+///
+/// Two-level: the first Ctrl+C is a *graceful* cancel (stop at the next step boundary, interrupt a
+/// long `wait_for_speech`, but let a `play`/`wait` finish). The second Ctrl+C is a *force* cancel
+/// (`force: true`) — the daemon also cuts the current `play`/`wait` short. Either way the daemon
+/// finalizes the recording, so the audio files are saved. We keep awaiting the daemon's response
+/// so the run's outcome (and recording paths) still print; a third Ctrl+C hard-exits the client.
 async fn call_run(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
     let fut = call(socket, op);
     tokio::pin!(fut);
-    let mut cancel_sent = false;
+    let mut ctrlc_count = 0u8;
     loop {
         tokio::select! {
             resp = &mut fut => return resp,
             _ = tokio::signal::ctrl_c() => {
-                if cancel_sent {
-                    eprintln!("force quit.");
-                    std::process::exit(130);
+                ctrlc_count += 1;
+                match ctrlc_count {
+                    1 => {
+                        eprintln!("\ncancelling job… (Ctrl+C again to force-stop the current step)");
+                        let _ = call(socket, ControlOp::JobCancel { force: false }).await;
+                    }
+                    2 => {
+                        eprintln!("force-stopping the current step… (audio files are still saved)");
+                        let _ = call(socket, ControlOp::JobCancel { force: true }).await;
+                    }
+                    _ => {
+                        eprintln!("quit.");
+                        std::process::exit(130);
+                    }
                 }
-                cancel_sent = true;
-                eprintln!("\ncancelling job… (Ctrl+C again to force quit)");
-                let _ = call(socket, ControlOp::JobCancel).await; // daemon stops the running job
             }
         }
     }

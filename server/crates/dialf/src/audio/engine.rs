@@ -49,7 +49,12 @@ impl AudioEngine {
     /// Play an audio file out the sound card (blocking until done). If `sess` is set, the
     /// file's audio (resampled to 16 kHz) is also written to the tx leg, anchored at the
     /// current rx clock so it aligns with what the continuous capture records.
-    pub fn play_file(&self, file: &Path, sess: Option<&mut DuplexSession>) -> anyhow::Result<()> {
+    pub fn play_file(
+        &self,
+        file: &Path,
+        sess: Option<&mut DuplexSession>,
+        force: &AtomicBool,
+    ) -> anyhow::Result<()> {
         if let Some(s) = sess {
             tee_tx(s, file)?;
         }
@@ -62,7 +67,7 @@ impl AudioEngine {
         if cmd.via_stdin {
             anyhow::bail!("configured playback_cmd reads stdin; use a {{file}} template for audio.play");
         }
-        command_backend::play_file_blocking(&cmd)?;
+        command_backend::play_file_blocking(&cmd, force)?;
         Ok(())
     }
 

@@ -62,6 +62,10 @@ pub struct DaemonState {
     /// single flag suffices. The runner checks it between steps; `wait_for_speech` checks it in
     /// its read loop.
     pub job_cancel: Arc<AtomicBool>,
+    /// Set by `job.cancel { force: true }` (a *second* Ctrl+C on `dialf run`). Escalates the
+    /// graceful `job_cancel` — also interrupts the current `play` (kills the playback child) and
+    /// `wait`. Reset with `job_cancel` when a `job.run` starts.
+    pub job_force: Arc<AtomicBool>,
     /// Live auto-answer overrides (number → handler), keyed by phone number.
     pub overrides: Arc<Mutex<HashMap<String, AutoanswerOverride>>>,
     /// Monotonic source of override registration tokens.
@@ -347,6 +351,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         card_busy: Arc::new(AtomicBool::new(false)),
         serve_busy: Arc::new(AtomicBool::new(false)),
         job_cancel: Arc::new(AtomicBool::new(false)),
+        job_force: Arc::new(AtomicBool::new(false)),
         overrides: Arc::new(Mutex::new(HashMap::new())),
         serve_token: Arc::new(AtomicU64::new(1)),
         events,
@@ -566,7 +571,11 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
         }
         ControlOp::AudioPlay { file, device: _ } => {
             let engine = state.engine.clone();
-            tokio::task::spawn_blocking(move || engine.play_file(Path::new(&file), None)).await??;
+            // One-shot `dialf play` isn't job-cancelable; never force-interrupt it.
+            tokio::task::spawn_blocking(move || {
+                engine.play_file(Path::new(&file), None, &AtomicBool::new(false))
+            })
+            .await??;
             Ok(ok_msg(&id))
         }
         ControlOp::JobRun {
@@ -592,19 +601,34 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let _card = state
                 .acquire_card()
                 .context("phone busy: a call or recording is already in progress")?;
-            // Fresh run: clear any stale cancel from a prior job so this one isn't killed at once.
+            // Fresh run: clear any stale cancel/force from a prior job so this one isn't killed
+            // at once.
             state.job_cancel.store(false, Ordering::SeqCst);
+            state.job_force.store(false, Ordering::SeqCst);
             // `dialf run` is outbound/one-shot: the job owns call setup (call.dial, etc.).
-            let (outcomes, recording) =
-                run_job_on_device(state, device_id, job, false, state.job_cancel.clone()).await?;
+            let (outcomes, recording) = run_job_on_device(
+                state,
+                device_id,
+                job,
+                false,
+                state.job_cancel.clone(),
+                state.job_force.clone(),
+            )
+            .await?;
             let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
             Ok(ok_data(&id, json!({ "steps": outcomes, "recording": recording })))
         }
-        ControlOp::JobCancel => {
+        ControlOp::JobCancel { force } => {
             // `dialf run` sends this on Ctrl+C; the running job's runner / wait_for_speech observe
-            // the flag and stop. Harmless if no job is running.
+            // the flag and stop. A second Ctrl+C sets `force`, which also interrupts a mid-flight
+            // `play`/`wait`. Force implies cancel. The recording is finalized either way. Harmless
+            // if no job is running.
+            if force {
+                state.job_force.store(true, Ordering::SeqCst);
+            }
             state.job_cancel.store(true, Ordering::SeqCst);
-            Ok(ok_data(&id, json!({ "cancelled": true })))
+            tracing::info!(target: "job", "job cancel requested (force={force})");
+            Ok(ok_data(&id, json!({ "cancelled": true, "force": force })))
         }
         ControlOp::AutoanswerServe { .. } => {
             // Streamed + connection-scoped: handled directly in control_server, never here.
@@ -670,6 +694,7 @@ pub async fn run_job_on_device(
     job: Vec<schema::Step>,
     inbound: bool,
     cancel: Arc<AtomicBool>,
+    force: Arc<AtomicBool>,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
     let record_dir = state.config.audio.record_dir.clone();
@@ -692,9 +717,12 @@ pub async fn run_job_on_device(
             }
             None => None,
         };
-        let mut io =
-            PhoneJobIo::new(hub, engine, rt, registry, device_id, session, inbound, cancel);
+        let mut io = PhoneJobIo::new(
+            hub, engine, rt, registry, device_id, session, inbound, cancel, force,
+        );
         let run = runner::run_job(&job, &mut io);
+        // Finalize the recording BEFORE propagating a run error, so a cancelled/force-cancelled
+        // job still saves its audio files (rx/tx/mix) up to the cancel point.
         let recording = io.finish()?;
         Ok((run?, recording))
     })
@@ -828,6 +856,7 @@ mod tests {
             card_busy: Arc::new(AtomicBool::new(false)),
             serve_busy: Arc::new(AtomicBool::new(false)),
             job_cancel: Arc::new(AtomicBool::new(false)),
+            job_force: Arc::new(AtomicBool::new(false)),
             overrides: Arc::new(Mutex::new(HashMap::new())),
             serve_token: Arc::new(AtomicU64::new(1)),
             events,
