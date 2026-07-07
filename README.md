@@ -184,7 +184,7 @@ A job is a list of steps run in order. Examples in `server/jobs/`:
 `sample.yaml` (answer + two-turn exchange), `outbound-call.yaml` (dial → greet → Q&A → SMS →
 hangup), `inbound-call.yaml` (auto-answer conversation), `live-call-pilot.yaml`
 (answer → play → wait → text → hangup), `record-only.yaml` (record the sound card only — no
-call; any app's audio), `blackhole.yaml` (bench an AI agent over **BlackHole** virtual audio — no
+call; any app's audio), `blackhole.yaml` (evaluate an AI agent over **BlackHole** virtual audio — no
 phone, no card; audio-only jobs run with no device connected).
 
 ```yaml

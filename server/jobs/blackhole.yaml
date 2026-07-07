@@ -1,4 +1,4 @@
-# DialF — BlackHole bench (no phone, no call). Tests an AI agent over BlackHole virtual audio
+# DialF — BlackHole eval (no phone, no call). Tests an AI agent over BlackHole virtual audio
 # instead of the physical sound-card + phone. (The agent's compute can be anywhere — cloud, a
 # browser tab, a softphone; only the audio bridge is local.) DialF plays prompts into BlackHole
 # 2ch (the agent's input) and captures the agent's replies from BlackHole 16ch (its output),
@@ -35,4 +35,4 @@
   description: turn 2 — capture the agent's reply (rx)
 
 - type: log
-  message: blackhole bench complete
+  message: blackhole eval complete

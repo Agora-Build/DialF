@@ -576,7 +576,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             // Audio-only jobs (no call/sms steps) need no phone — they drive the sound card, or a
             // virtual device like BlackHole, only. Require a real device only when the job (or an
             // explicit `--device`) asks for one, so `dialf run <audio-job>` works with no phone
-            // connected (e.g. an agent bench over BlackHole virtual audio).
+            // connected (e.g. an agent eval over BlackHole virtual audio).
             let device_id = if device.is_some() || job_needs_phone(&job) {
                 resolve_device(state, device)?
             } else {
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn job_needs_phone_only_for_call_or_sms() {
-        // Audio-only job -> runs with no phone (BlackHole / sound-card bench).
+        // Audio-only job -> runs with no phone (BlackHole / sound-card eval).
         let audio_only =
             schema::parse("- type: audio.play\n  file: p.wav\n- type: audio.wait_for_speech\n")
                 .unwrap();
