@@ -265,6 +265,21 @@ fn audio_match(cfg: &AudioConfig) -> (Vec<String>, Vec<String>) {
     (devices, tools)
 }
 
+/// Should a process with this command line be reaped? True when it references one of our devices
+/// AND — if the tool is pinned in config — its binary basename matches one of those tools. When
+/// the tool is auto-detected (`tools` empty) the device match alone is enough. Pure, so the reap
+/// decision is testable without spawning processes.
+fn should_reap(cmdline: &str, devices: &[String], tools: &[String]) -> bool {
+    if cmdline.is_empty() || !devices.iter().any(|d| cmdline.contains(d.as_str())) {
+        return false;
+    }
+    tools.is_empty() || {
+        let bin = cmdline.split_whitespace().next().unwrap_or("");
+        let base = bin.rsplit('/').next().unwrap_or(bin);
+        tools.iter().any(|t| t == base)
+    }
+}
+
 /// Kill any leftover audio process bound to our card. A clean shutdown reaps the daemon's own
 /// capture/playback children via `Drop`, but a `SIGKILL`/crash can't — those get reparented to
 /// init and squat on the card, so the next capture yields "produced no audio" until killed (we hit
@@ -298,17 +313,7 @@ fn reap_stray_audio(cfg: &AudioConfig) {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             Err(_) => continue,
         };
-        if cmdline.is_empty() || !devices.iter().any(|d| cmdline.contains(d.as_str())) {
-            continue;
-        }
-        // If the tool is pinned in config, require the binary to match one of those; when it's
-        // auto-detected we don't know it, so the device match alone is enough.
-        let tool_ok = tools.is_empty() || {
-            let bin = cmdline.split_whitespace().next().unwrap_or("");
-            let base = bin.rsplit('/').next().unwrap_or(bin);
-            tools.iter().any(|t| t == base)
-        };
-        if tool_ok {
+        if should_reap(&cmdline, &devices, &tools) {
             tracing::warn!(pid, cmd = %cmdline, "reaping stray audio process on our card (orphaned by a prior hard-kill)");
             let _ = std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
@@ -571,7 +576,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             // Audio-only jobs (no call/sms steps) need no phone — they drive the sound card, or a
             // virtual device like BlackHole, only. Require a real device only when the job (or an
             // explicit `--device`) asks for one, so `dialf run <audio-job>` works with no phone
-            // connected (e.g. a local agent bench over BlackHole).
+            // connected (e.g. an agent bench over BlackHole virtual audio).
             let device_id = if device.is_some() || job_needs_phone(&job) {
                 resolve_device(state, device)?
             } else {
@@ -747,6 +752,34 @@ mod tests {
         // Nothing configured -> no devices -> reap is a no-op.
         let (d, t) = audio_match(&AudioConfig::default());
         assert!(d.is_empty() && t.is_empty());
+    }
+
+    #[test]
+    fn should_reap_matches_device_and_tool() {
+        let devices = vec!["MiniFuse 2".to_string()];
+        let tools = vec!["sox".to_string()];
+        // Our tool on our device -> reap (full path is reduced to its basename).
+        assert!(should_reap(
+            "/opt/homebrew/bin/sox -t coreaudio MiniFuse 2 -t raw",
+            &devices,
+            &tools
+        ));
+        // Our device but a different (pinned) tool -> leave it alone.
+        assert!(!should_reap(
+            "/usr/bin/ffmpeg -f avfoundation -i MiniFuse 2",
+            &devices,
+            &tools
+        ));
+        // A different device -> not ours.
+        assert!(!should_reap(
+            "/opt/homebrew/bin/sox -t coreaudio Other Card",
+            &devices,
+            &tools
+        ));
+        // Auto-detected tool (none pinned) -> device match alone is enough, any tool.
+        assert!(should_reap("/usr/bin/arecord -D MiniFuse 2", &devices, &[]));
+        // Empty command line -> never.
+        assert!(!should_reap("", &devices, &tools));
     }
 
     #[test]

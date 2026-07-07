@@ -43,11 +43,11 @@ audio:
   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1", "gain", "20"]
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
 
-  # --- Alternative: local agent bench over BlackHole (no phone, no card) ---------------------
+  # --- Alternative: BlackHole bench — test an agent over virtual audio (no phone, no card) ---
   # Test a local AI agent entirely in software: DialF plays prompts into BlackHole 2ch (the
   # agent's input) and captures the agent's replies from BlackHole 16ch (its output), recording
   # tx/rx/mix just like the real card. Point the agent at input=BlackHole 2ch, output=BlackHole
-  # 16ch, then `dialf run jobs/local-agent.yaml` (audio-only -> no phone needed). Swap the four
+  # 16ch, then `dialf run jobs/blackhole.yaml` (audio-only -> no phone needed). Swap the four
   # lines above for these:
   #   playback_device: "BlackHole 2ch"
   #   capture_device:  "BlackHole 16ch"
