@@ -568,7 +568,15 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 (None, Some(s)) => s,
                 (None, None) => anyhow::bail!("job.run requires `path` or `steps`"),
             };
-            let device_id = resolve_device(state, device)?;
+            // Audio-only jobs (no call/sms steps) need no phone — they drive the sound card, or a
+            // virtual device like BlackHole, only. Require a real device only when the job (or an
+            // explicit `--device`) asks for one, so `dialf run <audio-job>` works with no phone
+            // connected (e.g. a local agent bench over BlackHole).
+            let device_id = if device.is_some() || job_needs_phone(&job) {
+                resolve_device(state, device)?
+            } else {
+                "local".to_string()
+            };
             // One sound card → one call/recording at a time. Held until the job finishes.
             let _card = state
                 .acquire_card()
@@ -615,6 +623,22 @@ pub fn load_job_file(path: &str) -> anyhow::Result<Vec<schema::Step>> {
         }
     }
     Ok(job)
+}
+
+/// True if the job has any step that talks to the phone (a call or SMS). Audio-only jobs — just
+/// `audio.play` / `audio.wait_for_speech` / `wait` / `log` — need no device and can drive the
+/// sound card, or a virtual device like BlackHole, with no phone connected.
+fn job_needs_phone(job: &[schema::Step]) -> bool {
+    job.iter().any(|s| {
+        matches!(
+            s.kind,
+            schema::StepKind::CallDial { .. }
+                | schema::StepKind::CallWaitAnswered { .. }
+                | schema::StepKind::CallAnswer
+                | schema::StepKind::CallHangup
+                | schema::StepKind::SmsSend { .. }
+        )
+    })
 }
 
 /// Run a parsed job against a device, recording when configured. The duplex session is started
@@ -723,6 +747,22 @@ mod tests {
         // Nothing configured -> no devices -> reap is a no-op.
         let (d, t) = audio_match(&AudioConfig::default());
         assert!(d.is_empty() && t.is_empty());
+    }
+
+    #[test]
+    fn job_needs_phone_only_for_call_or_sms() {
+        // Audio-only job -> runs with no phone (BlackHole / sound-card bench).
+        let audio_only =
+            schema::parse("- type: audio.play\n  file: p.wav\n- type: audio.wait_for_speech\n")
+                .unwrap();
+        assert!(!job_needs_phone(&audio_only));
+
+        // Any call/SMS step -> a phone is required.
+        let with_call =
+            schema::parse("- type: audio.play\n  file: p.wav\n- type: call.hangup\n").unwrap();
+        assert!(job_needs_phone(&with_call));
+        let with_sms = schema::parse("- type: sms.send\n  to: \"+100\"\n  body: hi\n").unwrap();
+        assert!(job_needs_phone(&with_sms));
     }
 
     fn test_state(autoanswer: BTreeMap<String, Option<String>>) -> DaemonState {

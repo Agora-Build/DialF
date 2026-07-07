@@ -1,0 +1,37 @@
+# DialF — local agent bench (no phone, no call). Drives a local AI agent over BlackHole:
+# DialF plays prompts into BlackHole 2ch (the agent's input) and captures the agent's replies
+# from BlackHole 16ch (the agent's output), recording tx/rx/mix on one clock — exactly like the
+# real sound-card rig, but fully local and deterministic (no phone, no cellular, no card).
+#
+# Setup:
+#   - Install BlackHole 2ch + 16ch: https://existential.audio/blackhole/
+#   - In config.yaml `audio:`  playback_device: "BlackHole 2ch"  capture_device: "BlackHole 16ch"
+#     plus record_dir + mix_recording: true (see config.example.yaml).
+#   - Point the agent's audio at:  input = BlackHole 2ch,  output = BlackHole 16ch.
+#   - Run:  dialf run jobs/local-agent.yaml      # audio-only -> no --device / no phone needed
+#
+# Each turn plays a prompt (recorded as tx), then waits for the agent to speak and stop (rx).
+# Afterward: cross-correlate tx vs rx for round-trip latency; the tx-end -> rx-onset gap is the
+# agent's response latency. (This measures the AGENT's own audio/latency on a clean digital path —
+# for the real earpiece/codec/acoustic path, use the phone + sound-card rig.)
+
+- type: audio.play
+  file: ../../samples/prompt-en-1.wav
+  description: turn 1 — prompt the agent
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 15000        # wait up to 15s for the agent to start replying
+  silence_duration_ms: 1500    # end the turn after 1.5s of trailing silence
+  description: turn 1 — capture the agent's reply (rx)
+
+- type: audio.play
+  file: ../../samples/prompt-en-2.wav
+  description: turn 2 — follow-up prompt
+
+- type: audio.wait_for_speech
+  end_timeout_ms: 15000
+  silence_duration_ms: 1500
+  description: turn 2 — capture the agent's reply (rx)
+
+- type: log
+  message: local-agent bench complete
