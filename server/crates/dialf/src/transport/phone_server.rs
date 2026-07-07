@@ -341,7 +341,10 @@ async fn trigger_autoanswer(
                 return;
             }
         };
-        match daemon::run_job_on_device(&state, device_id.clone(), job, true).await {
+        // Auto-answer jobs aren't cancelable from the CLI (no `dialf run` client); pass a fresh
+        // always-false flag rather than the daemon's shared one.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        match daemon::run_job_on_device(&state, device_id.clone(), job, true, cancel).await {
             Ok((outcomes, _)) => {
                 match outcomes
                     .iter()

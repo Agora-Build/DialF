@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
                     steps: None,
                     device,
                 };
-                let resp = call(&socket, op).await?;
+                let resp = call_run(&socket, op).await?;
                 print_response(&resp);
                 if job_ended_on_hangup(&resp) {
                     println!(
@@ -547,6 +547,29 @@ async fn call(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
         .context("no response from dialfd")?;
     let resp: ControlResponse = serde_json::from_str(&resp_line)?;
     Ok(resp)
+}
+
+/// Send a `job.run` and await the result, but on Ctrl+C send `job.cancel` so the daemon actually
+/// stops the job — otherwise the CLI just detaches while the daemon runs the job to completion
+/// (holding the card, waiting out `wait_for_speech` timeouts). A second Ctrl+C force-quits.
+async fn call_run(socket: &Path, op: ControlOp) -> anyhow::Result<ControlResponse> {
+    let fut = call(socket, op);
+    tokio::pin!(fut);
+    let mut cancel_sent = false;
+    loop {
+        tokio::select! {
+            resp = &mut fut => return resp,
+            _ = tokio::signal::ctrl_c() => {
+                if cancel_sent {
+                    eprintln!("force quit.");
+                    std::process::exit(130);
+                }
+                cancel_sent = true;
+                eprintln!("\ncancelling job… (Ctrl+C again to force quit)");
+                let _ = call(socket, ControlOp::JobCancel).await; // daemon stops the running job
+            }
+        }
+    }
 }
 
 /// Print a list response: human-formatted when `human`, else the raw JSON. `key` is the

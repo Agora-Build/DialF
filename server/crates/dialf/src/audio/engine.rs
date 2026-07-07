@@ -7,6 +7,7 @@
 //! All methods are synchronous; the daemon calls them on a blocking task.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::AudioConfig;
@@ -130,20 +131,21 @@ impl AudioEngine {
         &self,
         turn: TurnConfig,
         sess: Option<&mut DuplexSession>,
+        cancel: &AtomicBool,
     ) -> anyhow::Result<EndReason> {
         match sess {
             Some(s) => {
                 s.vad_begin();
                 let reason = {
                     let mut src = VadFrameSource::new(s.vad_receiver_mut());
-                    run_wait_for_speech(&mut src, turn)
+                    run_wait_for_speech(&mut src, turn, cancel)
                 };
                 s.vad_end();
                 reason
             }
             None => {
                 let mut src = self.open_capture()?;
-                run_wait_for_speech(&mut src, turn)
+                run_wait_for_speech(&mut src, turn, cancel)
             }
         }
     }
@@ -174,6 +176,7 @@ fn tee_tx(sess: &mut DuplexSession, file: &Path) -> anyhow::Result<()> {
 pub fn run_wait_for_speech<S: CaptureSource>(
     src: &mut S,
     turn: TurnConfig,
+    cancel: &AtomicBool,
 ) -> anyhow::Result<EndReason> {
     let mut seg = Segmenter::new(turn)?;
     let hop = seg.hop_size();
@@ -191,6 +194,10 @@ pub fn run_wait_for_speech<S: CaptureSource>(
     let mut last_data = Instant::now();
 
     let reason = 'outer: loop {
+        // Cancelled (Ctrl+C on `dialf run`) — bail out of a long wait promptly.
+        if cancel.load(Ordering::Relaxed) {
+            break 'outer EndReason::EndOfStream;
+        }
         let n = match src.read(&mut read_buf) {
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

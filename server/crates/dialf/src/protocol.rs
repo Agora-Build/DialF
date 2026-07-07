@@ -315,6 +315,10 @@ pub enum ControlOp {
     /// Query a running job's status.
     #[serde(rename = "job.status")]
     JobStatus { job_id: String },
+    /// Cancel the job currently running via `job.run` (sent by `dialf run` on Ctrl+C). The daemon
+    /// stops the runner at the next step boundary and interrupts an in-flight `wait_for_speech`.
+    #[serde(rename = "job.cancel")]
+    JobCancel,
 }
 
 /// A response (or streamed event) on the control socket.

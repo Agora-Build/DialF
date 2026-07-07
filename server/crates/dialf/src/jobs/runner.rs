@@ -44,6 +44,12 @@ pub trait JobIo {
     fn inbound_mode(&self) -> bool {
         false
     }
+
+    /// Whether the job has been cancelled (e.g. Ctrl+C on `dialf run`, which sends `job.cancel`).
+    /// The runner checks this between steps and stops early. Default `false`.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// Outcome of a single executed step (for status reporting / streaming).
@@ -57,6 +63,9 @@ pub struct StepOutcome {
 /// Summary recorded as the final outcome when a job stops because the far end hung up.
 /// Callers (e.g. the auto-answer serve stream) can match on it to report "caller hung up".
 pub const CALL_ENDED_SUMMARY: &str = "caller hung up — remaining steps skipped";
+
+/// Summary recorded when a job is cancelled (Ctrl+C on `dialf run` → `job.cancel`).
+pub const CANCELLED_SUMMARY: &str = "cancelled — remaining steps skipped";
 
 /// Run all `steps`, stopping at the first error. Returns per-step outcomes.
 pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOutcome>> {
@@ -87,6 +96,23 @@ pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOut
             description: step.description.clone(),
             summary,
         });
+        // Cancelled (Ctrl+C on `dialf run`) — stop now; don't play more prompts or hold the card.
+        if io.cancelled() {
+            tracing::info!(target: "job", "job cancelled — stopping after step {index}");
+            outcomes.push(StepOutcome {
+                index: index + 1,
+                description: Some("cancelled".to_string()),
+                summary: CANCELLED_SUMMARY.to_string(),
+            });
+            for (j, skipped) in steps.iter().enumerate().skip(index + 1) {
+                outcomes.push(StepOutcome {
+                    index: j,
+                    description: skipped.description.clone(),
+                    summary: format!("{} skipped", skipped.kind.name()),
+                });
+            }
+            break;
+        }
         // The far end hung up — stop here rather than run the remaining steps (more prompts, a
         // doomed hangup) against a call that no longer exists. Record it as a visible outcome so
         // it shows up in `dialf run` output / the serve stream, not just the daemon log.
@@ -325,6 +351,54 @@ mod tests {
         assert_eq!(outcomes[1].summary, CALL_ENDED_SUMMARY);
         assert_eq!(outcomes[2].summary, "audio.play skipped");
         assert_eq!(outcomes[3].summary, "call.hangup skipped");
+    }
+
+    #[test]
+    fn cancels_and_marks_remaining() {
+        // cancelled() true (Ctrl+C on `dialf run`): after the first step the runner stops, records
+        // a "cancelled" marker, and skips the rest — no more prompts / no held card.
+        struct CancelIo;
+        impl JobIo for CancelIo {
+            fn play(&mut self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn wait_for_speech(&mut self, _: TurnConfig) -> anyhow::Result<EndReason> {
+                Ok(EndReason::Silence)
+            }
+            fn dial(&mut self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn wait_for_answer(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn answer(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn hangup(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn send_sms(&mut self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn sleep(&mut self, _: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn log(&mut self, _: &str) {}
+            fn cancelled(&self) -> bool {
+                true
+            }
+        }
+        let yaml =
+            "- type: audio.play\n  file: a.wav\n- type: audio.wait_for_speech\n- type: log\n  message: done\n";
+        let job = schema::parse(yaml).unwrap();
+        let mut io = CancelIo;
+        let outcomes = run_job(&job, &mut io).unwrap();
+        // step 1 ran; then the marker + one "skipped" line per remaining step.
+        assert_eq!(outcomes.len(), 4);
+        assert_eq!(outcomes[0].summary, "played a.wav");
+        assert_eq!(outcomes[1].summary, CANCELLED_SUMMARY);
+        assert_eq!(outcomes[2].summary, "audio.wait_for_speech skipped");
+        assert_eq!(outcomes[3].summary, "log skipped");
     }
 
     #[test]

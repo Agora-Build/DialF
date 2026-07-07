@@ -5,6 +5,7 @@
 //! [`tokio::runtime::Handle`].
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,9 @@ pub struct PhoneJobIo {
     saw_active: bool,
     /// Auto-answer (inbound) run: the daemon already answered, so call-setup steps are skipped.
     inbound: bool,
+    /// Set by `job.cancel` (Ctrl+C on `dialf run`). The runner checks `cancelled()` between steps
+    /// and `wait_for_speech` checks it in its read loop, so the job stops promptly.
+    cancel: Arc<AtomicBool>,
 }
 
 impl PhoneJobIo {
@@ -46,6 +50,7 @@ impl PhoneJobIo {
         device_id: impl Into<String>,
         session: Option<DuplexSession>,
         inbound: bool,
+        cancel: Arc<AtomicBool>,
     ) -> Self {
         Self {
             hub,
@@ -58,6 +63,7 @@ impl PhoneJobIo {
             in_call: inbound,
             saw_active: false,
             inbound,
+            cancel,
         }
     }
 
@@ -91,7 +97,8 @@ impl JobIo for PhoneJobIo {
     }
 
     fn wait_for_speech(&mut self, turn: TurnConfig) -> anyhow::Result<EndReason> {
-        self.engine.wait_for_speech(turn, self.session.as_mut())
+        self.engine
+            .wait_for_speech(turn, self.session.as_mut(), &self.cancel)
     }
 
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {
@@ -157,6 +164,10 @@ impl JobIo for PhoneJobIo {
 
     fn inbound_mode(&self) -> bool {
         self.inbound
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn send_sms(&mut self, to: &str, body: &str) -> anyhow::Result<()> {

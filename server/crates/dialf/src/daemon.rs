@@ -57,6 +57,11 @@ pub struct DaemonState {
     /// Held for the lifetime of a `dialf run --autoanswer` serve session. Only one serve may
     /// run at a time (one phone to drive), so a second registration is rejected.
     pub serve_busy: Arc<AtomicBool>,
+    /// Set by `job.cancel` (sent by `dialf run` on Ctrl+C) to stop the currently-running job.
+    /// Reset to `false` when a `job.run` starts. One job runs at a time (see `card_busy`), so a
+    /// single flag suffices. The runner checks it between steps; `wait_for_speech` checks it in
+    /// its read loop.
+    pub job_cancel: Arc<AtomicBool>,
     /// Live auto-answer overrides (number → handler), keyed by phone number.
     pub overrides: Arc<Mutex<HashMap<String, AutoanswerOverride>>>,
     /// Monotonic source of override registration tokens.
@@ -341,6 +346,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         config_dir: config_path.parent().map(|p| p.to_path_buf()),
         card_busy: Arc::new(AtomicBool::new(false)),
         serve_busy: Arc::new(AtomicBool::new(false)),
+        job_cancel: Arc::new(AtomicBool::new(false)),
         overrides: Arc::new(Mutex::new(HashMap::new())),
         serve_token: Arc::new(AtomicU64::new(1)),
         events,
@@ -586,10 +592,19 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let _card = state
                 .acquire_card()
                 .context("phone busy: a call or recording is already in progress")?;
+            // Fresh run: clear any stale cancel from a prior job so this one isn't killed at once.
+            state.job_cancel.store(false, Ordering::SeqCst);
             // `dialf run` is outbound/one-shot: the job owns call setup (call.dial, etc.).
-            let (outcomes, recording) = run_job_on_device(state, device_id, job, false).await?;
+            let (outcomes, recording) =
+                run_job_on_device(state, device_id, job, false, state.job_cancel.clone()).await?;
             let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
             Ok(ok_data(&id, json!({ "steps": outcomes, "recording": recording })))
+        }
+        ControlOp::JobCancel => {
+            // `dialf run` sends this on Ctrl+C; the running job's runner / wait_for_speech observe
+            // the flag and stop. Harmless if no job is running.
+            state.job_cancel.store(true, Ordering::SeqCst);
+            Ok(ok_data(&id, json!({ "cancelled": true })))
         }
         ControlOp::AutoanswerServe { .. } => {
             // Streamed + connection-scoped: handled directly in control_server, never here.
@@ -654,6 +669,7 @@ pub async fn run_job_on_device(
     device_id: String,
     job: Vec<schema::Step>,
     inbound: bool,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
     let record_dir = state.config.audio.record_dir.clone();
@@ -676,7 +692,8 @@ pub async fn run_job_on_device(
             }
             None => None,
         };
-        let mut io = PhoneJobIo::new(hub, engine, rt, registry, device_id, session, inbound);
+        let mut io =
+            PhoneJobIo::new(hub, engine, rt, registry, device_id, session, inbound, cancel);
         let run = runner::run_job(&job, &mut io);
         let recording = io.finish()?;
         Ok((run?, recording))
@@ -810,6 +827,7 @@ mod tests {
             config_dir: Some(PathBuf::from("/etc/dialf")),
             card_busy: Arc::new(AtomicBool::new(false)),
             serve_busy: Arc::new(AtomicBool::new(false)),
+            job_cancel: Arc::new(AtomicBool::new(false)),
             overrides: Arc::new(Mutex::new(HashMap::new())),
             serve_token: Arc::new(AtomicU64::new(1)),
             events,

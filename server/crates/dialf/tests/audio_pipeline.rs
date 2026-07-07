@@ -5,6 +5,7 @@
 //! vendored in the ten-vad-sys crate.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::sync_channel;
 
 use dialf::audio::backend::{CaptureSource, WavFileSink, WavFileSource};
@@ -33,7 +34,7 @@ fn wait_for_speech_runs_over_real_clip() {
         ..TurnConfig::default()
     };
 
-    let reason = run_wait_for_speech(&mut src, turn).expect("pipeline ran");
+    let reason = run_wait_for_speech(&mut src, turn, &AtomicBool::new(false)).expect("pipeline ran");
     eprintln!("pipeline end reason: {reason:?}");
 
     // The clip is ~7.6s and short, so it must not hit the 60s cap.
@@ -73,7 +74,8 @@ fn wait_for_speech_over_vad_frame_channel() {
         ..TurnConfig::default()
     };
     let mut src = VadFrameSource::new(&mut rx);
-    let reason = run_wait_for_speech(&mut src, turn).expect("vad ran over channel");
+    let reason =
+        run_wait_for_speech(&mut src, turn, &AtomicBool::new(false)).expect("vad ran over channel");
     assert_eq!(
         reason,
         EndReason::Silence,
@@ -97,7 +99,8 @@ fn wait_for_speech_bails_on_dead_capture() {
         end_timeout_ms: 60_000,
         ..TurnConfig::default()
     };
-    let err = run_wait_for_speech(&mut src, turn).expect_err("dead capture must error, not hang");
+    let err = run_wait_for_speech(&mut src, turn, &AtomicBool::new(false))
+        .expect_err("dead capture must error, not hang");
     assert!(
         err.to_string().contains("no audio"),
         "expected a clear capture error, got: {err}"
