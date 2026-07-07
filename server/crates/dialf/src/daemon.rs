@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::audio::engine::AudioEngine;
 use crate::audio::record::RecordOutput;
-use crate::config::Config;
+use crate::config::{AudioConfig, Config};
 use crate::hub::Hub;
 use crate::jobs::{runner, schema};
 use crate::phone::PhoneJobIo;
@@ -228,7 +228,76 @@ pub fn now_ms() -> i64 {
 }
 
 /// Run the daemon: set up state and serve the control socket + phone WS plane + mDNS.
+/// Device strings our `sox` children carry in their args — used to spot strays on our card.
+fn audio_device_tokens(cfg: &AudioConfig) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for d in [&cfg.capture_device, &cfg.playback_device].into_iter().flatten() {
+        let d = d.trim();
+        if !d.is_empty() {
+            tokens.push(d.to_string());
+        }
+    }
+    // Pull the device out of explicit command overrides too (sox coreaudio: the arg right after
+    // "coreaudio"; ALSA/ffmpeg users normally set capture_device/playback_device instead).
+    for cmd in [&cfg.capture_cmd, &cfg.playback_cmd].into_iter().flatten() {
+        if let Some(i) = cmd.iter().position(|a| a == "coreaudio") {
+            if let Some(dev) = cmd.get(i + 1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                tokens.push(dev.to_string());
+            }
+        }
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// Kill any leftover `sox` bound to our audio device. A clean daemon shutdown reaps its own `sox`
+/// children via `Drop`, but a `SIGKILL`/crash can't — those get reparented to init and squat on
+/// the card, so the next capture yields "produced no audio" until they're killed. A freshly
+/// starting daemon has no legitimate in-flight job, so any `sox` on *our* device is stale.
+/// Best-effort and POSIX-only (needs `pgrep`/`ps`/`kill`); does nothing if they're absent.
+fn reap_stray_audio(cfg: &AudioConfig) {
+    let tokens = audio_device_tokens(cfg);
+    if tokens.is_empty() {
+        return;
+    }
+    let out = match std::process::Command::new("pgrep").args(["-f", "sox"]).output() {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    for pid in String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<i32>().ok())
+    {
+        let cmdline = match std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Err(_) => continue,
+        };
+        // Only an actual `sox` binary (not a lookalike with "sox" in an arg) bound to our device.
+        let is_sox = cmdline
+            .split_whitespace()
+            .next()
+            .is_some_and(|p| p.ends_with("sox"));
+        if is_sox && tokens.iter().any(|t| cmdline.contains(t.as_str())) {
+            tracing::warn!(pid, cmd = %cmdline, "reaping stray sox on our card (orphaned by a prior hard-kill)");
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+    }
+}
+
 pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
+    // Clean up `sox` orphaned by a previously hard-killed daemon (SIGKILL bypasses our Drop
+    // cleanup). Skip if another daemon is already live on the control socket — its audio children
+    // are legitimate, and the binds below will fail cleanly anyway.
+    if std::os::unix::net::UnixStream::connect(&config.control_socket).is_err() {
+        reap_stray_audio(&config.audio);
+    }
+
     let engine = Arc::new(AudioEngine::new(config.audio.clone()));
     let registry = Arc::new(Mutex::new(Registry::new()));
     let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
@@ -599,6 +668,29 @@ fn ok_data(id: &str, data: serde_json::Value) -> ControlResponse {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn audio_device_tokens_from_config_and_cmd() {
+        let mut cfg = AudioConfig::default();
+        cfg.capture_device = Some("MiniFuse 2".to_string()); // named-device fields
+        cfg.playback_device = Some("MiniFuse 2".to_string());
+        cfg.capture_cmd = Some(vec![
+            // sox coreaudio: the device is the arg right after "coreaudio"
+            "/opt/homebrew/bin/sox".into(),
+            "-t".into(),
+            "coreaudio".into(),
+            "USB Audio".into(),
+            "-t".into(),
+            "raw".into(),
+        ]);
+        let tokens = audio_device_tokens(&cfg);
+        assert!(tokens.contains(&"MiniFuse 2".to_string()));
+        assert!(tokens.contains(&"USB Audio".to_string()));
+        assert_eq!(tokens.iter().filter(|t| *t == "MiniFuse 2").count(), 1); // deduped
+
+        // No device configured -> no tokens, so the reap is a no-op (never a false kill).
+        assert!(audio_device_tokens(&AudioConfig::default()).is_empty());
+    }
 
     fn test_state(autoanswer: BTreeMap<String, Option<String>>) -> DaemonState {
         let mut config = Config::default();
