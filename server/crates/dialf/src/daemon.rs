@@ -228,47 +228,69 @@ pub fn now_ms() -> i64 {
 }
 
 /// Run the daemon: set up state and serve the control socket + phone WS plane + mDNS.
-/// Device strings our `sox` children carry in their args — used to spot strays on our card.
-fn audio_device_tokens(cfg: &AudioConfig) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
+/// Match tokens for spotting stray audio processes squatting on our card — tool-agnostic. Returns
+/// `(devices, tools)`: `devices` = the configured device name(s) (also pulled from a `coreaudio`
+/// command arg); `tools` = the audio tool binaries from any explicit command overrides (whatever
+/// the user set — `sox` / `arecord` / `ffmpeg` / …), empty when the tool is auto-detected.
+fn audio_match(cfg: &AudioConfig) -> (Vec<String>, Vec<String>) {
+    let mut devices: Vec<String> = Vec::new();
+    let mut tools: Vec<String> = Vec::new();
     for d in [&cfg.capture_device, &cfg.playback_device].into_iter().flatten() {
         let d = d.trim();
         if !d.is_empty() {
-            tokens.push(d.to_string());
+            devices.push(d.to_string());
         }
     }
-    // Pull the device out of explicit command overrides too (sox coreaudio: the arg right after
-    // "coreaudio"; ALSA/ffmpeg users normally set capture_device/playback_device instead).
     for cmd in [&cfg.capture_cmd, &cfg.playback_cmd].into_iter().flatten() {
+        // The device is the arg right after "coreaudio" (macOS sox); ALSA/ffmpeg users set
+        // capture_device/playback_device instead.
         if let Some(i) = cmd.iter().position(|a| a == "coreaudio") {
             if let Some(dev) = cmd.get(i + 1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                tokens.push(dev.to_string());
+                devices.push(dev.to_string());
             }
         }
+        // The tool is argv[0] — never hardcoded; whatever the user configured (basename only).
+        if let Some(base) = cmd
+            .first()
+            .map(|f| f.rsplit('/').next().unwrap_or(f).trim())
+            .filter(|s| !s.is_empty())
+        {
+            tools.push(base.to_string());
+        }
     }
-    tokens.sort();
-    tokens.dedup();
-    tokens
+    devices.sort();
+    devices.dedup();
+    tools.sort();
+    tools.dedup();
+    (devices, tools)
 }
 
-/// Kill any leftover `sox` bound to our audio device. A clean daemon shutdown reaps its own `sox`
-/// children via `Drop`, but a `SIGKILL`/crash can't — those get reparented to init and squat on
-/// the card, so the next capture yields "produced no audio" until they're killed. A freshly
-/// starting daemon has no legitimate in-flight job, so any `sox` on *our* device is stale.
-/// Best-effort and POSIX-only (needs `pgrep`/`ps`/`kill`); does nothing if they're absent.
+/// Kill any leftover audio process bound to our card. A clean shutdown reaps the daemon's own
+/// capture/playback children via `Drop`, but a `SIGKILL`/crash can't — those get reparented to
+/// init and squat on the card, so the next capture yields "produced no audio" until killed (we hit
+/// exactly this: audio children from a hard-kill held the card for days). A freshly starting daemon
+/// has no legitimate in-flight job, so any process on *our* device is stale. Matched by device name
+/// (and, when the command is pinned, the configured tool) — no hardcoded tool. Best-effort,
+/// POSIX-only (needs `pgrep`/`ps`/`kill`); does nothing if they're absent.
 fn reap_stray_audio(cfg: &AudioConfig) {
-    let tokens = audio_device_tokens(cfg);
-    if tokens.is_empty() {
-        return;
+    let (devices, tools) = audio_match(cfg);
+    if devices.is_empty() {
+        return; // nothing to match on -> no-op (never a false kill)
     }
-    let out = match std::process::Command::new("pgrep").args(["-f", "sox"]).output() {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    for pid in String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<i32>().ok())
-    {
+    // Candidate PIDs: processes whose command line references one of our device names.
+    let mut pids: Vec<i32> = Vec::new();
+    for dev in &devices {
+        if let Ok(o) = std::process::Command::new("pgrep").args(["-f", dev]).output() {
+            pids.extend(
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse::<i32>().ok()),
+            );
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
         let cmdline = match std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
             .output()
@@ -276,13 +298,18 @@ fn reap_stray_audio(cfg: &AudioConfig) {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             Err(_) => continue,
         };
-        // Only an actual `sox` binary (not a lookalike with "sox" in an arg) bound to our device.
-        let is_sox = cmdline
-            .split_whitespace()
-            .next()
-            .is_some_and(|p| p.ends_with("sox"));
-        if is_sox && tokens.iter().any(|t| cmdline.contains(t.as_str())) {
-            tracing::warn!(pid, cmd = %cmdline, "reaping stray sox on our card (orphaned by a prior hard-kill)");
+        if cmdline.is_empty() || !devices.iter().any(|d| cmdline.contains(d.as_str())) {
+            continue;
+        }
+        // If the tool is pinned in config, require the binary to match one of those; when it's
+        // auto-detected we don't know it, so the device match alone is enough.
+        let tool_ok = tools.is_empty() || {
+            let bin = cmdline.split_whitespace().next().unwrap_or("");
+            let base = bin.rsplit('/').next().unwrap_or(bin);
+            tools.iter().any(|t| t == base)
+        };
+        if tool_ok {
+            tracing::warn!(pid, cmd = %cmdline, "reaping stray audio process on our card (orphaned by a prior hard-kill)");
             let _ = std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .status();
@@ -670,12 +697,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn audio_device_tokens_from_config_and_cmd() {
+    fn audio_match_devices_and_tool_basename() {
         let mut cfg = AudioConfig::default();
         cfg.capture_device = Some("MiniFuse 2".to_string()); // named-device fields
         cfg.playback_device = Some("MiniFuse 2".to_string());
+        // A pinned command with a full tool path + coreaudio device — tool-agnostic: we take the
+        // tool from argv[0], never a hardcoded name, and reduce it to its basename.
         cfg.capture_cmd = Some(vec![
-            // sox coreaudio: the device is the arg right after "coreaudio"
             "/opt/homebrew/bin/sox".into(),
             "-t".into(),
             "coreaudio".into(),
@@ -683,13 +711,18 @@ mod tests {
             "-t".into(),
             "raw".into(),
         ]);
-        let tokens = audio_device_tokens(&cfg);
-        assert!(tokens.contains(&"MiniFuse 2".to_string()));
-        assert!(tokens.contains(&"USB Audio".to_string()));
-        assert_eq!(tokens.iter().filter(|t| *t == "MiniFuse 2").count(), 1); // deduped
+        // A different tool proves nothing is hardcoded to sox.
+        cfg.playback_cmd = Some(vec!["ffmpeg".into(), "-i".into(), "{file}".into()]);
 
-        // No device configured -> no tokens, so the reap is a no-op (never a false kill).
-        assert!(audio_device_tokens(&AudioConfig::default()).is_empty());
+        let (devices, tools) = audio_match(&cfg);
+        assert!(devices.contains(&"MiniFuse 2".to_string()));
+        assert!(devices.contains(&"USB Audio".to_string())); // pulled from the coreaudio arg
+        assert_eq!(devices.iter().filter(|d| *d == "MiniFuse 2").count(), 1); // deduped
+        assert_eq!(tools, vec!["ffmpeg".to_string(), "sox".to_string()]); // basenames, sorted
+
+        // Nothing configured -> no devices -> reap is a no-op.
+        let (d, t) = audio_match(&AudioConfig::default());
+        assert!(d.is_empty() && t.is_empty());
     }
 
     fn test_state(autoanswer: BTreeMap<String, Option<String>>) -> DaemonState {
