@@ -18,3 +18,6 @@ Cargo.lock.orig
 /app/build/
 /app/.flutter-plugins
 /app/.flutter-plugins-dependencies
+
+# Blog drafts — not part of the repo
+/blog/
