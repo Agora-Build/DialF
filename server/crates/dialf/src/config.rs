@@ -22,8 +22,14 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 pub struct Config {
     /// Shared secret the phone must present in its `hello` frame.
     pub shared_key: String,
-    /// Path to the local control socket (`dialf` <-> `dialfd`).
-    pub control_socket: PathBuf,
+    /// Path to the local control socket (`dialf` <-> `dialfd`). Unset → a per-user default (see
+    /// [`Config::control_socket_path`] / [`Config::resolve_client_socket`]); the system installer
+    /// sets it to a shared path so every user reaches one daemon.
+    pub control_socket: Option<PathBuf>,
+    /// Group that owns the control socket (shared/system scope) so its members can connect.
+    pub control_socket_group: Option<String>,
+    /// Octal mode for the control socket, e.g. "0660"; pairs with `control_socket_group`.
+    pub control_socket_mode: Option<String>,
     /// `host:port` to bind the phone WebSocket server on.
     pub ws_bind: String,
     /// Friendly instance name advertised via mDNS.
@@ -85,7 +91,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             shared_key: "change-me".to_string(),
-            control_socket: default_control_socket(),
+            control_socket: None,
+            control_socket_group: None,
+            control_socket_mode: None,
             ws_bind: DEFAULT_WS_BIND.to_string(),
             instance_name: "dialfd".to_string(),
             autoanswer: BTreeMap::new(),
@@ -125,6 +133,31 @@ impl Config {
     pub fn default_path() -> PathBuf {
         config_dir().join("dialf").join("config.yaml")
     }
+
+    /// The socket this daemon binds: an explicit `control_socket`, else the per-user default.
+    pub fn control_socket_path(&self) -> PathBuf {
+        self.control_socket.clone().unwrap_or_else(default_control_socket)
+    }
+
+    /// The socket a *client* should connect to: an explicit `control_socket` in the user's config
+    /// wins; otherwise prefer this user's own (`--user`) daemon socket if it's present, else the
+    /// machine-wide (system) daemon socket if present, else the per-user default path.
+    pub fn resolve_client_socket() -> PathBuf {
+        if let Ok(cfg) = Config::load(&Config::default_path()) {
+            if let Some(explicit) = cfg.control_socket {
+                return explicit;
+            }
+        }
+        let user = default_control_socket();
+        if user.exists() {
+            return user;
+        }
+        let system = system_control_socket();
+        if system.exists() {
+            return system;
+        }
+        user
+    }
 }
 
 fn config_dir() -> PathBuf {
@@ -137,17 +170,26 @@ fn config_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+/// Per-user (isolated / `--user`) control socket. Linux uses the per-user runtime dir
+/// (`/run/user/$UID`, 0700). macOS has no `XDG_RUNTIME_DIR` and `env::temp_dir()` there is a
+/// per-process `$TMPDIR` that can differ between the launchd daemon and a shell, so use a fixed
+/// per-user `/tmp/dialfd-$UID.sock` (uid keeps two macOS users from colliding).
 fn default_control_socket() -> PathBuf {
-    // Linux: the per-user runtime dir (/run/user/$UID) — secure (0700) and the conventional home
-    // for sockets; a user's shell and their user service see the same value, so client and daemon
-    // agree. macOS has no XDG_RUNTIME_DIR, and env::temp_dir() there is a *per-process* $TMPDIR
-    // (/var/folders/…/T) that can differ between the launchd daemon and an interactive shell — so
-    // they could look in different places. Fall back to a fixed, predictable /tmp/dialfd.sock that
-    // both always compute identically.
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("dialfd.sock");
     }
-    PathBuf::from("/tmp/dialfd.sock")
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/dialfd-{uid}.sock"))
+}
+
+/// Machine-wide (shared / system-install) control socket. One daemon, all users. Linux uses
+/// `/run/dialf/`; macOS has no `/run`, so `/var/run`.
+pub fn system_control_socket() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/run/dialfd.sock")
+    } else {
+        PathBuf::from("/run/dialf/dialfd.sock")
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +231,21 @@ autoanswer:
         let cfg: Config = serde_yaml::from_str("audio:\n  mix_channels: rx_tx\n").unwrap();
         assert_eq!(cfg.audio.mix_channels, MixChannels::RxTx);
         assert!(!cfg.audio.mix_channels.tx_left());
+    }
+
+    #[test]
+    fn control_socket_explicit_wins_else_per_user_default() {
+        // Unset -> the per-user default (isolated scope).
+        assert_eq!(Config::default().control_socket_path(), default_control_socket());
+        // Explicit control_socket + group + mode parse and win.
+        let cfg: Config = serde_yaml::from_str(
+            "control_socket: /run/dialf/dialfd.sock\ncontrol_socket_group: dialf\ncontrol_socket_mode: \"0660\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.control_socket_path(), PathBuf::from("/run/dialf/dialfd.sock"));
+        assert_eq!(cfg.control_socket_group.as_deref(), Some("dialf"));
+        assert_eq!(cfg.control_socket_mode.as_deref(), Some("0660"));
+        // The shared/system socket path is absolute and platform-appropriate.
+        assert!(system_control_socket().is_absolute());
     }
 }

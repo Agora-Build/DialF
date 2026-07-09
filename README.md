@@ -37,9 +37,18 @@ Then launch the daemon — pick one:
 
 ```sh
 dialf daemon                  # run in the foreground
-sudo dialf service install    # system service at boot (launchd/systemd)
-dialf service install --user  # per-user service at login (no sudo)
+sudo dialf service install    # system service at boot — SHARED across all users (launchd/systemd)
+dialf service install --user  # per-user service at login — ISOLATED to you (no sudo)
 ```
+
+**Isolated vs shared, by install scope.** `--user` is your own private daemon (per-user control
+socket — `/run/user/$UID/dialfd.sock` on Linux, `/tmp/dialfd-$UID.sock` on macOS). A **system**
+install (no `--user`, needs `sudo`) is a **single shared daemon** any login user can drive: it binds
+a machine-wide socket (`/run/dialf/dialfd.sock` on Linux, `/var/run/dialfd.sock` on macOS) owned by
+the auto-created **`dialf` group**, mode `0660`. Grant a user access by adding them to the group
+(`sudo usermod -aG dialf <user>`; macOS `sudo dseditgroup -o edit -a <user> -t user dialf`) — the
+control socket lets its holder dial, hang up, SMS, and run jobs, so keep the group to trusted users.
+The `dialf` CLI auto-picks your own daemon if you have one, else the shared one.
 
 **macOS + audio recording:** a system (root) service can't access the microphone, so for
 recording on macOS run the **user** service: `dialf service install --user` (details in

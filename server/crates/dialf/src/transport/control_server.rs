@@ -4,6 +4,10 @@
 //! [`ControlResponse`] line — except `autoanswer.serve`, which is connection-scoped and
 //! streams many `done: false` lines until the client disconnects (see [`serve_autoanswer`]).
 
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::OwnedReadHalf;
@@ -15,7 +19,7 @@ use crate::protocol::{ControlOp, ControlRequest, ControlResponse};
 
 /// Bind the control socket and serve connections until cancelled.
 pub async fn serve(state: DaemonState) -> anyhow::Result<()> {
-    let path = state.config.control_socket.clone();
+    let path = state.config.control_socket_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -23,6 +27,11 @@ pub async fn serve(state: DaemonState) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("bind control socket {}", path.display()))?;
+    apply_socket_perms(
+        &path,
+        state.config.control_socket_group.as_deref(),
+        state.config.control_socket_mode.as_deref(),
+    )?;
     tracing::info!(socket = %path.display(), "control server listening");
 
     loop {
@@ -182,4 +191,58 @@ async fn write_line(
     write.write_all(buf.as_bytes()).await?;
     write.flush().await?;
     Ok(())
+}
+
+/// Apply the configured group + mode to the control socket, so a shared (system) daemon lets its
+/// group's members connect. No-op when neither is set (per-user scope keeps the default 0700 dir).
+fn apply_socket_perms(path: &Path, group: Option<&str>, mode: Option<&str>) -> anyhow::Result<()> {
+    if let Some(group) = group {
+        let gid = gid_for_group(group).with_context(|| format!("control_socket_group `{group}`"))?;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        // owner = (uid_t)-1 (u32::MAX) keeps the current owner; only the group changes.
+        let rc = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("chgrp control socket {} to {group}", path.display())
+            });
+        }
+    }
+    if let Some(mode) = mode {
+        let bits = parse_octal_mode(mode)
+            .with_context(|| format!("control_socket_mode `{mode}` (want octal, e.g. 0660)"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))
+            .with_context(|| format!("chmod control socket {} to {mode}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Resolve a group name to its gid via `getgrnam`; errors if the group doesn't exist.
+fn gid_for_group(name: &str) -> anyhow::Result<u32> {
+    let c_name = std::ffi::CString::new(name)?;
+    let grp = unsafe { libc::getgrnam(c_name.as_ptr()) };
+    if grp.is_null() {
+        anyhow::bail!("group `{name}` not found (create it first, e.g. `groupadd {name}`)");
+    }
+    Ok(unsafe { (*grp).gr_gid })
+}
+
+/// Parse an octal permission string like "0660" or "660" into mode bits.
+fn parse_octal_mode(s: &str) -> anyhow::Result<u32> {
+    let t = s.trim().trim_start_matches("0o");
+    Ok(u32::from_str_radix(t, 8)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_octal_mode_variants() {
+        assert_eq!(parse_octal_mode("0660").unwrap(), 0o660);
+        assert_eq!(parse_octal_mode("660").unwrap(), 0o660);
+        assert_eq!(parse_octal_mode("0o640").unwrap(), 0o640);
+        assert_eq!(parse_octal_mode(" 0600 ").unwrap(), 0o600);
+        assert!(parse_octal_mode("nope").is_err());
+        assert!(parse_octal_mode("0899").is_err()); // 8 and 9 aren't octal digits
+    }
 }

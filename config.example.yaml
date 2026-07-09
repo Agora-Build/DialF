@@ -12,8 +12,13 @@
 # shared_key: change-me            # must match the phone app's shared key
 # ws_bind: "0.0.0.0:8765"          # phone WebSocket server bind
 # instance_name: dialfd            # mDNS instance name
-control_socket: /tmp/dialfd.sock    # dialf <-> dialfd control socket (pin it so all
-                                    # contexts agree, e.g. ssh vs GUI session)
+# control_socket: /tmp/dialfd.sock  # optional. Unset = a per-user default by install scope
+#                                    # (/run/user/$UID on Linux, /tmp/dialfd-$UID on macOS). Pin it
+#                                    # to a fixed path if contexts disagree (ssh vs GUI). A SYSTEM
+#                                    # install (`sudo dialf service install`) is a shared daemon and
+#                                    # sets these so any `dialf`-group member can use it:
+# control_socket_group: dialf        #   group that owns the socket (auto-created by the installer)
+# control_socket_mode: "0660"        #   octal perms — group can connect, others can't
 
 # Inbound routing: each number is auto-answered when it rings. A null/empty value just
 # answers; a job path answers AND runs that job (which should start with `call.answer`).

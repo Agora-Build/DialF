@@ -59,6 +59,12 @@ fn install(scope: Scope, config: Option<PathBuf>) -> Result<()> {
     let cfg = config.map(|p| p.to_string_lossy().to_string());
     let path = unit_path(scope);
 
+    // System scope is a shared instance: ensure the `dialf` group exists so the daemon can hand
+    // the control socket to it and any member can drive the phone.
+    if scope == Scope::System {
+        ensure_group("dialf");
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {}", parent.display()))?;
@@ -124,12 +130,15 @@ fn unit_path(scope: Scope) -> PathBuf {
 }
 
 fn launchd_plist(exe: &str, config: Option<&str>, scope: Scope) -> String {
-    let mut args = format!("    <string>{exe}</string>\n");
+    // Subcommand first, then its flags: `dialf daemon [--config <path>] [--system]`.
+    let mut args = format!("    <string>{exe}</string>\n    <string>daemon</string>\n");
     if let Some(c) = config {
         args.push_str("    <string>--config</string>\n");
         args.push_str(&format!("    <string>{c}</string>\n"));
     }
-    args.push_str("    <string>daemon</string>\n");
+    if scope == Scope::System {
+        args.push_str("    <string>--system</string>\n");
+    }
 
     // Logs: system scope to /var/log, user scope to the user's Library/Logs.
     let (out, err) = match scope {
@@ -176,10 +185,13 @@ fn launchd_plist(exe: &str, config: Option<&str>, scope: Scope) -> String {
 }
 
 fn systemd_unit(exe: &str, config: Option<&str>, scope: Scope) -> String {
-    let exec = match config {
-        Some(c) => format!("{exe} --config {c} daemon"),
-        None => format!("{exe} daemon"),
-    };
+    let mut exec = format!("{exe} daemon");
+    if let Some(c) = config {
+        exec.push_str(&format!(" --config {c}"));
+    }
+    if scope == Scope::System {
+        exec.push_str(" --system");
+    }
     let install_target = match scope {
         Scope::System => "multi-user.target",
         Scope::User => "default.target",
@@ -300,6 +312,47 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Create the shared-access group if it's missing (idempotent). Best-effort: a failure only warns,
+/// since the daemon reports the missing group clearly when it tries to chgrp the socket.
+fn ensure_group(name: &str) {
+    let created = if cfg!(target_os = "macos") {
+        // `dseditgroup -o read` succeeds iff the group exists; only create when it doesn't.
+        let exists = Command::new("dseditgroup")
+            .args(["-o", "read", name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        exists
+            || Command::new("dseditgroup")
+                .args(["-o", "create", name])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+    } else {
+        // `groupadd -f` is a no-op if the group already exists.
+        Command::new("groupadd")
+            .args(["-f", name])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if created {
+        let add = if cfg!(target_os = "macos") {
+            format!("sudo dseditgroup -o edit -a <user> -t user {name}")
+        } else {
+            format!("sudo usermod -aG {name} <user>")
+        };
+        println!("ensured group `{name}` — grant a user access with: {add}");
+    } else {
+        eprintln!(
+            "warning: could not create group `{name}` — create it manually so the shared \
+             control socket is reachable by other users"
+        );
+    }
 }
 
 /// getuid via libc without adding a dependency.

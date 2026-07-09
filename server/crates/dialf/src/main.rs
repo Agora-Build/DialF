@@ -27,6 +27,11 @@ enum Command {
         /// Path to the config file (defaults to ~/.config/dialf/config.yaml).
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Shared/system instance: bind the machine-wide socket owned by the `dialf` group (0660)
+        /// so any group member can use it. Set by `dialf service install` (system scope). Config
+        /// still overrides. Needs root.
+        #[arg(long)]
+        system: bool,
     },
     /// List connected phones: dialf devices [--human].
     Devices {
@@ -198,12 +203,10 @@ async fn main() -> anyhow::Result<()> {
     // Client commands connect to the daemon's control socket. Config is a *daemon* concern —
     // only `daemon` and `service install` take `--config` — so clients resolve the socket from the
     // default config, falling back to the built-in default if there's no config file yet.
-    let socket = Config::load(&Config::default_path())
-        .map(|c| c.control_socket)
-        .unwrap_or_else(|_| Config::default().control_socket);
+    let socket = Config::resolve_client_socket();
 
     match cli.command {
-        Command::Daemon { config } => {
+        Command::Daemon { config, system } => {
             // An explicit `--config` that doesn't exist is a user error — fail loudly rather than
             // silently starting with built-in defaults. The implicit default path may legitimately
             // be absent (fresh install) and falls back to defaults.
@@ -212,7 +215,15 @@ async fn main() -> anyhow::Result<()> {
             if explicit && !config_path.exists() {
                 anyhow::bail!("config not found: {}", config_path.display());
             }
-            let cfg = Config::load(&config_path)?;
+            let mut cfg = Config::load(&config_path)?;
+            if system {
+                // Shared instance: default to the machine-wide socket owned by the `dialf` group,
+                // unless the config overrides any of these.
+                cfg.control_socket
+                    .get_or_insert_with(dialf::config::system_control_socket);
+                cfg.control_socket_group.get_or_insert_with(|| "dialf".to_string());
+                cfg.control_socket_mode.get_or_insert_with(|| "0660".to_string());
+            }
             dialf::daemon::run(cfg, config_path).await
         }
 
@@ -423,9 +434,7 @@ async fn print_versions() -> anyhow::Result<()> {
     println!("dialf  (CLI):    {cli}");
     // Resolve the control socket from the default config (config is a daemon concern; clients
     // don't take `--config`).
-    let socket = Config::load(&Config::default_path())
-        .map(|c| c.control_socket)
-        .unwrap_or_else(|_| Config::default().control_socket);
+    let socket = Config::resolve_client_socket();
     // Cap the query so `--version` can never hang on an unresponsive daemon.
     let q = tokio::time::timeout(
         std::time::Duration::from_millis(1500),

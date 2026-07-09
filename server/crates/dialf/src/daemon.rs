@@ -335,7 +335,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     // Clean up `sox` orphaned by a previously hard-killed daemon (SIGKILL bypasses our Drop
     // cleanup). Skip if another daemon is already live on the control socket — its audio children
     // are legitimate, and the binds below will fail cleanly anyway.
-    if std::os::unix::net::UnixStream::connect(&config.control_socket).is_err() {
+    if std::os::unix::net::UnixStream::connect(config.control_socket_path()).is_err() {
         reap_stray_audio(&config.audio);
     }
 
@@ -382,7 +382,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     let ten_vad = ten_vad_sys::version().unwrap_or_else(|| "stub (not linked)".to_string());
     tracing::info!(
         ws = %state.config.ws_bind,
-        socket = %state.config.control_socket.display(),
+        socket = %state.config.control_socket_path().display(),
         ten_vad,
         "dialfd ready (phone WS plane)"
     );

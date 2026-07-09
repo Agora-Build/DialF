@@ -98,7 +98,7 @@ true headless/boot service that records, run the bridge host on **Linux** (no TC
 `~/.config/dialf/config.yaml` for the sound-card host (see `config.example.yaml`):
 
 ```yaml
-control_socket: /tmp/dialfd.sock
+# control_socket: /tmp/dialfd.sock  # optional — unset uses a per-user default by install scope
 audio:
   sample_rate: 48000
   channels: 1
