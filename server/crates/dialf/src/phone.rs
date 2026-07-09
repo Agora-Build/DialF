@@ -177,7 +177,6 @@ impl JobIo for PhoneJobIo {
 
     fn cancelled(&self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
-        // Either a graceful cancel or a force stops the job between steps.
         self.cancel.load(Relaxed) || self.force.load(Relaxed)
     }
 

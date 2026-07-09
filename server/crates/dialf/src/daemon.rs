@@ -651,10 +651,14 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
 /// Resolve a possibly-relative path under `base` (e.g. the config dir). Absolute paths, and the
 /// `base = None`/empty case, are returned unchanged.
 fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
-    match base {
+    let joined = match base {
         Some(b) if !b.as_os_str().is_empty() && path.is_relative() => b.join(path),
         _ => path.to_path_buf(),
-    }
+    };
+    // Lexically clean the result (drop interior `./` and repeated separators) so a `./foo` input
+    // yields `<base>/foo`, not `<base>/./foo`. Not canonicalize — no filesystem / symlink access,
+    // and `..` is left intact.
+    joined.components().collect()
 }
 
 /// String convenience over [`resolve_path_under`] (job paths are carried as `String`s).
@@ -673,9 +677,9 @@ pub fn load_job_file(path: &str) -> anyhow::Result<Vec<schema::Step>> {
     if let Some(base) = Path::new(path).parent().filter(|b| !b.as_os_str().is_empty()) {
         for step in &mut job {
             if let schema::StepKind::AudioPlay { file } = &mut step.kind {
-                if Path::new(file).is_relative() {
-                    *file = base.join(&*file).to_string_lossy().into_owned();
-                }
+                *file = resolve_path_under(Some(base), Path::new(&*file))
+                    .to_string_lossy()
+                    .into_owned();
             }
         }
     }
@@ -871,6 +875,12 @@ mod tests {
             resolve_path_under(Some(base), Path::new("jobs/x.yaml")),
             PathBuf::from("/etc/dialf/jobs/x.yaml")
         );
+        // A leading `./` is normalized away, not concatenated (no interior `/./`).
+        assert_eq!(
+            resolve_path_under(Some(base), Path::new("./jobs/x.yaml")),
+            PathBuf::from("/etc/dialf/jobs/x.yaml")
+        );
+        assert_eq!(resolve_under(Some(base), "./jobs/x.yaml"), "/etc/dialf/jobs/x.yaml");
         // Absolute -> used as-is.
         assert_eq!(
             resolve_path_under(Some(base), Path::new("/var/rec")),
@@ -890,9 +900,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dialf-jobpath-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let job_path = dir.join("job.yaml");
+        // `./prompts/…` must resolve to `<dir>/prompts/…`, not `<dir>/./prompts/…`.
         std::fs::write(
             &job_path,
-            "- type: audio.play\n  file: prompts/hi.wav\n- type: audio.play\n  file: /abs/there.wav\n",
+            "- type: audio.play\n  file: ./prompts/hi.wav\n- type: audio.play\n  file: /abs/there.wav\n",
         )
         .unwrap();
         let steps = load_job_file(&job_path.to_string_lossy()).unwrap();
@@ -904,6 +915,7 @@ mod tests {
             })
             .collect();
         assert_eq!(files[0], dir.join("prompts/hi.wav").to_string_lossy());
+        assert!(!files[0].contains("/./"), "interior /./ not normalized: {}", files[0]);
         assert_eq!(files[1], "/abs/there.wav");
         let _ = std::fs::remove_dir_all(&dir);
     }

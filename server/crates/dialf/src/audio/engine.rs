@@ -55,6 +55,7 @@ impl AudioEngine {
         sess: Option<&mut DuplexSession>,
         force: &AtomicBool,
     ) -> anyhow::Result<()> {
+        tracing::info!(target: "job", "audio.play: {}", file.display());
         if let Some(s) = sess {
             tee_tx(s, file)?;
         }
