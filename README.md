@@ -286,6 +286,15 @@ audio:
   mix_channels: tx_rx              # mix.wav: left=tx / right=rx (default); rx_tx swaps
 ```
 
+**Paths — absolute or relative.** File paths in the config (`autoanswer` job paths, `record_dir`)
+may be absolute, or relative — in which case they resolve against **the config file's own
+directory**, not the daemon's working directory (the service runs with `cwd=/`). Relative paths
+inside a job file (e.g. `audio.play`) resolve against **that job file's directory**. So a config,
+its jobs, and its recordings can live in one folder and move together. `dialf daemon --config` and
+`dialf run <job>` both accept absolute or relative paths (relative to your shell's CWD). An explicit
+`--config` that doesn't exist is an error (rather than silently falling back to defaults). macOS and
+Linux behave identically.
+
 The app's shared key / device id / optional fixed `dialfd` address are set in its UI — see
 [`app/README.md`](app/README.md).
 

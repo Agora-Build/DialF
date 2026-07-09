@@ -347,7 +347,15 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         engine,
         hub: Arc::new(Hub::new()),
         config: Arc::new(config),
-        config_dir: config_path.parent().map(|p| p.to_path_buf()),
+        // Canonicalize first so `config_dir` is an absolute real directory: relative paths inside
+        // the config (autoanswer job paths, record_dir) then resolve against the config file's own
+        // location regardless of the daemon's CWD (the service runs with cwd=/). Falls back to the
+        // path as-given if it can't be canonicalized (e.g. a missing default config).
+        config_dir: config_path
+            .canonicalize()
+            .unwrap_or(config_path)
+            .parent()
+            .map(|p| p.to_path_buf()),
         card_busy: Arc::new(AtomicBool::new(false)),
         serve_busy: Arc::new(AtomicBool::new(false)),
         job_cancel: Arc::new(AtomicBool::new(false)),
@@ -640,15 +648,20 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
     }
 }
 
-/// Resolve a possibly-relative path under `base` (e.g. the config dir). Absolute paths, and
-/// the `base = None`/empty case, are returned unchanged.
-fn resolve_under(base: Option<&Path>, path: &str) -> String {
+/// Resolve a possibly-relative path under `base` (e.g. the config dir). Absolute paths, and the
+/// `base = None`/empty case, are returned unchanged.
+fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
     match base {
-        Some(b) if !b.as_os_str().is_empty() && Path::new(path).is_relative() => {
-            b.join(path).to_string_lossy().into_owned()
-        }
-        _ => path.to_string(),
+        Some(b) if !b.as_os_str().is_empty() && path.is_relative() => b.join(path),
+        _ => path.to_path_buf(),
     }
+}
+
+/// String convenience over [`resolve_path_under`] (job paths are carried as `String`s).
+fn resolve_under(base: Option<&Path>, path: &str) -> String {
+    resolve_path_under(base, Path::new(path))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Read + parse a job file, resolving relative `audio.play` paths against the job file's own
@@ -697,7 +710,14 @@ pub async fn run_job_on_device(
     force: Arc<AtomicBool>,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
-    let record_dir = state.config.audio.record_dir.clone();
+    // A relative `record_dir` resolves against the config file's dir (like autoanswer job paths),
+    // so recordings land next to the config regardless of the daemon's CWD; absolute is unchanged.
+    let record_dir = state
+        .config
+        .audio
+        .record_dir
+        .as_deref()
+        .map(|d| resolve_path_under(state.config_dir.as_deref(), d));
     let mix_recording = state.config.audio.mix_recording;
     let mix_tx_left = state.config.audio.mix_channels.tx_left();
     let hub = state.hub.clone();
@@ -841,6 +861,51 @@ mod tests {
         assert!(job_needs_phone(&with_call));
         let with_sms = schema::parse("- type: sms.send\n  to: \"+100\"\n  body: hi\n").unwrap();
         assert!(job_needs_phone(&with_sms));
+    }
+
+    #[test]
+    fn resolve_paths_relative_under_base_absolute_unchanged() {
+        let base = Path::new("/etc/dialf");
+        // Relative -> joined under the base (config/job dir).
+        assert_eq!(
+            resolve_path_under(Some(base), Path::new("jobs/x.yaml")),
+            PathBuf::from("/etc/dialf/jobs/x.yaml")
+        );
+        // Absolute -> used as-is.
+        assert_eq!(
+            resolve_path_under(Some(base), Path::new("/var/rec")),
+            PathBuf::from("/var/rec")
+        );
+        // Empty base / no base -> unchanged (can't anchor).
+        assert_eq!(resolve_path_under(Some(Path::new("")), Path::new("rel")), PathBuf::from("rel"));
+        assert_eq!(resolve_path_under(None, Path::new("rel")), PathBuf::from("rel"));
+        // String convenience (used for autoanswer job paths) mirrors it.
+        assert_eq!(resolve_under(Some(base), "jobs/x.yaml"), "/etc/dialf/jobs/x.yaml");
+        assert_eq!(resolve_under(Some(base), "/abs/x.yaml"), "/abs/x.yaml");
+    }
+
+    #[test]
+    fn load_job_file_resolves_audio_play_against_job_dir() {
+        // A relative `audio.play` in a job resolves against the job file's own dir; absolute stays.
+        let dir = std::env::temp_dir().join(format!("dialf-jobpath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let job_path = dir.join("job.yaml");
+        std::fs::write(
+            &job_path,
+            "- type: audio.play\n  file: prompts/hi.wav\n- type: audio.play\n  file: /abs/there.wav\n",
+        )
+        .unwrap();
+        let steps = load_job_file(&job_path.to_string_lossy()).unwrap();
+        let files: Vec<&str> = steps
+            .iter()
+            .filter_map(|s| match &s.kind {
+                schema::StepKind::AudioPlay { file } => Some(file.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(files[0], dir.join("prompts/hi.wav").to_string_lossy());
+        assert_eq!(files[1], "/abs/there.wav");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_state(autoanswer: BTreeMap<String, Option<String>>) -> DaemonState {

@@ -138,10 +138,16 @@ fn config_dir() -> PathBuf {
 }
 
 fn default_control_socket() -> PathBuf {
+    // Linux: the per-user runtime dir (/run/user/$UID) — secure (0700) and the conventional home
+    // for sockets; a user's shell and their user service see the same value, so client and daemon
+    // agree. macOS has no XDG_RUNTIME_DIR, and env::temp_dir() there is a *per-process* $TMPDIR
+    // (/var/folders/…/T) that can differ between the launchd daemon and an interactive shell — so
+    // they could look in different places. Fall back to a fixed, predictable /tmp/dialfd.sock that
+    // both always compute identically.
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("dialfd.sock");
     }
-    std::env::temp_dir().join("dialfd.sock")
+    PathBuf::from("/tmp/dialfd.sock")
 }
 
 #[cfg(test)]

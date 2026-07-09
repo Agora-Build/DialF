@@ -204,7 +204,14 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Daemon { config } => {
+            // An explicit `--config` that doesn't exist is a user error — fail loudly rather than
+            // silently starting with built-in defaults. The implicit default path may legitimately
+            // be absent (fresh install) and falls back to defaults.
+            let explicit = config.is_some();
             let config_path = config.unwrap_or_else(Config::default_path);
+            if explicit && !config_path.exists() {
+                anyhow::bail!("config not found: {}", config_path.display());
+            }
             let cfg = Config::load(&config_path)?;
             dialf::daemon::run(cfg, config_path).await
         }

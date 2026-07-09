@@ -1,6 +1,13 @@
 # Example dialfd config — copy to ~/.config/dialf/config.yaml and edit.
 # Every field has a default; set only what you need. See docs/HARDWARE.md for the
 # sound-card bridge wiring and the macOS microphone/LaunchAgent setup.
+#
+# Load a specific config with:  dialf daemon --config /path/to/config.yaml
+# Paths inside this file (autoanswer job paths, record_dir) may be ABSOLUTE, or RELATIVE — in
+# which case they resolve against THIS config file's own directory (not the daemon's working
+# directory). Likewise, relative paths inside a job file (e.g. audio.play) resolve against that
+# job file's directory. So a config + its jobs + recordings can live in one folder and move
+# together. mac and Linux alike.
 
 # shared_key: change-me            # must match the phone app's shared key
 # ws_bind: "0.0.0.0:8765"          # phone WebSocket server bind
@@ -21,7 +28,8 @@ audio:
   channels: 1
   capture_device: "MiniFuse 2"      # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0"
   playback_device: "MiniFuse 2"
-  record_dir: /Users/you/dialf/recordings   # set to enable rx/tx/mix recording
+  record_dir: /Users/you/dialf/recordings   # enable rx/tx/mix recording; absolute, or relative
+                                            # to this config file's directory (e.g. `recordings`)
   mix_recording: true
   mix_channels: tx_rx               # mix.wav stereo layout: tx_rx = left tx (local) / right rx
                                     # (remote) [default]; rx_tx swaps them
