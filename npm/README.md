@@ -36,12 +36,26 @@ walkthrough and the [phone-app reference](https://github.com/Agora-Build/DialF/b
 
 ## Run the daemon as a service
 
-`npm install` only installs the CLI. To run `dialfd` in the background:
+`npm install` only installs the CLI. To run `dialfd` in the background, pick a scope — the
+install scope decides whether the daemon is private to you or shared by everyone on the machine:
 
 ```sh
-sudo dialf service install        # boot service (launchd/systemd)
-dialf service install --user      # or per-user (login), no sudo
+# Isolated (your own private daemon):
+dialf service install --user
+# per-user socket: /run/user/$UID/dialfd.sock (Linux) or /tmp/dialfd-$UID.sock (macOS).
+# CLI and daemon auto-agree on the socket.
+
+# Shared (one daemon all login users can drive):
+sudo dialf service install
+# creates the `dialf` group and binds a machine-wide socket
+# (/run/dialf/dialfd.sock on Linux, /var/run/dialfd.sock on macOS), group `dialf`, mode 0660.
+sudo usermod -aG dialf <user>                      # grant a user access — Linux
+sudo dseditgroup -o edit -a <user> -t user dialf   #                       macOS
+# the user logs out/in, then `dialf devices` reaches the shared daemon.
 ```
+
+The control socket lets its holder dial, hang up, send SMS, and run jobs, so keep the `dialf`
+group to trusted users. Manage the service with `dialf service status|stop|start|uninstall [--user]`.
 
 ## Usage
 
