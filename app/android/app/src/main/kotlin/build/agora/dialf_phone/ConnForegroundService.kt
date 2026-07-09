@@ -56,7 +56,21 @@ class ConnForegroundService : Service() {
         // heartbeat acks) before we treat the link as dead and reconnect (~3 missed beats).
         private const val HEARTBEAT_MS = 30_000L
         private const val LIVENESS_TIMEOUT_MS = 90_000L
+        // How long to keep the CPU awake on an inbound ring while we (re)build the link, report the
+        // call, and let the daemon answer. Self-releasing so it can never leak.
+        private const val RING_WAKE_MS = 30_000L
         private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
+
+        /** Live instance, so [DialfInCallService] can nudge the link the moment a call rings. */
+        @Volatile
+        private var instance: ConnForegroundService? = null
+
+        /** An inbound call is ringing: make sure the dialfd link is alive so the daemon hears about
+         *  it and can auto-answer — even with the screen off. No-op if the service isn't running.
+         *  Safe to call from the InCallService (main) thread. */
+        fun onIncomingCall() {
+            instance?.handleIncomingCall()
+        }
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -84,6 +98,10 @@ class ConnForegroundService : Service() {
     // Released the instant it's unplugged, so it never costs battery in normal use. PARTIAL = CPU
     // only; the screen stays off.
     private var wakeLock: PowerManager.WakeLock? = null
+    // A separate, short, self-releasing CPU wake lock held only around an inbound ring — so the
+    // link can be rebuilt and the call reported even on battery (when the power-gated `wakeLock`
+    // above isn't held). Independent of power state; times out via acquire(RING_WAKE_MS).
+    private var ringWakeLock: PowerManager.WakeLock? = null
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.i(TAG, "power changed: ${intent?.action}")
@@ -152,6 +170,30 @@ class ConnForegroundService : Service() {
         }
     }
 
+    /** An inbound call is ringing. The system already woke the CPU to bind the InCallService and
+     *  run onCallAdded, but the dialfd socket may be stale (dead from Doze). Hold the CPU awake for
+     *  a short window and verify/rebuild the link so the ringing call is reported and the daemon can
+     *  auto-answer — the screen need not turn on. onOpen re-reports the ringing call after a
+     *  reconnect, so a report that raced a dead socket isn't lost. */
+    private fun handleIncomingCall() {
+        if (!running) return
+        acquireRingWakeLock()
+        main.post { verifyLink("incoming call") }
+    }
+
+    /** Hold a short CPU-only wake lock covering the inbound-ring reconnect/report/answer window,
+     *  regardless of power state. Self-releasing (times out) so it can never leak; idempotent. */
+    private fun acquireRingWakeLock() {
+        ringWakeLock?.let { if (it.isHeld) return }
+        ringWakeLock = getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DialF:ring")
+            ?.apply {
+                setReferenceCounted(false)
+                acquire(RING_WAKE_MS)
+            }
+        Log.i(TAG, "incoming ring -> ring wake lock (${RING_WAKE_MS}ms), verifying link")
+    }
+
     private fun keepRunning() =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("keep_running", true)
 
@@ -159,6 +201,7 @@ class ConnForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         nsd = getSystemService(NsdManager::class.java)
         Dialf.serviceListener = { ev -> send(ev) }
         // Reconnect promptly when the network comes back (e.g. wifi flaps / changes).
@@ -259,6 +302,9 @@ class ConnForegroundService : Service() {
         try { unregisterReceiver(powerReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(wakeReceiver) } catch (_: Exception) {}
         updateWakeLock() // running=false above -> releases the lock
+        ringWakeLock?.let { if (it.isHeld) it.release() }
+        ringWakeLock = null
+        instance = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }

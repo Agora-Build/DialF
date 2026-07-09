@@ -41,12 +41,21 @@ class DialfInCallService : InCallService() {
         val cb = object : Call.Callback() {
             override fun onStateChanged(c: Call, state: Int) {
                 Dialf.emitCallState(c)
+                // A call that rings after being added (some devices add it before RINGING): make
+                // sure the dialfd link is alive so the daemon hears it and can auto-answer.
+                if (state == Call.STATE_RINGING) ConnForegroundService.onIncomingCall()
                 if (state == Call.STATE_ACTIVE || state == Call.STATE_DIALING) routeForCall()
             }
         }
         callbacks[call] = cb
         call.registerCallback(cb)
+        // Track + report the call first (over the current socket, if alive) so it's in Dialf's
+        // registry before any reconnect — then onOpen's re-report can find it if the socket was dead.
         Dialf.emitCallState(call) // initial state (often RINGING or DIALING)
+        // An inbound call rings even while the phone is dozing, when the dialfd socket may be stale.
+        // Nudge the connection service to verify/rebuild the link so the ringing call is reported
+        // (and can be auto-answered). The screen need not turn on — only the CPU, which is up now.
+        if (call.state == Call.STATE_RINGING) ConnForegroundService.onIncomingCall()
         routeForCall()
     }
 
