@@ -331,7 +331,51 @@ fn reap_stray_audio(cfg: &AudioConfig) {
     }
 }
 
+/// Which terminal multiplexer (if any) the given env indicates. Pure, so it's testable.
+fn multiplexer_name(
+    tmux_set: bool,
+    term_program: &str,
+    sty_set: bool,
+    zellij_set: bool,
+) -> Option<&'static str> {
+    if tmux_set || term_program == "tmux" {
+        Some("tmux")
+    } else if sty_set {
+        Some("screen")
+    } else if zellij_set {
+        Some("zellij")
+    } else {
+        None
+    }
+}
+
+/// macOS attributes microphone access (TCC) to the "responsible process". A daemon started from
+/// inside a terminal multiplexer inherits the multiplexer as its responsible process — which usually
+/// has no mic grant — so the capture stream opens but delivers silence, and `wait_for_speech` times
+/// out with no voice. Warn loudly. launchd services and plain Terminal windows are unaffected;
+/// `dialf service install --user` is the fix. No-op off macOS.
+fn warn_if_under_multiplexer() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    if let Some(mux) = multiplexer_name(
+        std::env::var_os("TMUX").is_some(),
+        &term_program,
+        std::env::var_os("STY").is_some(),
+        std::env::var_os("ZELLIJ").is_some(),
+    ) {
+        tracing::warn!(
+            "running under {mux}: on macOS the microphone is attributed to the {mux} process, which \
+             usually lacks a mic grant, so audio capture may be SILENT (wait_for_speech times out \
+             with no voice). Fix: `dialf service install --user` (launchd gives the daemon its own \
+             mic access), or run `dialf daemon` from a plain Terminal window instead of {mux}."
+        );
+    }
+}
+
 pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
+    warn_if_under_multiplexer();
     // Clean up `sox` orphaned by a previously hard-killed daemon (SIGKILL bypasses our Drop
     // cleanup). Skip if another daemon is already live on the control socket — its audio children
     // are legitimate, and the binds below will fail cleanly anyway.
@@ -865,6 +909,17 @@ mod tests {
         assert!(job_needs_phone(&with_call));
         let with_sms = schema::parse("- type: sms.send\n  to: \"+100\"\n  body: hi\n").unwrap();
         assert!(job_needs_phone(&with_sms));
+    }
+
+    #[test]
+    fn detects_terminal_multiplexers() {
+        assert_eq!(multiplexer_name(true, "", false, false), Some("tmux")); // $TMUX set
+        assert_eq!(multiplexer_name(false, "tmux", false, false), Some("tmux")); // TERM_PROGRAM
+        assert_eq!(multiplexer_name(false, "", true, false), Some("screen")); // $STY
+        assert_eq!(multiplexer_name(false, "", false, true), Some("zellij")); // $ZELLIJ
+        // Plain terminals -> no warning.
+        assert_eq!(multiplexer_name(false, "Apple_Terminal", false, false), None);
+        assert_eq!(multiplexer_name(false, "iTerm.app", false, false), None);
     }
 
     #[test]
