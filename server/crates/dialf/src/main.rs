@@ -3,6 +3,7 @@
 //! `dialf daemon` runs `dialfd`; the other subcommands are thin clients that send a
 //! [`ControlRequest`] over the local Unix control socket and print the response.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -177,14 +178,74 @@ enum CallAction {
     },
 }
 
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where the daemon writes its rotating log file. System scope → `/var/log`; otherwise macOS uses
+/// `~/Library/Logs`, Linux `$XDG_STATE_HOME/dialf` (or `~/.local/state/dialf`).
+fn default_log_dir(system: bool) -> PathBuf {
+    if system {
+        return PathBuf::from("/var/log");
+    }
+    if cfg!(target_os = "macos") {
+        home_dir().join("Library/Logs")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".local/state"))
+            .join("dialf")
+    }
+}
+
+/// Install the tracing subscriber. Always logs to stdout (ANSI only when it's a real terminal). For
+/// the daemon, ALSO logs to a daily-rotated `dialfd.<date>.log` (keeping 7) so foreground runs and
+/// services alike keep a persistent, junk-free record. Returns the file writer's flush guard.
+fn init_logging(to_file: bool, system: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let stdout_layer = tracing_subscriber::fmt::layer().with_ansi(std::io::stdout().is_terminal());
+
+    if to_file {
+        let dir = default_log_dir(system);
+        let appender = tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("dialfd")
+            .filename_suffix("log")
+            .max_log_files(7)
+            .build(&dir);
+        match appender {
+            Ok(appender) => {
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                let file_layer = tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer);
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(stdout_layer)
+                    .with(file_layer)
+                    .init();
+                return Some(guard);
+            }
+            Err(e) => {
+                tracing_subscriber::registry().with(filter).with(stdout_layer).init();
+                tracing::warn!("could not open log dir {} ({e}); logging to stdout only", dir.display());
+                return None;
+            }
+        }
+    }
+    tracing_subscriber::registry().with(filter).with(stdout_layer).init();
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Logging: stdout (colored only on a real terminal) always; the daemon ALSO writes a
+    // daily-rotated plain-text file (keeping the last 7), so even a foreground `dialf daemon`
+    // persists logs. The returned guard must live for the process lifetime or the non-blocking file
+    // writer stops flushing — hence `_log_guard` held here in `main`.
+    let is_daemon = std::env::args().any(|a| a == "daemon");
+    let is_system = std::env::args().any(|a| a == "--system");
+    let _log_guard = init_logging(is_daemon, is_system);
 
     ensure_model_env();
 

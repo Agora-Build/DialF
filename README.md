@@ -63,6 +63,15 @@ dialf service status|stop|start|uninstall [--user]
 (The curl installer is install-only by default; `DIALF_SERVICE=system|user` makes it also
 install that service.)
 
+**Logs.** `dialfd` writes a **daily-rotated** plain-text log (last 7 days kept), however it's
+launched — foreground `dialf daemon` shows colored logs live *and* writes the file:
+
+```sh
+# macOS:  ~/Library/Logs/dialfd.<date>.log      (system service: /var/log/dialfd.<date>.log)
+# Linux:  ~/.local/state/dialf/dialfd.<date>.log
+tail -f ~/Library/Logs/dialfd.$(date +%F).log
+```
+
 ### Upgrading
 
 ```sh

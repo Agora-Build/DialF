@@ -4,7 +4,7 @@ members = ["crates/dialf", "crates/ten-vad-sys"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.50"
+version = "0.1.51"
 license = "MIT"
 rust-version = "1.75"
 
@@ -20,5 +20,6 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 hound = "3"
 which = "6"

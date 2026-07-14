@@ -140,19 +140,14 @@ fn launchd_plist(exe: &str, config: Option<&str>, scope: Scope) -> String {
         args.push_str("    <string>--system</string>\n");
     }
 
-    // Logs: system scope to /var/log, user scope to the user's Library/Logs.
-    let (out, err) = match scope {
-        Scope::System => (
-            "/var/log/dialfd.out.log".to_string(),
-            "/var/log/dialfd.err.log".to_string(),
-        ),
-        Scope::User => {
-            let base = home_dir().join("Library/Logs");
-            (
-                base.join("dialfd.out.log").to_string_lossy().to_string(),
-                base.join("dialfd.err.log").to_string_lossy().to_string(),
-            )
-        }
+    // dialfd writes its own daily-rotated log (dialfd.<date>.log in the log dir), so we don't
+    // redirect stdout here. Keep only StandardErrorPath so a panic/backtrace is still captured.
+    let err = match scope {
+        Scope::System => "/var/log/dialfd.err.log".to_string(),
+        Scope::User => home_dir()
+            .join("Library/Logs/dialfd.err.log")
+            .to_string_lossy()
+            .to_string(),
     };
 
     format!(
@@ -169,8 +164,6 @@ fn launchd_plist(exe: &str, config: Option<&str>, scope: Scope) -> String {
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>StandardOutPath</key>
-  <string>{out}</string>
   <key>StandardErrorPath</key>
   <string>{err}</string>
   <key>EnvironmentVariables</key>
