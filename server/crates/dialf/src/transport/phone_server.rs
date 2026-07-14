@@ -228,6 +228,42 @@ async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServ
                     };
                 }
             }
+            // Crash-recovery markers. On an active daemon-driven call, drop a marker so a daemon
+            // crash can hang the orphan up on restart; on the call ending, clear it. Reconcile: if a
+            // marker left by a *prior* run names THIS exact call and no job is driving it now, it
+            // outlived a crash — hang it up.
+            use std::sync::atomic::Ordering::SeqCst;
+            match cs {
+                CallState::Active => {
+                    // Take the marker (dropping the lock) before any await so the future stays Send.
+                    let marked = state.pending_orphans.lock().unwrap().remove(device_id);
+                    match marked {
+                        // Same call still up with nothing driving it → orphaned by a crash.
+                        Some(marked) if marked == call_id && !state.card_busy.load(SeqCst) => {
+                            tracing::warn!(%device_id, "orphaned call from a prior daemon crash — hanging up");
+                            daemon::remove_call_marker(&state.config, device_id);
+                            let _ = state
+                                .hub
+                                .fire(device_id, Action::Hangup { call_id: Some(call_id.clone()) })
+                                .await;
+                            state.emit(format!("{device_id} → hung up an orphaned call (daemon had crashed)"));
+                        }
+                        // A different call now, or a job already adopted it → stale marker, clear it.
+                        Some(_) => daemon::remove_call_marker(&state.config, device_id),
+                        None => {}
+                    }
+                    // A job is driving this call → (re)record the marker for crash recovery. A manual
+                    // call (no job, card free) is never marked, so it's never touched by cleanup.
+                    if state.card_busy.load(SeqCst) {
+                        daemon::write_call_marker(&state.config, device_id, &call_id);
+                    }
+                }
+                CallState::Ended => {
+                    daemon::remove_call_marker(&state.config, device_id);
+                    state.pending_orphans.lock().unwrap().remove(device_id);
+                }
+                _ => {}
+            }
             // Auto-answer: inbound ringing call whose number is configured (or overridden).
             if cs == CallState::Ringing && direction == Direction::In {
                 if let Some(handler) = number.as_deref().and_then(|n| state.resolve_inbound(n)) {

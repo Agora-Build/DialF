@@ -75,6 +75,11 @@ pub struct DaemonState {
     /// connection means the app relaunched (vs a plain reconnect). `None`-reporting apps never
     /// trigger an abort.
     pub instances: Arc<Mutex<HashMap<String, String>>>,
+    /// device_id → call_id for daemon-driven calls that were active (marker on disk) when THIS
+    /// daemon started — i.e. calls that may have outlived a crash of the previous instance. When the
+    /// phone re-reports that exact call active with no job running, it's hung up. Entries are cleared
+    /// as they're reconciled. Populated from marker files at startup.
+    pub pending_orphans: Arc<Mutex<HashMap<String, String>>>,
     /// Live auto-answer overrides (number → handler), keyed by phone number.
     pub overrides: Arc<Mutex<HashMap<String, AutoanswerOverride>>>,
     /// Monotonic source of override registration tokens.
@@ -395,6 +400,15 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     let engine = Arc::new(AudioEngine::new(config.audio.clone()));
     let registry = Arc::new(Mutex::new(Registry::new()));
     let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
+    // Markers left by a prior (crashed) instance name calls that may still be up — reconciled (hung
+    // up) when the phone re-reports them.
+    let pending_orphans = load_call_markers(&config);
+    if !pending_orphans.is_empty() {
+        tracing::warn!(
+            count = pending_orphans.len(),
+            "found call marker(s) from a prior run — will hang up orphaned calls when the phone re-reports them"
+        );
+    }
     let state = DaemonState {
         registry,
         engine,
@@ -415,6 +429,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         job_force: Arc::new(AtomicBool::new(false)),
         job_abort: Arc::new(AtomicBool::new(false)),
         instances: Arc::new(Mutex::new(HashMap::new())),
+        pending_orphans: Arc::new(Mutex::new(pending_orphans)),
         overrides: Arc::new(Mutex::new(HashMap::new())),
         serve_token: Arc::new(AtomicU64::new(1)),
         events,
@@ -743,6 +758,58 @@ pub fn load_job_file(path: &str) -> anyhow::Result<Vec<schema::Step>> {
     Ok(job)
 }
 
+// --- crash-recovery call markers -------------------------------------------
+// A marker records that a daemon-driven call is active, so if the daemon crashes we can hang the
+// orphaned call up on restart. One file per device (content: "device_id\ncall_id"), co-located with
+// the control socket. Only calls driven by a job (card held) get a marker, so a user's *manual*
+// call never does — and is never touched by the orphan cleanup.
+
+fn call_marker_dir(cfg: &Config) -> PathBuf {
+    cfg.control_socket_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dialf-callmarks")
+}
+
+fn call_marker_file(cfg: &Config, device_id: &str) -> PathBuf {
+    let safe: String = device_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    call_marker_dir(cfg).join(format!("call-{safe}"))
+}
+
+/// Record `device_id`'s active daemon-driven call. Best-effort (a failure just means no crash
+/// recovery for this call).
+pub fn write_call_marker(cfg: &Config, device_id: &str, call_id: &str) {
+    let dir = call_marker_dir(cfg);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(call_marker_file(cfg, device_id), format!("{device_id}\n{call_id}"));
+    }
+}
+
+/// Clear a device's call marker (its call ended, or was cleaned up). Best-effort.
+pub fn remove_call_marker(cfg: &Config, device_id: &str) {
+    let _ = std::fs::remove_file(call_marker_file(cfg, device_id));
+}
+
+/// Read markers left by a prior daemon instance: `device_id -> call_id`.
+fn load_call_markers(cfg: &Config) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(call_marker_dir(cfg)) {
+        for e in entries.flatten() {
+            if let Ok(text) = std::fs::read_to_string(e.path()) {
+                let mut lines = text.lines();
+                if let (Some(dev), Some(call)) = (lines.next(), lines.next()) {
+                    out.insert(dev.to_string(), call.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// True if the job has any step that talks to the phone (a call or SMS). Audio-only jobs — just
 /// `audio.play` / `audio.wait_for_speech` / `wait` / `log` — need no device and can drive the
 /// sound card, or a virtual device like BlackHole, with no phone connected.
@@ -937,6 +1004,27 @@ mod tests {
     }
 
     #[test]
+    fn call_markers_round_trip() {
+        let dir = std::env::temp_dir().join(format!("dialf-markers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.control_socket = Some(dir.join("dialfd.sock")); // marker dir = <dir>/dialf-callmarks
+        assert!(load_call_markers(&cfg).is_empty());
+
+        write_call_marker(&cfg, "pixel-9-pro", "call-abc");
+        write_call_marker(&cfg, "other/../evil", "call-xyz"); // unsafe chars are sanitized in the name
+        let loaded = load_call_markers(&cfg);
+        assert_eq!(loaded.get("pixel-9-pro"), Some(&"call-abc".to_string()));
+        assert_eq!(loaded.get("other/../evil"), Some(&"call-xyz".to_string())); // real id kept in file
+
+        remove_call_marker(&cfg, "pixel-9-pro");
+        let loaded = load_call_markers(&cfg);
+        assert!(!loaded.contains_key("pixel-9-pro"));
+        assert_eq!(loaded.get("other/../evil"), Some(&"call-xyz".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn resolve_paths_relative_under_base_absolute_unchanged() {
         let base = Path::new("/etc/dialf");
         // Relative -> joined under the base (config/job dir).
@@ -1005,6 +1093,7 @@ mod tests {
             job_force: Arc::new(AtomicBool::new(false)),
             job_abort: Arc::new(AtomicBool::new(false)),
             instances: Arc::new(Mutex::new(HashMap::new())),
+            pending_orphans: Arc::new(Mutex::new(HashMap::new())),
             overrides: Arc::new(Mutex::new(HashMap::new())),
             serve_token: Arc::new(AtomicU64::new(1)),
             events,
