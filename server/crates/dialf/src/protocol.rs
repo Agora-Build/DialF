@@ -53,6 +53,10 @@ pub enum PhoneToServer {
         caps: Vec<String>,
         #[serde(default)]
         app_version: Option<String>,
+        /// Random id generated once per app process launch. A *changed* value on a new connection
+        /// means the app relaunched (crashed/restarted) rather than merely reconnecting — the daemon
+        /// aborts the in-flight job in that case. Required (the app always sends it).
+        instance_id: String,
     },
     /// Liveness ping, ~every 30s.
     Heartbeat {

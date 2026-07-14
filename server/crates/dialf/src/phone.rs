@@ -42,6 +42,10 @@ pub struct PhoneJobIo {
     /// step doesn't run to completion. The capture is never killed — `finish()` still saves the
     /// recording.
     force: Arc<AtomicBool>,
+    /// Set when the driving phone app relaunches mid-job (a changed `instance_id`). Stops the job
+    /// like a cancel — shared across all job types, so an app crash+restart aborts auto-answer jobs
+    /// too, not just `dialf run`.
+    abort: Arc<AtomicBool>,
 }
 
 impl PhoneJobIo {
@@ -57,6 +61,7 @@ impl PhoneJobIo {
         inbound: bool,
         cancel: Arc<AtomicBool>,
         force: Arc<AtomicBool>,
+        abort: Arc<AtomicBool>,
     ) -> Self {
         Self {
             hub,
@@ -71,6 +76,7 @@ impl PhoneJobIo {
             inbound,
             cancel,
             force,
+            abort,
         }
     }
 
@@ -152,18 +158,20 @@ impl JobIo for PhoneJobIo {
     }
 
     fn hangup(&mut self) -> anyhow::Result<()> {
-        // If we saw the call go active and it's now gone, the far end already hung up — there's
-        // nothing to hang up, so succeed instead of erroring on the phone's "no call to hang up".
-        // (Only skipped when the call is demonstrably gone; an active call is still hung up.)
-        let already_ended = self.saw_active && self.call_state().is_none();
         // We're ending the call ourselves, so stop watching for "ended" — otherwise steps after
         // call.hangup (a final log, a follow-up SMS) would be skipped.
         self.in_call = false;
         self.saw_active = false;
-        if already_ended {
-            return Ok(());
+        // Always send the hang-up. We used to skip it when our view of the call state was empty
+        // (`saw_active && call_state().is_none()`), assuming the far end had already hung up — but a
+        // control-link reconnect (Doze) can blank the registry's current call while the phone call
+        // is still up, and skipping there once left a live call running. The phone tracks the call
+        // itself, so the command still lands. If the call is genuinely gone the phone replies
+        // "no call to hang up" — that's the desired end state, so treat it as success.
+        match self.cmd(Action::Hangup { call_id: None }) {
+            Err(e) if e.to_string().contains("no call to hang up") => Ok(()),
+            other => other,
         }
-        self.cmd(Action::Hangup { call_id: None })
     }
 
     fn call_ended(&mut self) -> bool {
@@ -177,7 +185,7 @@ impl JobIo for PhoneJobIo {
 
     fn cancelled(&self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
-        self.cancel.load(Relaxed) || self.force.load(Relaxed)
+        self.cancel.load(Relaxed) || self.force.load(Relaxed) || self.abort.load(Relaxed)
     }
 
     fn send_sms(&mut self, to: &str, body: &str) -> anyhow::Result<()> {

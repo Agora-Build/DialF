@@ -61,6 +61,11 @@ class ConnForegroundService : Service() {
         private const val RING_WAKE_MS = 30_000L
         private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
 
+        /** Random id generated once per app *process* launch, sent in every `hello`. A changed
+         *  value tells the daemon the app relaunched (crashed/restarted) vs merely reconnected, so
+         *  it can abort an in-flight job rather than resume it against a fresh process. */
+        private val INSTANCE_ID: String = java.util.UUID.randomUUID().toString()
+
         /** Live instance, so [DialfInCallService] can nudge the link the moment a call rings. */
         @Volatile
         private var instance: ConnForegroundService? = null
@@ -416,6 +421,7 @@ class ConnForegroundService : Service() {
                 .put("key", prefs.getString("key", "change-me"))
                 .put("caps", org.json.JSONArray(listOf("call", "sms")))
                 .put("app_version", appVersion)
+                .put("instance_id", INSTANCE_ID)
             webSocket.send(hello.toString())
             // Fresh connection: assume alive now; re-learn whether this daemon acks heartbeats.
             lastDaemonResponseMs = System.currentTimeMillis()
@@ -427,11 +433,12 @@ class ConnForegroundService : Service() {
             notify("Connected · $url")
             Log.i(TAG, "connected to $url")
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
-            // If a call is already ringing (e.g. an incoming call is what woke us and we just
-            // rebuilt the link), re-report it so the freshly-registered daemon can still
-            // auto-answer — the original "ringing" event may have gone out on the dead socket.
-            Dialf.ringingCall()?.let {
-                Log.i(TAG, "reconnected mid-ring -> re-reporting ringing call")
+            // Re-report the current call (any state) so the freshly-registered daemon has accurate
+            // state after a reconnect: a ringing call so it can still auto-answer, and — crucially —
+            // an active call so it doesn't misread the reconnect as "the call ended" mid-job. The
+            // original event may have gone out on the now-dead socket.
+            Dialf.call(null)?.let {
+                Log.i(TAG, "reconnected mid-call -> re-reporting current call")
                 Dialf.emitCallState(it)
             }
         }

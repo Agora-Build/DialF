@@ -63,6 +63,12 @@ pub async fn serve(state: DaemonState) -> anyhow::Result<()> {
     }
 }
 
+/// A changed `instance_id` means the app relaunched — a new process. A first sighting (no prior)
+/// or an unchanged id is a plain reconnect.
+fn is_relaunch(new: &str, prior: Option<&str>) -> bool {
+    matches!(prior, Some(p) if p != new)
+}
+
 async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) -> anyhow::Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut sink, mut read) = ws.split();
@@ -70,20 +76,46 @@ async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) ->
     // First frame must be a valid Hello.
     let first = read.next().await.context("connection closed before hello")??;
     let hello: PhoneToServer = serde_json::from_str(first.to_text()?)?;
-    let (device_id, name) = match hello {
+    let (device_id, name, instance_id) = match hello {
         PhoneToServer::Hello {
             device_id,
             name,
             key,
+            instance_id,
             ..
         } => {
             if key != state.config.shared_key {
                 let _ = sink.send(Message::Close(None)).await;
                 anyhow::bail!("rejected device `{device_id}`: bad shared key");
             }
-            (device_id, name)
+            (device_id, name, instance_id)
         }
         other => anyhow::bail!("expected hello, got {other:?}"),
+    };
+
+    // Tell a plain reconnect (same app process — Doze/WiFi blip) from an app relaunch (crash or
+    // restart, a *new* process) via the per-launch instance_id: a changed value = relaunched.
+    use std::sync::atomic::Ordering::SeqCst;
+    let relaunched = {
+        let mut instances = state.instances.lock().unwrap();
+        let changed = is_relaunch(&instance_id, instances.get(&device_id).map(String::as_str));
+        instances.insert(device_id.clone(), instance_id.clone());
+        changed
+    };
+    // A relaunch can't be resumed: abort the in-flight job (all job types observe `job_abort`) and
+    // drop the stale call state (the app re-reports its real state after connecting). A plain
+    // reconnect instead PRESERVES the current call, so the running job's hangup / call-ended / wait
+    // logic doesn't misread the blip as "the call ended".
+    let aborting = relaunched && state.card_busy.load(SeqCst);
+    if aborting {
+        tracing::warn!(%device_id, "app relaunched mid-job — aborting and cleaning up the job");
+        state.job_abort.store(true, SeqCst);
+        state.emit(format!("{device_id} app relaunched → job aborted"));
+    }
+    let prior_call = if relaunched {
+        None
+    } else {
+        state.registry.lock().unwrap().get(&device_id).and_then(|d| d.current_call.clone())
     };
 
     // Register: command channel + device record. `gen` identifies *this* socket so a later
@@ -97,9 +129,15 @@ async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) ->
         name,
         addr: Some(peer.ip().to_string()),
         last_seen_ms: now_ms(),
-        current_call: None,
+        current_call: prior_call,
     });
     tracing::info!(%device_id, "phone connected");
+
+    // Now that the new socket is registered, best-effort hang up any call the aborted job left
+    // behind (usually already gone with the crashed app — a harmless no-op if so).
+    if aborting {
+        let _ = state.hub.fire(&device_id, Action::Hangup { call_id: None }).await;
+    }
 
     // Writer task: hub command channel -> WS sink.
     let writer = tokio::spawn(async move {
@@ -342,10 +380,15 @@ async fn trigger_autoanswer(
             }
         };
         // Auto-answer jobs aren't cancelable from the CLI (no `dialf run` client); pass fresh
-        // always-false flags rather than the daemon's shared ones.
+        // always-false cancel/force. But they DO share `job_abort` so an app relaunch aborts them
+        // too. Clear any stale abort from a prior job first.
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let force = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        match daemon::run_job_on_device(&state, device_id.clone(), job, true, cancel, force).await {
+        state.job_abort.store(false, std::sync::atomic::Ordering::SeqCst);
+        let abort = state.job_abort.clone();
+        match daemon::run_job_on_device(&state, device_id.clone(), job, true, cancel, force, abort)
+            .await
+        {
             Ok((outcomes, _)) => {
                 match outcomes
                     .iter()
@@ -367,4 +410,16 @@ async fn trigger_autoanswer(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relaunch_only_on_changed_instance_id() {
+        assert!(is_relaunch("b", Some("a"))); // changed -> app relaunched
+        assert!(!is_relaunch("a", Some("a"))); // unchanged -> reconnect
+        assert!(!is_relaunch("a", None)); // first sighting -> reconnect
+    }
 }

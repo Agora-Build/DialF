@@ -66,6 +66,15 @@ pub struct DaemonState {
     /// graceful `job_cancel` — also interrupts the current `play` (kills the playback child) and
     /// `wait`. Reset with `job_cancel` when a `job.run` starts.
     pub job_force: Arc<AtomicBool>,
+    /// Set when the driving phone app relaunches (a changed `instance_id`) mid-job — the job can't
+    /// continue meaningfully, so it's aborted and cleaned up. Observed by *every* running job
+    /// (`dialf run` and auto-answer), unlike `job_cancel`/`job_force` which are `dialf run` only.
+    /// Reset when a job starts.
+    pub job_abort: Arc<AtomicBool>,
+    /// Last `instance_id` seen per device (the app's per-launch nonce). A different value on a new
+    /// connection means the app relaunched (vs a plain reconnect). `None`-reporting apps never
+    /// trigger an abort.
+    pub instances: Arc<Mutex<HashMap<String, String>>>,
     /// Live auto-answer overrides (number → handler), keyed by phone number.
     pub overrides: Arc<Mutex<HashMap<String, AutoanswerOverride>>>,
     /// Monotonic source of override registration tokens.
@@ -404,6 +413,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         serve_busy: Arc::new(AtomicBool::new(false)),
         job_cancel: Arc::new(AtomicBool::new(false)),
         job_force: Arc::new(AtomicBool::new(false)),
+        job_abort: Arc::new(AtomicBool::new(false)),
+        instances: Arc::new(Mutex::new(HashMap::new())),
         overrides: Arc::new(Mutex::new(HashMap::new())),
         serve_token: Arc::new(AtomicU64::new(1)),
         events,
@@ -653,10 +664,11 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             let _card = state
                 .acquire_card()
                 .context("phone busy: a call or recording is already in progress")?;
-            // Fresh run: clear any stale cancel/force from a prior job so this one isn't killed
-            // at once.
+            // Fresh run: clear any stale cancel/force/abort from a prior job so this one isn't
+            // killed at once.
             state.job_cancel.store(false, Ordering::SeqCst);
             state.job_force.store(false, Ordering::SeqCst);
+            state.job_abort.store(false, Ordering::SeqCst);
             // `dialf run` is outbound/one-shot: the job owns call setup (call.dial, etc.).
             let (outcomes, recording) = run_job_on_device(
                 state,
@@ -665,6 +677,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 false,
                 state.job_cancel.clone(),
                 state.job_force.clone(),
+                state.job_abort.clone(),
             )
             .await?;
             let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
@@ -756,6 +769,7 @@ pub async fn run_job_on_device(
     inbound: bool,
     cancel: Arc<AtomicBool>,
     force: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
     // A relative `record_dir` resolves against the config file's dir (like autoanswer job paths),
@@ -786,7 +800,7 @@ pub async fn run_job_on_device(
             None => None,
         };
         let mut io = PhoneJobIo::new(
-            hub, engine, rt, registry, device_id, session, inbound, cancel, force,
+            hub, engine, rt, registry, device_id, session, inbound, cancel, force, abort,
         );
         let run = runner::run_job(&job, &mut io);
         // Finalize the recording BEFORE propagating a run error, so a cancelled/force-cancelled
@@ -989,6 +1003,8 @@ mod tests {
             serve_busy: Arc::new(AtomicBool::new(false)),
             job_cancel: Arc::new(AtomicBool::new(false)),
             job_force: Arc::new(AtomicBool::new(false)),
+            job_abort: Arc::new(AtomicBool::new(false)),
+            instances: Arc::new(Mutex::new(HashMap::new())),
             overrides: Arc::new(Mutex::new(HashMap::new())),
             serve_token: Arc::new(AtomicU64::new(1)),
             events,
