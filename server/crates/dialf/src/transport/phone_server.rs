@@ -406,9 +406,10 @@ async fn trigger_autoanswer(
         let job = match daemon::load_job_file(&path) {
             Ok(j) => j,
             Err(e) => {
-                // Call is answered; we just have no script to run.
+                // Call is answered but we have no script to run — hang up, don't strand the caller.
                 tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed (call answered, no script)");
-                state.emit(format!("{n} → job load failed: {e:#} (call answered, no script)"));
+                state.emit(format!("{n} → job load failed: {e:#}"));
+                let _ = state.hub.fire(&device_id, Action::Hangup { call_id: None }).await;
                 return;
             }
         };
@@ -438,8 +439,13 @@ async fn trigger_autoanswer(
                 }
             }
             Err(e) => {
-                tracing::error!(error = %format!("{e:#}"), "auto-answer job failed");
+                // The job failed (e.g. no mic permission / capture unavailable, a bad prompt path).
+                // Hang up so the caller isn't stuck in a silent answered call, then keep running and
+                // wait for the next call — don't take the whole daemon down over one bad call.
+                tracing::error!(error = %format!("{e:#}"), "auto-answer job failed — hanging up");
                 state.emit(format!("{n} → job error: {e:#}"));
+                let _ = state.hub.fire(&device_id, Action::Hangup { call_id: None }).await;
+                state.emit("waiting for the next call".to_string());
             }
         }
     });
