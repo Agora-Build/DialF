@@ -268,7 +268,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "dialf"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "ten-vad-sys"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
  "cc",
  "hound",

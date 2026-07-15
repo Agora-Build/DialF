@@ -33,8 +33,8 @@ pub async fn reap_stale(state: DaemonState) -> anyhow::Result<()> {
         let cutoff = now_ms() - STALE_AFTER_MS;
         let reaped = state.registry.lock().unwrap().reap_older_than(cutoff);
         for id in reaped {
-            tracing::warn!(device = %id, "reaping stale phone: no heartbeat in ~{}s", STALE_AFTER_MS / 1000);
             state.hub.drop_device(&id);
+            // emit() already logs this (target "event") — no separate warn.
             state.emit(format!("device {id} dropped (stale connection — no heartbeat)"));
         }
     }
@@ -157,10 +157,7 @@ async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) ->
     // instead of lingering half-open (which is how connections used to pile up).
     let result = tokio::select! {
         r = reader_loop(&mut read, &state, &device_id) => r,
-        _ = cancel.notified() => {
-            tracing::info!(%device_id, gen, "connection superseded by a newer one; closing socket");
-            Ok(())
-        }
+        _ = cancel.notified() => Ok(()), // superseded — logged once by the cleanup below
     };
 
     // Cleanup — but only drop the device if we're still the current connection. If a newer
