@@ -1,9 +1,12 @@
 package build.agora.dialf_phone
 
 import android.content.Context
+import android.content.Intent
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
+import android.util.Log
+import androidx.core.content.ContextCompat
 
 /**
  * Bound by the system while this app is the default dialer. Tracks each [Call] in [Dialf],
@@ -13,6 +16,8 @@ import android.telecom.InCallService
 class DialfInCallService : InCallService() {
 
     companion object {
+        private const val TAG = "DialfInCall"
+
         /** Live instance, so the UI can re-apply the audio route on an active call. */
         @Volatile
         var instance: DialfInCallService? = null
@@ -43,7 +48,7 @@ class DialfInCallService : InCallService() {
                 Dialf.emitCallState(c)
                 // A call that rings after being added (some devices add it before RINGING): make
                 // sure the dialfd link is alive so the daemon hears it and can auto-answer.
-                if (state == Call.STATE_RINGING) ConnForegroundService.onIncomingCall()
+                if (state == Call.STATE_RINGING) ensureControlPlaneForIncomingCall()
                 if (state == Call.STATE_ACTIVE || state == Call.STATE_DIALING) routeForCall()
             }
         }
@@ -55,8 +60,28 @@ class DialfInCallService : InCallService() {
         // An inbound call rings even while the phone is dozing, when the dialfd socket may be stale.
         // Nudge the connection service to verify/rebuild the link so the ringing call is reported
         // (and can be auto-answered). The screen need not turn on — only the CPU, which is up now.
-        if (call.state == Call.STATE_RINGING) ConnForegroundService.onIncomingCall()
+        if (call.state == Call.STATE_RINGING) ensureControlPlaneForIncomingCall()
         routeForCall()
+    }
+
+    /**
+     * Incoming calls are delivered to the InCallService even if Android killed our foreground
+     * connection service. Restart it first, then nudge any live instance to verify/rebuild the
+     * dialfd link; onOpen will re-report the tracked ringing call if the initial event was lost.
+     */
+    private fun ensureControlPlaneForIncomingCall() {
+        val prefs = getSharedPreferences(ConnForegroundService.PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean("enabled", false)) {
+            try {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, ConnForegroundService::class.java),
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "incoming ring: failed to start control-plane service", e)
+            }
+        }
+        ConnForegroundService.onIncomingCall()
     }
 
     /** Route call audio to the wired headset bridge by default (toggleable in the UI). */
