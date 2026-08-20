@@ -762,6 +762,149 @@ mod tests {
     }
 
     #[test]
+    fn export_prefers_folder_config_and_skips_stale_zip_inside_dir() {
+        let root = tempdir("folder-config");
+        let proj = make_project(&root);
+        // The folder carries its own config (answer-only entry included) — it wins over the
+        // default config path, and the generated bundle config replaces the folder's copy.
+        write(
+            &proj.join("config.yaml"),
+            "shared_key: local\nautoanswer:\n  \"+15551234\": job.yaml\n  \"+15559876\":\n",
+        );
+        // A stale zip from a previous export sits inside the folder being exported.
+        let zip = proj.join("myEval.dialf.zip");
+        write(&zip, "stale");
+        let report = export(&proj, Some(zip.clone()), None).unwrap();
+
+        let names: Vec<&str> = report.entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"myEval.dialf.zip"), "{names:?}");
+        assert_eq!(names.iter().filter(|n| **n == "config.yaml").count(), 1);
+
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut text = String::new();
+        za.by_name("config.yaml").unwrap().read_to_string(&mut text).unwrap();
+        let cfg: Config = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(cfg.shared_key, "local");
+        assert_eq!(cfg.autoanswer.get("+15551234").unwrap().as_deref(), Some("job.yaml"));
+        // Answer-only entries survive untouched.
+        assert_eq!(cfg.autoanswer.get("+15559876"), Some(&None));
+    }
+
+    #[test]
+    fn export_preserves_intree_relative_refs_and_comments() {
+        let root = tempdir("intree-rel");
+        let proj = make_project(&root);
+        // A nested script escaping its dir with `..` but staying inside the folder: the same
+        // relative relationship holds in the zip, so the file ships byte-identical.
+        let script = "# keep this comment\n- type: audio.play\n  file: ../samples/prompt.wav\n";
+        write(&proj.join("scripts/greet.yaml"), script);
+        write(&root.join("cfg/config.yaml"), "shared_key: k\n");
+        let zip = root.join("out.zip");
+        export(&proj, Some(zip.clone()), Some(root.join("cfg/config.yaml"))).unwrap();
+
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut text = String::new();
+        za.by_name("scripts/greet.yaml").unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, script);
+    }
+
+    #[test]
+    fn export_rewrites_absolute_intree_ref_to_relative() {
+        let root = tempdir("abs-intree");
+        let proj = make_project(&root);
+        // A script pinned to an absolute path inside the folder would break on another
+        // machine — it gets rewritten relative (comments dropped for that file).
+        write(
+            &proj.join("pinned.yaml"),
+            &format!(
+                "- type: audio.play\n  file: {}/samples/prompt.wav\n",
+                proj.canonicalize().unwrap().display()
+            ),
+        );
+        write(&root.join("cfg/config.yaml"), "shared_key: k\n");
+        let zip = root.join("out.zip");
+        let report =
+            export(&proj, Some(zip.clone()), Some(root.join("cfg/config.yaml"))).unwrap();
+
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut text = String::new();
+        za.by_name("pinned.yaml").unwrap().read_to_string(&mut text).unwrap();
+        let job = schema::parse(&text).unwrap();
+        match &job[0].kind {
+            StepKind::AudioPlay { file } => assert_eq!(file, "samples/prompt.wav"),
+            other => panic!("unexpected step {other:?}"),
+        }
+        assert!(report.warnings.iter().any(|w| w.contains("rewritten")), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn import_accepts_nested_scripts_and_warns_on_missing_refs() {
+        let root = tempdir("import-warn");
+        let bundle = root.join("bundle");
+        // Config points at an absolute job that doesn't exist on "this machine", plus a
+        // pinned capture tool that isn't installed.
+        write(
+            &bundle.join("config.yaml"),
+            "shared_key: k\nautoanswer:\n  \"+15551234\": /gone/machine1/job.yaml\naudio:\n  capture_cmd: [\"/opt/nowhere/sox\", \"-q\"]\n",
+        );
+        // The only script lives in a subfolder and references a sample that's missing.
+        write(
+            &bundle.join("scripts/inbound.yaml"),
+            "- type: audio.play\n  file: ../samples/missing.wav\n",
+        );
+
+        let dest = root.join("cfg/config.yaml");
+        let report = import_to(&bundle, &dest, false).unwrap();
+        assert_eq!(report.scripts.len(), 1);
+        assert!(report.warnings.iter().any(|w| w.contains("missing.wav")), "{:?}", report.warnings);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("/gone/machine1/job.yaml")),
+            "{:?}",
+            report.warnings
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("/opt/nowhere/sox")),
+            "{:?}",
+            report.warnings
+        );
+        // The absolute (already machine-specific) autoanswer path is left as-is.
+        let cfg: Config = serde_yaml::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(
+            cfg.autoanswer.get("+15551234").unwrap().as_deref(),
+            Some("/gone/machine1/job.yaml")
+        );
+    }
+
+    #[test]
+    fn imported_bundle_jobs_load_and_resolve() {
+        // The practical end state: after export -> unzip -> import, the daemon must be able
+        // to load the job via the installed config's path and find its samples.
+        let root = tempdir("loadable");
+        let proj = make_project(&root);
+        write(
+            &root.join("cfg/config.yaml"),
+            &format!("autoanswer:\n  \"+15551234\": {}/job.yaml\n", proj.display()),
+        );
+        let zip = root.join("bundle.zip");
+        export(&proj, Some(zip.clone()), Some(root.join("cfg/config.yaml"))).unwrap();
+
+        let extracted = root.join("machine2");
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        za.extract(&extracted).unwrap();
+        let dest = root.join("dest/config.yaml");
+        import_to(&extracted, &dest, false).unwrap();
+
+        let cfg: Config = serde_yaml::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let job_path = cfg.autoanswer.get("+15551234").unwrap().clone().unwrap();
+        // What the daemon does on an inbound call: load the job, resolve audio refs.
+        let steps = crate::daemon::load_job_file(&job_path).unwrap();
+        let StepKind::AudioPlay { file } = &steps[0].kind else {
+            panic!("expected audio.play first");
+        };
+        assert!(Path::new(file).is_file(), "sample not resolvable: {file}");
+    }
+
+    #[test]
     fn relative_zip_paths() {
         assert_eq!(relative_zip_path("", "samples/x.wav"), "samples/x.wav");
         assert_eq!(relative_zip_path("scripts", "samples/x.wav"), "../samples/x.wav");
