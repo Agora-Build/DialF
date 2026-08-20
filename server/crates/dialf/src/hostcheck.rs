@@ -279,9 +279,19 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
     }
     writeln!(p.out, "{key} tool {argv0} not found on this machine")?;
     if offer_install(p)? {
-        if let Some(found) = base.as_deref().and_then(|b| which::which(b).ok()) {
-            return Ok(Some(found.to_string_lossy().into_owned()));
+        // Re-verify after the install and say so: the pinned path itself may now exist
+        // (brew lands sox exactly at /opt/homebrew/bin/sox); otherwise point argv0 at
+        // wherever the tool actually landed.
+        if path.is_absolute() && path.exists() {
+            writeln!(p.out, "{key} tool {argv0} ✓ (installed)")?;
+            return Ok(None);
         }
+        if let Some(found) = base.as_deref().and_then(|b| which::which(b).ok()) {
+            let found = found.to_string_lossy().into_owned();
+            writeln!(p.out, "{key} tool installed at {found} ✓")?;
+            return Ok(Some(found));
+        }
+        writeln!(p.out, "{key} tool still not found after the install — fix the config manually")?;
     }
     Ok(None)
 }
