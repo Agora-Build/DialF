@@ -132,6 +132,13 @@ impl JobIo for PhoneJobIo {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut seen = false;
         loop {
+            // Cancelled (any Ctrl+C level / app relaunch) while the far end is still ringing:
+            // nothing here is worth letting finish — abandon the call. Hang up explicitly,
+            // because the runner skips the job's own call.hangup once a job is cancelled.
+            if JobIo::cancelled(self) {
+                let _ = self.hangup();
+                anyhow::bail!("cancelled while waiting for the call to be answered");
+            }
             let state = self
                 .registry
                 .lock()
@@ -251,5 +258,33 @@ mod tests {
         assert!(!call_ended_decision(true, &mut seen, Some(CallState::Active)));
         assert!(seen);
         assert!(call_ended_decision(true, &mut seen, None));
+    }
+
+    #[test]
+    fn wait_for_answer_interrupted_by_cancel() {
+        // A cancel (any Ctrl+C level) must break the ringing-wait immediately — not sit out
+        // the full timeout_ms — and report it as a cancellation.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cancel = Arc::new(AtomicBool::new(true)); // cancelled before the wait starts
+        let mut io = PhoneJobIo::new(
+            Arc::new(Hub::new()),
+            Arc::new(AudioEngine::new(crate::config::AudioConfig::default())),
+            rt.handle().clone(),
+            Arc::new(Mutex::new(Registry::new())),
+            "no-such-phone",
+            None,
+            false,
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let start = Instant::now();
+        let err = io.wait_for_answer(30_000).unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "should not wait out the timeout, took {:?}",
+            start.elapsed()
+        );
     }
 }
