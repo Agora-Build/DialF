@@ -253,7 +253,8 @@ pub(crate) fn run_with(
         let (capture, _) = crate::audio::tool_detect::present_tools();
         if capture.is_empty() {
             writeln!(p.out, "no audio capture tool found (sox/ffmpeg{})", if cfg!(target_os = "macos") { "" } else { "/arecord" })?;
-            offer_install(p)?;
+            // The platform's preferred auto-detected tool: sox on macOS, ALSA on Linux.
+            offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
         }
     }
     Ok(())
@@ -278,7 +279,11 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
         return Ok(None);
     }
     writeln!(p.out, "{key} tool {argv0} not found on this machine")?;
-    if offer_install(p)? {
+    let Some(pkg) = base.as_deref().and_then(package_for) else {
+        writeln!(p.out, "no known package provides `{argv0}` — install it manually")?;
+        return Ok(None);
+    };
+    if offer_install(p, pkg)? {
         // Re-verify after the install and say so: the pinned path itself may now exist
         // (brew lands sox exactly at /opt/homebrew/bin/sox); otherwise point argv0 at
         // wherever the tool actually landed.
@@ -296,17 +301,28 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
     Ok(None)
 }
 
-/// Offer to install sox (the tool every platform supports) via the native package manager.
+/// Which package provides `tool` on this platform, for the install offer. `None` = not
+/// installable via a package manager (a custom script, or a macOS builtin like afplay).
+fn package_for(tool: &str) -> Option<&'static str> {
+    match tool {
+        "sox" | "play" | "rec" => Some("sox"),
+        "ffmpeg" | "ffplay" => Some("ffmpeg"),
+        "arecord" | "aplay" => (!cfg!(target_os = "macos")).then_some("alsa-utils"),
+        _ => None,
+    }
+}
+
+/// Offer to install `pkg` via the native package manager.
 /// Returns true if an install command ran successfully.
-fn offer_install(p: &mut Prompter<'_>) -> Result<bool> {
+fn offer_install(p: &mut Prompter<'_>, pkg: &str) -> Result<bool> {
     let cmd: Option<Vec<&str>> = if cfg!(target_os = "macos") {
-        which::which("brew").is_ok().then_some(vec!["brew", "install", "sox"])
+        which::which("brew").is_ok().then_some(vec!["brew", "install", pkg])
     } else {
         [
-            vec!["apt-get", "install", "-y", "sox", "alsa-utils"],
-            vec!["dnf", "install", "-y", "sox", "alsa-utils"],
-            vec!["pacman", "-S", "--noconfirm", "sox", "alsa-utils"],
-            vec!["zypper", "install", "-y", "sox", "alsa-utils"],
+            vec!["apt-get", "install", "-y", pkg],
+            vec!["dnf", "install", "-y", pkg],
+            vec!["pacman", "-S", "--noconfirm", pkg],
+            vec!["zypper", "install", "-y", pkg],
         ]
         .into_iter()
         .find(|c| which::which(c[0]).is_ok())
@@ -323,9 +339,9 @@ fn offer_install(p: &mut Prompter<'_>) -> Result<bool> {
             p.out,
             "{}",
             if cfg!(target_os = "macos") {
-                "install it manually (e.g. install Homebrew, then: brew install sox)"
+                format!("install it manually (e.g. install Homebrew, then: brew install {pkg})")
             } else {
-                "install it manually with your distro's package manager (package: sox)"
+                format!("install it manually with your distro's package manager (package: {pkg})")
             }
         )?;
         return Ok(false);
@@ -420,6 +436,21 @@ mod tests {
         assert_eq!(devs[1].label, "USB Audio Device (card 1)");
         assert!(devs[1].input && devs[1].output);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn package_for_maps_tools_to_their_packages() {
+        assert_eq!(package_for("sox"), Some("sox"));
+        assert_eq!(package_for("play"), Some("sox"));
+        assert_eq!(package_for("ffmpeg"), Some("ffmpeg"));
+        assert_eq!(package_for("ffplay"), Some("ffmpeg"));
+        assert_eq!(package_for("afplay"), None); // macOS builtin — not installable
+        assert_eq!(package_for("my-custom-capture.sh"), None);
+        if cfg!(target_os = "macos") {
+            assert_eq!(package_for("arecord"), None);
+        } else {
+            assert_eq!(package_for("arecord"), Some("alsa-utils"));
+        }
     }
 
     #[test]
