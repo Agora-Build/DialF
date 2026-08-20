@@ -4,9 +4,9 @@
 //! dir), and the daemon config (`~/.config/dialf/config.yaml`). `export` zips the folder's
 //! scripts and samples together with the config — recordings excluded — rewriting the
 //! config's paths to be bundle-relative so the zip is self-contained. `import` takes an
-//! already-extracted bundle folder, installs its `config.yaml` to the default config path
-//! with paths rewritten to absolute paths under that folder, and leaves the folder in place
-//! as the live content location. (Importing straight from a `.zip` is future work.)
+//! bundle folder — or a bundle `.zip`, extracted flat into the current folder first —
+//! installs its `config.yaml` to the default config path with paths rewritten to absolute
+//! paths under that folder, and leaves the folder in place as the live content location.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -466,10 +466,13 @@ fn import_impl(
     override_existing: bool,
     interactive: bool,
 ) -> Result<ImportReport> {
+    // A .zip is extracted FLAT into the current folder (config.yaml's parent prefix inside
+    // the zip, if any, is stripped) — the current folder then IS the bundle folder.
     if folder.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
-        bail!(
-            "direct .zip import isn't supported yet — unzip it first, then: dialf import <folder>"
-        );
+        let workspace = std::env::current_dir()?;
+        let n = extract_bundle_zip(folder, &workspace)?;
+        eprintln!("extracted {n} file(s) from {} into {}", folder.display(), workspace.display());
+        return import_impl(&workspace, dest, override_existing, interactive);
     }
     let folder = folder
         .canonicalize()
@@ -649,6 +652,100 @@ fn import_impl(
         scripts,
         warnings,
     })
+}
+
+/// Extract a bundle zip FLAT into `dest`: the parent prefix of the (shallowest) config.yaml
+/// inside the zip is stripped, so `myEval/config.yaml` + `myEval/samples/x.wav` land as
+/// `config.yaml` + `samples/x.wav`. Refuses to overwrite existing files, rejects entries
+/// that would escape `dest` (zip-slip), and skips archiver junk (`__MACOSX/`, `.DS_Store`).
+/// Returns the number of files written.
+pub(crate) fn extract_bundle_zip(zip_path: &Path, dest: &Path) -> Result<usize> {
+    let file = std::fs::File::open(zip_path)
+        .with_context(|| format!("open {}", zip_path.display()))?;
+    let mut za = zip::ZipArchive::new(file)
+        .with_context(|| format!("read zip {}", zip_path.display()))?;
+
+    // The strip prefix = the parent of the shallowest config.yaml in the archive.
+    let mut prefix: Option<String> = None;
+    for i in 0..za.len() {
+        // by_index_raw: entry names are readable without decrypting, so a password-protected
+        // zip can be reported clearly instead of failing mid-read with a cryptic error.
+        let entry = za.by_index_raw(i)?;
+        if entry.encrypted() {
+            bail!(
+                "{} is password-protected — dialf can't decrypt zips; unzip it yourself, \
+                 then: dialf import <folder>",
+                zip_path.display()
+            );
+        }
+        let name = entry.name().to_string();
+        if is_zip_junk(&name) {
+            continue;
+        }
+        let (parent, base) = match name.rsplit_once('/') {
+            Some((p, b)) => (format!("{p}/"), b.to_string()),
+            None => (String::new(), name),
+        };
+        if base == "config.yaml"
+            && prefix
+                .as_ref()
+                .map_or(true, |best| parent.matches('/').count() < best.matches('/').count())
+        {
+            prefix = Some(parent);
+        }
+    }
+    let prefix = prefix
+        .ok_or_else(|| anyhow::anyhow!("not a dialf bundle: no config.yaml in {}", zip_path.display()))?;
+
+    // Plan all targets first so a conflict aborts before anything is written.
+    let mut plan: Vec<(usize, PathBuf)> = Vec::new();
+    let mut conflicts = Vec::new();
+    for i in 0..za.len() {
+        let entry = za.by_index(i)?;
+        let name = entry.name().to_string();
+        if entry.is_dir() || is_zip_junk(&name) {
+            continue;
+        }
+        let Some(rel) = name.strip_prefix(&prefix) else {
+            continue; // outside the bundle folder inside the zip
+        };
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path.components().any(|c| !matches!(c, Component::Normal(_)))
+        {
+            bail!("refusing zip entry with an unsafe path: {name}");
+        }
+        let target = dest.join(rel_path);
+        if target.exists() {
+            conflicts.push(rel.to_string());
+        }
+        plan.push((i, target));
+    }
+    if !conflicts.is_empty() {
+        bail!(
+            "won't overwrite {} existing file(s) in {} (first: {}) — extract in an empty \
+             folder, or remove them first",
+            conflicts.len(),
+            dest.display(),
+            conflicts[0]
+        );
+    }
+    for (i, target) in &plan {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut entry = za.by_index(*i)?;
+        let mut out = std::fs::File::create(target)
+            .with_context(|| format!("write {}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)?;
+    }
+    Ok(plan.len())
+}
+
+/// Archiver noise that must not become part of the bundle.
+fn is_zip_junk(name: &str) -> bool {
+    name.starts_with("__MACOSX/")
+        || name.rsplit('/').next().is_some_and(|b| b == ".DS_Store" || b == "Thumbs.db")
 }
 
 /// Interactive gate for replacing an existing config: y/N prompt, defaulting to No.
@@ -906,13 +1003,13 @@ mod tests {
     }
 
     #[test]
-    fn import_refuses_zip_and_invalid_bundles() {
+    fn import_refuses_invalid_bundles() {
         let root = tempdir("refuse");
-        // A .zip argument gets the "unzip first" error.
+        // A .zip argument that doesn't exist errors on open.
         let err = import_to(&root.join("bundle.zip"), &root.join("c.yaml"), false)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unzip it first"), "{err}");
+        assert!(err.contains("open"), "{err}");
 
         // No config.yaml.
         let empty = root.join("empty");
@@ -1250,6 +1347,91 @@ mod tests {
             installed.contains(&format!("record_dir: \"{}/recordings\"", dir.display())),
             "{installed}"
         );
+    }
+
+    fn make_zip(path: &Path, entries: &[(&str, &str)]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            zw.start_file(*name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, content.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn zip_extracts_flat_stripping_config_parent() {
+        // A zip of a folder (`zip -r myEval.zip myEval/` / Finder compress): the config's
+        // parent prefix is stripped so the files land flat, junk skipped.
+        let root = tempdir("zip-flat");
+        let zip = root.join("myEval.dialf.zip");
+        make_zip(
+            &zip,
+            &[
+                ("myEval/config.yaml", "shared_key: k\n"),
+                ("myEval/job.yaml", "- type: wait\n  ms: 1\n"),
+                ("myEval/samples/p.wav", "RIFFx"),
+                ("__MACOSX/myEval/._config.yaml", "junk"),
+                ("myEval/.DS_Store", "junk"),
+            ],
+        );
+        let ws = root.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let n = extract_bundle_zip(&zip, &ws).unwrap();
+        assert_eq!(n, 3);
+        assert!(ws.join("config.yaml").is_file());
+        assert!(ws.join("samples/p.wav").is_file());
+        assert!(!ws.join("myEval").exists(), "prefix not stripped");
+        assert!(!ws.join(".DS_Store").exists());
+
+        // And the extracted workspace imports as a normal bundle.
+        let report = import_to(&ws, &root.join("cfg/config.yaml"), false).unwrap();
+        assert_eq!(report.scripts.len(), 1);
+    }
+
+    #[test]
+    fn zip_with_root_config_extracts_as_is() {
+        // Our own `dialf export` zips have config.yaml at the root — nothing to strip.
+        let root = tempdir("zip-root");
+        let zip = root.join("b.zip");
+        make_zip(&zip, &[("config.yaml", "shared_key: k\n"), ("job.yaml", "- type: wait\n  ms: 1\n")]);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        assert_eq!(extract_bundle_zip(&zip, &ws).unwrap(), 2);
+        assert!(ws.join("config.yaml").is_file());
+        assert!(ws.join("job.yaml").is_file());
+    }
+
+    #[test]
+    fn zip_extraction_rejects_escapes_and_conflicts() {
+        let root = tempdir("zip-guard");
+        // Zip-slip: an entry escaping the workspace is refused outright.
+        let evil = root.join("evil.zip");
+        make_zip(&evil, &[("config.yaml", "shared_key: k\n"), ("../outside.txt", "x")]);
+        let ws = root.join("ws1");
+        std::fs::create_dir_all(&ws).unwrap();
+        let err = extract_bundle_zip(&evil, &ws).unwrap_err().to_string();
+        assert!(err.contains("unsafe path"), "{err}");
+        assert!(!root.join("outside.txt").exists());
+
+        // Existing files are never overwritten — abort before writing anything.
+        let zip = root.join("b.zip");
+        make_zip(&zip, &[("config.yaml", "shared_key: k\n"), ("job.yaml", "- type: wait\n  ms: 1\n")]);
+        let ws2 = root.join("ws2");
+        write(&ws2.join("job.yaml"), "precious local edits");
+        let err = extract_bundle_zip(&zip, &ws2).unwrap_err().to_string();
+        assert!(err.contains("won't overwrite"), "{err}");
+        assert_eq!(std::fs::read_to_string(ws2.join("job.yaml")).unwrap(), "precious local edits");
+        assert!(!ws2.join("config.yaml").exists(), "nothing should be written on conflict");
+
+        // No config.yaml anywhere in the zip -> not a bundle.
+        let nocfg = root.join("nocfg.zip");
+        make_zip(&nocfg, &[("job.yaml", "- type: wait\n  ms: 1\n")]);
+        let ws3 = root.join("ws3");
+        std::fs::create_dir_all(&ws3).unwrap();
+        let err = extract_bundle_zip(&nocfg, &ws3).unwrap_err().to_string();
+        assert!(err.contains("no config.yaml"), "{err}");
     }
 
     #[test]

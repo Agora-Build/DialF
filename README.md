@@ -337,9 +337,11 @@ means a bundle can also be activated **without `dialf import`**: just unzip its 
 straight into `~/.config/dialf/` and restart dialfd — everything resolves relative to the
 config's own directory.
 
-`import` takes an **unzipped** bundle folder (direct `.zip` import isn't supported yet),
-validates it, and installs its `config.yaml` to the default config path with paths rewritten
-to point at that folder — the folder stays in place as the live setup. An existing config is
+`import` takes a bundle folder **or a bundle `.zip`** — a zip is extracted **flat into the
+current folder** (the zip's own top-level folder, if any, is stripped; existing files are
+never overwritten; password-protected zips are refused with instructions). It validates the
+bundle and installs its `config.yaml` to the default config path with paths rewritten to
+point at that folder — the folder stays in place as the live setup. An existing config is
 only replaced after a `[y/N]` confirmation — Enter keeps it — or pass `--override` to replace
 directly without the prompt. Either way the old config is kept as a timestamped backup
 (`config.yaml.bak.YYYYMMDD-HHMMSS`) — earlier backups are never overwritten. It then restarts the installed dialfd service (or tells you to restart a

@@ -97,7 +97,8 @@ enum Command {
     /// folder), precheck this machine's audio devices/tools (interactive fixes on a
     /// terminal), and restart dialfd so it takes effect.
     Import {
-        /// The bundle folder (an unzipped `dialf export` bundle).
+        /// A bundle folder, or a bundle .zip (extracted flat into the current folder,
+        /// stripping the zip's own top-level folder if it has one).
         folder: PathBuf,
         /// Replace an existing config.yaml without prompting (a .bak backup is still kept).
         #[arg(long = "override")]
