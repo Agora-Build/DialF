@@ -301,7 +301,7 @@ fn offer_install(p: &mut Prompter<'_>) -> Result<bool> {
         .into_iter()
         .find(|c| which::which(c[0]).is_ok())
         .map(|mut c| {
-            // Package managers need root; the daemon user usually isn't.
+            // Package managers need root; the user running the import usually isn't.
             if unsafe { libc::getuid() } != 0 {
                 c.insert(0, "sudo");
             }

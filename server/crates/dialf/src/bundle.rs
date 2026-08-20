@@ -948,7 +948,8 @@ mod tests {
         assert!(std::fs::read_to_string(&bak).unwrap().contains("old"));
         assert!(std::fs::read_to_string(&dest).unwrap().contains("new"));
 
-        // A further import must NOT clobber the original backup — it gets a numbered name.
+        // A further import must NOT clobber the original backup — it gets its own name
+        // (same-second imports are disambiguated with a counter suffix).
         let report2 = import_to(&bundle, &dest, true).unwrap();
         let bak2 = report2.backup_path.unwrap();
         assert_ne!(bak, bak2);
