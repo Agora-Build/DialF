@@ -485,7 +485,7 @@ fn import_impl(
     let cfg_file = folder.join("config.yaml");
     if !cfg_file.is_file() {
         bail!(
-            "not a dialf bundle: {} has no config.yaml",
+            "not a valid dialf bundle: {} has no config.yaml",
             folder.display()
         );
     }
@@ -522,7 +522,7 @@ fn import_impl(
     }
     if scripts.is_empty() {
         bail!(
-            "not a dialf bundle: {} has no job script (no YAML parsed as a job)",
+            "not a valid dialf bundle: {} has no job script (no YAML parsed as a job)",
             folder.display()
         );
     }
@@ -695,7 +695,7 @@ pub(crate) fn extract_bundle_zip(zip_path: &Path, dest: &Path) -> Result<usize> 
         }
     }
     let prefix = prefix
-        .ok_or_else(|| anyhow::anyhow!("not a dialf bundle: no config.yaml in {}", zip_path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("not a valid dialf bundle: no config.yaml in {}", zip_path.display()))?;
 
     // Plan all targets first so a conflict aborts before anything is written.
     let mut plan: Vec<(usize, PathBuf)> = Vec::new();
