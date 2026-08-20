@@ -331,6 +331,12 @@ config.yaml (`--config` to pick another; a `config.yaml` inside the folder wins 
 are rewritten relative so the zip is self-contained; jobs/samples referenced from outside the
 folder are pulled in under `scripts/`/`samples/`.
 
+The bundled config stays byte-faithful to yours — same fields, order, quoting, and comments;
+only the path values are rewritten (relative, so the bundle is position-independent). That
+means a bundle can also be activated **without `dialf import`**: just unzip its contents
+straight into `~/.config/dialf/` and restart dialfd — everything resolves relative to the
+config's own directory.
+
 `import` takes an **unzipped** bundle folder (direct `.zip` import isn't supported yet),
 validates it, and installs its `config.yaml` to the default config path with paths rewritten
 to point at that folder — the folder stays in place as the live setup. An existing config is

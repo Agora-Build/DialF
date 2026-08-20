@@ -63,7 +63,8 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
         );
     }
     let config_path = config_path.canonicalize()?;
-    let cfg: Config = serde_yaml::from_str(&std::fs::read_to_string(&config_path)?)
+    let config_text = std::fs::read_to_string(&config_path)?;
+    let cfg: Config = serde_yaml::from_str(&config_text)
         .with_context(|| format!("parse config {}", config_path.display()))?;
     let config_dir = config_path.parent().map(Path::to_path_buf);
 
@@ -140,40 +141,56 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
     }
 
     // Config: rewrite autoanswer job paths bundle-relative (pulling out-of-tree jobs in),
-    // and point record_dir at a bundle-relative `recordings`.
-    let mut bundle_cfg = cfg.clone();
-    for (number, job) in bundle_cfg.autoanswer.iter_mut() {
-        let Some(path) = job else { continue };
-        let resolved = resolve_path_under(config_dir.as_deref(), Path::new(&*path));
-        let Ok(target) = resolved.canonicalize() else {
-            warnings.push(format!(
-                "config autoanswer {number}: job not found: {path} (kept as-is)"
-            ));
-            continue;
-        };
-        if target.starts_with(&dir) {
-            *path = zip_name(target.strip_prefix(&dir).unwrap());
-        } else {
-            let name = pull_external(&target, "scripts", &mut entries, &mut pulled);
-            // The pulled job's own audio refs must work from its new scripts/ home.
-            if let Some(job_steps) =
-                normalize_out_of_tree_job(&target, &name, &dir, &mut entries, &mut pulled)?
-            {
-                entries.insert(name.clone(), Src::Bytes(job_steps.into_bytes()));
+    // and point record_dir at a bundle-relative `recordings`. Edited as a YAML value tree,
+    // not re-serialized from the typed struct, so the bundled config keeps exactly the
+    // fields the user wrote (no injected defaults) in their original order — close enough
+    // to the original to drop straight into ~/.config/dialf/ and run.
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&config_text)?;
+    let mut edits: Vec<(String, String)> = Vec::new();
+    if let Some(map) = doc.get_mut("autoanswer").and_then(|v| v.as_mapping_mut()) {
+        for (k, v) in map.iter_mut() {
+            let number = k.as_str().unwrap_or("?").to_string();
+            let Some(path) = v.as_str().map(str::to_string) else {
+                continue; // null = answer-only
+            };
+            let resolved = resolve_path_under(config_dir.as_deref(), Path::new(&path));
+            let Ok(target) = resolved.canonicalize() else {
+                warnings.push(format!(
+                    "config autoanswer {number}: job not found: {path} (kept as-is)"
+                ));
+                continue;
+            };
+            let new = if target.starts_with(&dir) {
+                zip_name(target.strip_prefix(&dir).unwrap())
+            } else {
+                let name = pull_external(&target, "scripts", &mut entries, &mut pulled);
+                // The pulled job's own audio refs must work from its new scripts/ home.
+                if let Some(job_steps) =
+                    normalize_out_of_tree_job(&target, &name, &dir, &mut entries, &mut pulled)?
+                {
+                    entries.insert(name.clone(), Src::Bytes(job_steps.into_bytes()));
+                }
+                warnings.push(format!(
+                    "config autoanswer {number}: pulled out-of-tree job {} into the bundle as {name}",
+                    target.display()
+                ));
+                name
+            };
+            if new != path {
+                *v = new.clone().into();
+                edits.push((number, new));
             }
-            warnings.push(format!(
-                "config autoanswer {number}: pulled out-of-tree job {} into the bundle as {name}",
-                target.display()
-            ));
-            *path = name;
         }
     }
-    if bundle_cfg.audio.record_dir.is_some() {
-        bundle_cfg.audio.record_dir = Some(PathBuf::from("recordings"));
+    if let Some(rd) = doc.get_mut("audio").and_then(|a| a.get_mut("record_dir")) {
+        if rd.as_str().is_some_and(|s| s != "recordings") {
+            *rd = "recordings".into();
+            edits.push(("record_dir".to_string(), "recordings".to_string()));
+        }
     }
     entries.insert(
         "config.yaml".to_string(),
-        Src::Bytes(serde_yaml::to_string(&bundle_cfg)?.into_bytes()),
+        Src::Bytes(render_config(&config_text, &edits, &doc)?.into_bytes()),
     );
 
     // Write the zip.
@@ -215,6 +232,57 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
 enum Src {
     File(PathBuf),
     Bytes(Vec<u8>),
+}
+
+/// Render a rewritten config with maximum fidelity to the user's original file: apply each
+/// `(key, new_value)` edit to its single `key: value` line in the original text — keeping
+/// every other line byte-identical (comments, quoting, flow arrays) — and verify the result
+/// parses to exactly `expected`. Any ambiguity (key not found once, multi-line value,
+/// parse mismatch) falls back to a clean re-dump of `expected`.
+fn render_config(
+    original: &str,
+    edits: &[(String, String)],
+    expected: &serde_yaml::Value,
+) -> Result<String> {
+    if let Some(text) = apply_line_edits(original, edits, expected) {
+        return Ok(text);
+    }
+    Ok(serde_yaml::to_string(expected)?)
+}
+
+fn apply_line_edits(
+    original: &str,
+    edits: &[(String, String)],
+    expected: &serde_yaml::Value,
+) -> Option<String> {
+    let mut lines: Vec<String> = original.lines().map(String::from).collect();
+    for (key, new_value) in edits {
+        let hits: Vec<usize> = (0..lines.len())
+            .filter(|&i| line_value_span(&lines[i], key).is_some())
+            .collect();
+        let [i] = hits[..] else { return None };
+        let prefix_len = line_value_span(&lines[i], key)?;
+        lines[i] = format!("{}\"{}\"", &lines[i][..prefix_len], new_value.replace('"', "\\\""));
+    }
+    let text = lines.join("\n") + "\n";
+    (serde_yaml::from_str::<serde_yaml::Value>(&text).ok()? == *expected).then_some(text)
+}
+
+/// If `line` is `<indent><key>: <scalar>` (key optionally quoted), return the byte length of
+/// the prefix up to and including the colon+space — i.e. where the value starts.
+fn line_value_span(line: &str, key: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    let after_key = rest
+        .strip_prefix(&format!("\"{key}\""))
+        .or_else(|| rest.strip_prefix(&format!("'{key}'")))
+        .or_else(|| rest.strip_prefix(key))?;
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let value = after_colon.trim_start();
+    if value.is_empty() || value.starts_with('#') {
+        return None; // no inline scalar on this line (block value / answer-only null)
+    }
+    Some(line.len() - value.len())
 }
 
 /// Add an out-of-tree file to the bundle under `<under>/<filename>` (deduplicated; name
@@ -396,7 +464,8 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
             folder.display()
         );
     }
-    let mut cfg: Config = serde_yaml::from_str(&std::fs::read_to_string(&cfg_file)?)
+    let cfg_text = std::fs::read_to_string(&cfg_file)?;
+    let cfg: Config = serde_yaml::from_str(&cfg_text)
         .with_context(|| format!("parse {}", cfg_file.display()))?;
 
     let mut files = Vec::new();
@@ -434,20 +503,42 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
     }
 
     // Rewrite the config's relative paths to absolute paths under the bundle folder: the
-    // config is installed to the default path but the content stays in the folder.
-    for (number, job) in cfg.autoanswer.iter_mut() {
-        let Some(path) = job else { continue };
-        let abs = resolve_path_under(Some(&folder), Path::new(&*path));
-        if !abs.is_file() {
-            warnings.push(format!(
-                "config autoanswer {number}: job not found at {}",
-                abs.display()
-            ));
+    // config is installed to the default path but the content stays in the folder. Edited
+    // as a YAML value tree so the installed file keeps exactly the bundle's fields (no
+    // injected defaults) in their original order.
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&cfg_text)?;
+    let mut edits: Vec<(String, String)> = Vec::new();
+    if let Some(map) = doc.get_mut("autoanswer").and_then(|v| v.as_mapping_mut()) {
+        for (k, v) in map.iter_mut() {
+            let Some(path) = v.as_str() else {
+                continue; // null = answer-only
+            };
+            let abs = resolve_path_under(Some(&folder), Path::new(path));
+            if !abs.is_file() {
+                warnings.push(format!(
+                    "config autoanswer {}: job not found at {}",
+                    k.as_str().unwrap_or("?"),
+                    abs.display()
+                ));
+            }
+            let new = abs.to_string_lossy().into_owned();
+            if new != path {
+                let number = k.as_str().unwrap_or("?").to_string();
+                *v = new.clone().into();
+                edits.push((number, new));
+            }
         }
-        *path = abs.to_string_lossy().into_owned();
     }
-    if let Some(rd) = cfg.audio.record_dir.take() {
-        cfg.audio.record_dir = Some(resolve_path_under(Some(&folder), &rd));
+    if let Some(rd) = doc.get_mut("audio").and_then(|a| a.get_mut("record_dir")) {
+        if let Some(dir_str) = rd.as_str() {
+            let new = resolve_path_under(Some(&folder), Path::new(dir_str))
+                .to_string_lossy()
+                .into_owned();
+            if new != dir_str {
+                *rd = new.clone().into();
+                edits.push(("record_dir".to_string(), new));
+            }
+        }
     }
 
     // Host-compat heads-up: the bundle may pin tools/devices from the exporting machine.
@@ -519,7 +610,7 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(dest, serde_yaml::to_string(&cfg)?)
+    std::fs::write(dest, render_config(&cfg_text, &edits, &doc)?)
         .with_context(|| format!("write {}", dest.display()))?;
 
     Ok(ImportReport {
@@ -1061,6 +1152,52 @@ mod tests {
             panic!("expected audio.play first");
         };
         assert!(Path::new(file).is_file(), "sample not resolvable: {file}");
+    }
+
+    #[test]
+    fn config_round_trip_keeps_only_the_users_fields() {
+        // The bundled + installed configs must stay recognizable as the user's own file:
+        // only the fields they wrote (in their order), with just the path values rewritten —
+        // no injected defaults like ws_bind / instance_name / autoanswer: {}.
+        let root = tempdir("fidelity");
+        let proj = make_project(&root);
+        write(
+            &root.join("cfg/config.yaml"),
+            &format!(
+                "shared_key: change-me\naudio:\n  # my sound card\n  capture_device: \"BlackHole 2ch\"\n  record_dir: {}/recordings\n  mix_recording: true\n",
+                proj.display()
+            ),
+        );
+        let zip = root.join("bundle.zip");
+        export(&proj, Some(zip.clone()), Some(root.join("cfg/config.yaml"))).unwrap();
+
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut text = String::new();
+        za.by_name("config.yaml").unwrap().read_to_string(&mut text).unwrap();
+        for absent in ["ws_bind", "instance_name", "autoanswer", "sample_rate", "playback_cmd"] {
+            assert!(!text.contains(absent), "injected `{absent}` into:\n{text}");
+        }
+        assert!(text.contains(r#"record_dir: "recordings""#), "{text}");
+        assert!(text.starts_with("shared_key:"), "field order changed:\n{text}");
+        // Untouched lines keep their exact original formatting — quotes and comments included.
+        assert!(text.contains(r#"capture_device: "BlackHole 2ch""#), "{text}");
+        assert!(text.contains("# my sound card"), "comments dropped:\n{text}");
+
+        // Same fidelity after import: only the bundle's fields, paths made absolute.
+        let extracted = root.join("machine2");
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        za.extract(&extracted).unwrap();
+        let dest = root.join("dest/config.yaml");
+        import_to(&extracted, &dest, false).unwrap();
+        let installed = std::fs::read_to_string(&dest).unwrap();
+        for absent in ["ws_bind", "instance_name", "autoanswer", "sample_rate"] {
+            assert!(!installed.contains(absent), "injected `{absent}` into:\n{installed}");
+        }
+        let dir = extracted.canonicalize().unwrap();
+        assert!(
+            installed.contains(&format!("record_dir: \"{}/recordings\"", dir.display())),
+            "{installed}"
+        );
     }
 
     #[test]
