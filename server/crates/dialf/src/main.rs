@@ -464,7 +464,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("  {size:>width$}  {name}");
             }
             println!(
-                "  {} file(s), import on another machine with: dialf import <unzipped-folder>",
+                "  {} file(s), import on another machine with: dialf import <folder>",
                 report.entries.len()
             );
             Ok(())
