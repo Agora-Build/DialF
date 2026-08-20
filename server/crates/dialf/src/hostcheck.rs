@@ -248,14 +248,29 @@ pub(crate) fn run_with(
         }
     }
 
-    // No pinned commands: dialfd auto-detects a tool at run time — make sure one exists.
-    if audio_argv(doc, "capture_cmd").is_none() {
-        let (capture, _) = crate::audio::tool_detect::present_tools();
-        if capture.is_empty() {
-            writeln!(p.out, "no audio capture tool found (sox/ffmpeg{})", if cfg!(target_os = "macos") { "" } else { "/arecord" })?;
-            // The platform's preferred auto-detected tool: sox on macOS, ALSA on Linux.
-            offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
-        }
+    // No pinned command: dialfd auto-detects a tool at run time — make sure each unpinned
+    // direction has one.
+    let (capture, playback) = crate::audio::tool_detect::present_tools();
+    let mut missing = Vec::new();
+    if audio_argv(doc, "capture_cmd").is_none() && capture.is_empty() {
+        missing.push(if cfg!(target_os = "macos") {
+            "capture (sox/ffmpeg)"
+        } else {
+            "capture (arecord/ffmpeg/sox)"
+        });
+    }
+    if audio_argv(doc, "playback_cmd").is_none() && playback.is_empty() {
+        missing.push(if cfg!(target_os = "macos") {
+            "playback (afplay/ffplay/play)"
+        } else {
+            "playback (aplay/ffplay/play)"
+        });
+    }
+    if !missing.is_empty() {
+        writeln!(p.out, "no audio {} tool found on this machine", missing.join(" or "))?;
+        // One package covers whatever is missing: sox on macOS (capture + `play`),
+        // alsa-utils on Linux (arecord + aplay).
+        offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
     }
     Ok(())
 }
