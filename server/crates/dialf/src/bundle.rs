@@ -649,7 +649,7 @@ fn import_impl(
     })
 }
 
-/// Interactive gate for replacing an existing config: the user must type `override`.
+/// Interactive gate for replacing an existing config: y/N prompt, defaulting to No.
 fn confirm_override(dest: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!(
@@ -658,13 +658,13 @@ fn confirm_override(dest: &Path) -> Result<()> {
         );
     }
     eprint!(
-        "{} already exists and will be replaced (a .bak backup is kept).\ntype \"override\" to continue: ",
+        "warning: {} already exists — replace it? (a .bak backup is kept) [y/N]: ",
         dest.display()
     );
     std::io::stderr().flush().ok();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    if line.trim() != "override" {
+    if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
         bail!("aborted — existing config left untouched");
     }
     Ok(())

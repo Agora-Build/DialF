@@ -340,7 +340,8 @@ config's own directory.
 `import` takes an **unzipped** bundle folder (direct `.zip` import isn't supported yet),
 validates it, and installs its `config.yaml` to the default config path with paths rewritten
 to point at that folder — the folder stays in place as the live setup. An existing config is
-only replaced after you type `override` (or pass `--override`); the old one is kept as
+only replaced after a `[y/N]` confirmation — Enter keeps it — (or pass `--override` to skip
+the prompt); the old one is kept as
 `config.yaml.bak`. It then restarts the installed dialfd service (or tells you to restart a
 foreground `dialf daemon` / use `sudo` for a system service) and confirms via the daemon which
 config is now active. `--no-restart` skips that. Host-specific settings travel as-is — check
