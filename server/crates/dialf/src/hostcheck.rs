@@ -261,7 +261,7 @@ pub(crate) fn run_with(
     }
     if audio_argv(doc, "playback_cmd").is_none() && playback.is_empty() {
         missing.push(if cfg!(target_os = "macos") {
-            "playback (afplay/ffplay/play)"
+            "playback (sox/afplay/ffplay)"
         } else {
             "playback (aplay/ffplay/play)"
         });
