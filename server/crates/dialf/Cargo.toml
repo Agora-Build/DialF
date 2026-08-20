@@ -29,6 +29,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 hound = { workspace = true }
 which = { workspace = true }
+zip = { workspace = true }
 chrono = "0.4"
 phonenumber = "0.3"
 thread-priority = "1"

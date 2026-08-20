@@ -30,6 +30,7 @@ pub enum Action {
     Install,
     Uninstall,
     Start,
+    Restart,
     Stop,
     Status,
 }
@@ -40,6 +41,7 @@ pub fn run(action: Action, scope: Scope, config: Option<PathBuf>) -> Result<()> 
         Action::Install => install(scope, config),
         Action::Uninstall => uninstall(scope),
         Action::Start => start(scope),
+        Action::Restart => restart(scope),
         Action::Stop => stop(scope),
         Action::Status => status(scope),
     }
@@ -269,6 +271,34 @@ fn status(scope: Scope) -> Result<()> {
         run_cmd("launchctl", &["print", &format!("{}/{LABEL}", launchd_domain(scope))])
     } else {
         systemctl(scope, &["status", &service_name()])
+    }
+}
+
+/// The scope whose service unit is installed, preferring the user's own over the system one.
+/// `None` when dialfd isn't installed as a service (foreground `dialf daemon`, or nothing).
+pub fn installed_scope() -> Option<Scope> {
+    if unit_path(Scope::User).exists() {
+        return Some(Scope::User);
+    }
+    if unit_path(Scope::System).exists() {
+        return Some(Scope::System);
+    }
+    None
+}
+
+/// Whether a service unit file exists for `scope` (says nothing about it running).
+pub fn unit_installed(scope: Scope) -> bool {
+    unit_path(scope).exists()
+}
+
+/// Restart the installed service so it picks up a changed config. On macOS `start` already
+/// kills+restarts (`kickstart -k`); on Linux `systemctl start` is a no-op for a running unit,
+/// so use `restart`.
+pub fn restart(scope: Scope) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        start(scope)
+    } else {
+        systemctl(scope, &["restart", &service_name()])
     }
 }
 

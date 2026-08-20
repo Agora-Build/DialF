@@ -80,6 +80,31 @@ enum Command {
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
+    /// Export a setup folder (job scripts + samples + the active config) to a zip bundle.
+    /// Recordings are excluded (per the config's audio.record_dir).
+    Export {
+        /// Folder to export (defaults to the current directory).
+        dir: Option<PathBuf>,
+        /// Output zip path (defaults to <dirname>.dialf.zip in the current directory).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Config to bundle (defaults to <dir>/config.yaml if present, else
+        /// ~/.config/dialf/config.yaml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Import an extracted bundle folder: install its config.yaml (paths pointed at the
+    /// folder) and restart dialfd so it takes effect.
+    Import {
+        /// The bundle folder (an unzipped `dialf export` bundle).
+        folder: PathBuf,
+        /// Replace an existing config.yaml without prompting (a .bak backup is still kept).
+        #[arg(long = "override")]
+        override_existing: bool,
+        /// Skip the daemon restart at the end.
+        #[arg(long)]
+        no_restart: bool,
+    },
     /// Install/manage dialfd as an OS background service (launchd/systemd).
     Service {
         #[command(subcommand)]
@@ -102,6 +127,8 @@ enum ServiceAction {
     Uninstall,
     /// Start the installed service.
     Start,
+    /// Restart the installed service (e.g. to pick up a changed config).
+    Restart,
     /// Stop the running service.
     Stop,
     /// Show service status.
@@ -422,6 +449,49 @@ async fn main() -> anyhow::Result<()> {
             print_response(&resp);
             ok_or_err(resp)
         }
+        Command::Export { dir, out, config } => {
+            let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+            let report = dialf::bundle::export(&dir, out, config)?;
+            for w in &report.warnings {
+                eprintln!("warning: {w}");
+            }
+            println!("exported {}:", report.zip_path.display());
+            let width = report.entries.iter().map(|(_, s)| s.to_string().len()).max().unwrap_or(1);
+            for (name, size) in &report.entries {
+                println!("  {size:>width$}  {name}");
+            }
+            println!(
+                "  {} file(s), import on another machine with: dialf import <unzipped-folder>",
+                report.entries.len()
+            );
+            Ok(())
+        }
+        Command::Import {
+            folder,
+            override_existing,
+            no_restart,
+        } => {
+            let report = dialf::bundle::import(&folder, override_existing)?;
+            for w in &report.warnings {
+                eprintln!("warning: {w}");
+            }
+            if let Some(bak) = &report.backup_path {
+                println!("previous config backed up to {}", bak.display());
+            }
+            println!("installed {}", report.config_path.display());
+            println!(
+                "bundle folder {} ({} script(s))",
+                report.folder.display(),
+                report.scripts.len()
+            );
+            if no_restart {
+                println!("skipped daemon restart (--no-restart)");
+                return Ok(());
+            }
+            // Re-resolve the control socket: `socket` above was resolved from the config that
+            // the import just replaced, and the restarted daemon binds per the NEW config.
+            restart_daemon_and_verify(&Config::resolve_client_socket(), &report.config_path).await
+        }
         Command::Service { action, user } => {
             let scope = if user {
                 dialf::service::Scope::User
@@ -432,12 +502,84 @@ async fn main() -> anyhow::Result<()> {
                 ServiceAction::Install { config } => (dialf::service::Action::Install, config),
                 ServiceAction::Uninstall => (dialf::service::Action::Uninstall, None),
                 ServiceAction::Start => (dialf::service::Action::Start, None),
+                ServiceAction::Restart => (dialf::service::Action::Restart, None),
                 ServiceAction::Stop => (dialf::service::Action::Stop, None),
                 ServiceAction::Status => (dialf::service::Action::Status, None),
             };
             dialf::service::run(act, scope, config)
         }
     }
+}
+
+/// After `dialf import`: restart the installed dialfd service so the new config is live,
+/// then confirm via `server.info` which config the daemon now runs with.
+async fn restart_daemon_and_verify(socket: &Path, installed_config: &Path) -> anyhow::Result<()> {
+    use dialf::service::{self, Scope};
+    match service::installed_scope() {
+        Some(Scope::User) => {
+            if service::unit_installed(Scope::System) {
+                println!(
+                    "note: a system dialfd service is ALSO installed — if that's the active \
+                     one, point it at the imported config with: sudo dialf service install \
+                     --config {}",
+                    installed_config.display()
+                );
+            }
+            println!("restarting dialfd (user service)…");
+            service::restart(Scope::User)?;
+        }
+        Some(Scope::System) => {
+            // A system dialfd runs as root and reads root's config (or a --config baked into
+            // its unit) — NOT the file we just installed. Re-installing the unit with
+            // --config both points it at the imported config and restarts it. Needs root,
+            // so print the command instead of failing here.
+            println!(
+                "system dialfd service detected — it does not read {} on its own.",
+                installed_config.display()
+            );
+            println!("point it at the imported config and restart it with:");
+            println!("  sudo dialf service install --config {}", installed_config.display());
+            return Ok(());
+        }
+        None => {
+            if let Ok(resp) = call(socket, ControlOp::ServerInfo).await {
+                if resp.ok != Some(false) {
+                    println!(
+                        "a foreground `dialf daemon` is running — restart it to activate the new config"
+                    );
+                    return Ok(());
+                }
+            }
+            println!(
+                "no dialfd running — start it with `dialf daemon` (or `dialf service install --user`)"
+            );
+            return Ok(());
+        }
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let Ok(resp) = call(socket, ControlOp::ServerInfo).await else {
+            continue;
+        };
+        if resp.ok == Some(false) {
+            continue;
+        }
+        let version = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        // Older daemons don't report config_path; "reachable" is still worth confirming.
+        match resp.data.as_ref().and_then(|d| d.get("config_path")).and_then(|v| v.as_str()) {
+            Some(cfg) => println!("dialfd back up (v{version}), using config {cfg}"),
+            None => println!("dialfd back up (v{version})"),
+        }
+        return Ok(());
+    }
+    anyhow::bail!(
+        "dialfd did not come back within 10s — check `dialf service status --user` and the logs"
+    )
 }
 
 /// For prebuilt distributions: if `TEN_VAD_MODEL` is unset and a `ten-vad.onnx` sits next

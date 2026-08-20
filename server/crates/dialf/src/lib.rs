@@ -7,6 +7,7 @@
 //!   executes YAML jobs ([`jobs`]).
 
 pub mod audio;
+pub mod bundle;
 pub mod config;
 pub mod daemon;
 pub mod hub;
