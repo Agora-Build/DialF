@@ -334,7 +334,7 @@ fn normalize_out_of_tree_job(
         };
         let resolved = resolve_path_under(Some(job_dir), Path::new(&*file));
         let Ok(target) = resolved.canonicalize() else {
-            continue; // missing ref: leave it; export already warns on the config path level
+            continue; // missing ref: leave the path as-is
         };
         let zip_target = if target.starts_with(dir) {
             zip_name(target.strip_prefix(dir).unwrap())

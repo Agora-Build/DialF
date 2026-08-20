@@ -65,7 +65,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
-| `server.info`  | —                               | `{version, ten_vad}` (the daemon's own) |
+| `server.info`  | —                               | `{version, ten_vad, config_path}` (the daemon's own) |
 | `devices.list` | —                               | array of devices                       |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.answer`  | `device`                        | ok                                     |

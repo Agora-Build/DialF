@@ -739,7 +739,7 @@ pub(crate) fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
 }
 
 /// String convenience over [`resolve_path_under`] (job paths are carried as `String`s).
-pub(crate) fn resolve_under(base: Option<&Path>, path: &str) -> String {
+fn resolve_under(base: Option<&Path>, path: &str) -> String {
     resolve_path_under(base, Path::new(path))
         .to_string_lossy()
         .into_owned()

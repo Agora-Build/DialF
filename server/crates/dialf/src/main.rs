@@ -289,8 +289,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Client commands connect to the daemon's control socket. Config is a *daemon* concern —
-    // only `daemon` and `service install` take `--config` — so clients resolve the socket from the
-    // default config, falling back to the built-in default if there's no config file yet.
+    // only `daemon`, `service install`, and the config-level `export` take `--config` — so clients
+    // resolve the socket from the default config, falling back to the built-in default if there's
+    // no config file yet.
     let socket = Config::resolve_client_socket();
 
     match cli.command {
