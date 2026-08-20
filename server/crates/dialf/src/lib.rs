@@ -10,6 +10,7 @@ pub mod audio;
 pub mod bundle;
 pub mod config;
 pub mod daemon;
+pub mod hostcheck;
 pub mod hub;
 pub mod jobs;
 pub mod phone;

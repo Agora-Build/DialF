@@ -107,6 +107,16 @@ fn s(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|p| p.to_string()).collect()
 }
 
+/// Names of the known capture / playback tools that are present on this machine, in
+/// preference order — for the import host precheck.
+pub(crate) fn present_tools() -> (Vec<&'static str>, Vec<&'static str>) {
+    let os = current_os();
+    let present = |cands: Vec<Candidate>| {
+        cands.into_iter().map(|c| c.bin).filter(|b| tool_present(b)).collect()
+    };
+    (present(capture_candidates(os)), present(playback_candidates(os)))
+}
+
 fn capture_candidates(os: Os) -> Vec<Candidate> {
     match os {
         Os::Linux => vec![

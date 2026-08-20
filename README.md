@@ -347,6 +347,15 @@ config is now active. `--no-restart` skips that. Host-specific settings travel a
 the printed warnings for tools/devices (`audio.capture_cmd`, device names) that don't exist on
 the new machine.
 
+On a terminal, `import` runs an **interactive host precheck** instead of just warning: it
+detects this machine's audio devices (`system_profiler` on macOS, `/proc/asound` on Linux)
+and lets you pick replacements for devices the config names that don't exist here, confirms
+`record_dir`, fixes a pinned capture/playback tool path that moved (e.g. `/opt/homebrew` vs
+`/usr/local` sox), and offers to install a missing tool (`brew install sox` on macOS;
+`apt-get`/`dnf`/`pacman`/`zypper` on Linux). Missing BlackHole virtual devices get the
+matching `brew install blackhole-*` hint. Enter always keeps the current value; piped/non-TTY
+runs skip the prompts and keep the warning behavior.
+
 ## Development
 
 ```sh

@@ -178,14 +178,14 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
             };
             if new != path {
                 *v = new.clone().into();
-                edits.push((number, new));
+                edits.push((number, yaml_quote(&new)));
             }
         }
     }
     if let Some(rd) = doc.get_mut("audio").and_then(|a| a.get_mut("record_dir")) {
         if rd.as_str().is_some_and(|s| s != "recordings") {
             *rd = "recordings".into();
-            edits.push(("record_dir".to_string(), "recordings".to_string()));
+            edits.push(("record_dir".to_string(), yaml_quote("recordings")));
         }
     }
     entries.insert(
@@ -262,10 +262,21 @@ fn apply_line_edits(
             .collect();
         let [i] = hits[..] else { return None };
         let prefix_len = line_value_span(&lines[i], key)?;
-        lines[i] = format!("{}\"{}\"", &lines[i][..prefix_len], new_value.replace('"', "\\\""));
+        lines[i] = format!("{}{}", &lines[i][..prefix_len], new_value);
     }
     let text = lines.join("\n") + "\n";
     (serde_yaml::from_str::<serde_yaml::Value>(&text).ok()? == *expected).then_some(text)
+}
+
+/// A string as a double-quoted YAML scalar (edit values are pre-rendered YAML).
+pub(crate) fn yaml_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// An argv as a single-line YAML flow sequence, every element quoted.
+pub(crate) fn yaml_flow(items: &[String]) -> String {
+    let inner: Vec<String> = items.iter().map(|i| yaml_quote(i)).collect();
+    format!("[{}]", inner.join(", "))
 }
 
 /// If `line` is `<indent><key>: <scalar>` (key optionally quoted), return the byte length of
@@ -437,13 +448,24 @@ pub struct ImportReport {
 }
 
 /// Import an extracted bundle `folder`: validate it, then install its config.yaml to the
-/// default config path with relative paths rewritten absolute under `folder`.
+/// default config path with relative paths rewritten absolute under `folder`. On a terminal,
+/// runs the interactive host precheck (devices / capture tool / record_dir).
 pub fn import(folder: &Path, override_existing: bool) -> Result<ImportReport> {
-    import_to(folder, &Config::default_path(), override_existing)
+    let interactive = std::io::stdin().is_terminal();
+    import_impl(folder, &Config::default_path(), override_existing, interactive)
 }
 
-/// [`import`] with an explicit destination config path (separated for tests).
+/// [`import`] with an explicit destination config path and no prompts (separated for tests).
 pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<ImportReport> {
+    import_impl(folder, dest, override_existing, false)
+}
+
+fn import_impl(
+    folder: &Path,
+    dest: &Path,
+    override_existing: bool,
+    interactive: bool,
+) -> Result<ImportReport> {
     if folder.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
         bail!(
             "direct .zip import isn't supported yet — unzip it first, then: dialf import <folder>"
@@ -525,7 +547,7 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
             if new != path {
                 let number = k.as_str().unwrap_or("?").to_string();
                 *v = new.clone().into();
-                edits.push((number, new));
+                edits.push((number, yaml_quote(&new)));
             }
         }
     }
@@ -536,38 +558,43 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
                 .into_owned();
             if new != dir_str {
                 *rd = new.clone().into();
-                edits.push(("record_dir".to_string(), new));
+                edits.push(("record_dir".to_string(), yaml_quote(&new)));
             }
         }
     }
 
-    // Host-compat heads-up: the bundle may pin tools/devices from the exporting machine.
-    for (label, cmd) in [
-        ("capture_cmd", cfg.audio.capture_cmd.as_ref()),
-        ("playback_cmd", cfg.audio.playback_cmd.as_ref()),
-    ] {
-        let Some(argv0) = cmd.and_then(|c| c.first()) else {
-            continue;
-        };
-        let found = if Path::new(argv0).is_absolute() {
-            Path::new(argv0).exists()
-        } else {
-            which::which(argv0).is_ok()
-        };
-        if !found {
-            warnings.push(format!(
-                "audio.{label} tool not found on this machine: {argv0} — install it or edit the config"
-            ));
+    // Host precheck: interactively verify/fix devices, the capture tool, and record_dir
+    // against THIS machine — or, without a terminal, fall back to plain warnings.
+    if interactive {
+        crate::hostcheck::run(&mut doc, &mut edits, &folder)?;
+    } else {
+        for (label, cmd) in [
+            ("capture_cmd", cfg.audio.capture_cmd.as_ref()),
+            ("playback_cmd", cfg.audio.playback_cmd.as_ref()),
+        ] {
+            let Some(argv0) = cmd.and_then(|c| c.first()) else {
+                continue;
+            };
+            let found = if Path::new(argv0).is_absolute() {
+                Path::new(argv0).exists()
+            } else {
+                which::which(argv0).is_ok()
+            };
+            if !found {
+                warnings.push(format!(
+                    "audio.{label} tool not found on this machine: {argv0} — install it or edit the config"
+                ));
+            }
         }
-    }
-    for (label, dev) in [
-        ("capture_device", cfg.audio.capture_device.as_deref()),
-        ("playback_device", cfg.audio.playback_device.as_deref()),
-    ] {
-        if let Some(d) = dev {
-            warnings.push(format!(
-                "audio.{label} is \"{d}\" — verify that device exists on this machine"
-            ));
+        for (label, dev) in [
+            ("capture_device", cfg.audio.capture_device.as_deref()),
+            ("playback_device", cfg.audio.playback_device.as_deref()),
+        ] {
+            if let Some(d) = dev {
+                warnings.push(format!(
+                    "audio.{label} is \"{d}\" — verify that device exists on this machine"
+                ));
+            }
         }
     }
     // These can stop the daemon from starting at all on a machine with a different setup.

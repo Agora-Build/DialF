@@ -94,7 +94,8 @@ enum Command {
         config: Option<PathBuf>,
     },
     /// Import an extracted bundle folder: install its config.yaml (paths pointed at the
-    /// folder) and restart dialfd so it takes effect.
+    /// folder), precheck this machine's audio devices/tools (interactive fixes on a
+    /// terminal), and restart dialfd so it takes effect.
     Import {
         /// The bundle folder (an unzipped `dialf export` bundle).
         folder: PathBuf,
