@@ -954,6 +954,28 @@ mod tests {
     }
 
     #[test]
+    fn import_override_accumulates_backups() {
+        // `--override` replaces directly but every replaced config gets its own backup —
+        // nothing is pruned or overwritten.
+        let root = tempdir("bak-accumulate");
+        let bundle = root.join("bundle");
+        write(&bundle.join("config.yaml"), "shared_key: bundle\n");
+        write(&bundle.join("job.yaml"), "- type: wait\n  ms: 1\n");
+        let dest = root.join("cfg/config.yaml");
+        for i in 0..7 {
+            write(&dest, &format!("shared_key: v{i}\n"));
+            import_to(&bundle, &dest, true).unwrap();
+        }
+        let baks: Vec<String> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("config.yaml.bak"))
+            .collect();
+        assert_eq!(baks.len(), 7, "{baks:?}");
+    }
+
+    #[test]
     fn export_intree_file_wins_name_over_pulled_external() {
         let root = tempdir("name-clash");
         let proj = make_project(&root);
