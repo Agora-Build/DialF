@@ -48,6 +48,9 @@ pub struct DaemonState {
     pub engine: Arc<AudioEngine>,
     pub hub: Arc<Hub>,
     pub config: Arc<Config>,
+    /// Path of the loaded config file, reported via `server.info` so clients (e.g. `dialf
+    /// import`) can confirm which config the running daemon uses.
+    pub config_path: PathBuf,
     /// Directory of the loaded config file; relative `autoanswer` job paths resolve here.
     pub config_dir: Option<PathBuf>,
     /// Held while a job is actively using the sound card. One card → one call/recording at a
@@ -418,6 +421,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         // the config (autoanswer job paths, record_dir) then resolve against the config file's own
         // location regardless of the daemon's CWD (the service runs with cwd=/). Falls back to the
         // path as-given if it can't be canonicalized (e.g. a missing default config).
+        config_path: config_path.canonicalize().unwrap_or(config_path.clone()),
         config_dir: config_path
             .canonicalize()
             .unwrap_or(config_path)
@@ -491,6 +495,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "ten_vad": ten_vad_sys::version().unwrap_or_else(|| "stub".to_string()),
+                "config_path": state.config_path.display().to_string(),
             }),
         )),
         ControlOp::DevicesList => {
@@ -722,7 +727,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
 
 /// Resolve a possibly-relative path under `base` (e.g. the config dir). Absolute paths, and the
 /// `base = None`/empty case, are returned unchanged.
-fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
+pub(crate) fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
     let joined = match base {
         Some(b) if !b.as_os_str().is_empty() && path.is_relative() => b.join(path),
         _ => path.to_path_buf(),
@@ -734,7 +739,7 @@ fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
 }
 
 /// String convenience over [`resolve_path_under`] (job paths are carried as `String`s).
-fn resolve_under(base: Option<&Path>, path: &str) -> String {
+pub(crate) fn resolve_under(base: Option<&Path>, path: &str) -> String {
     resolve_path_under(base, Path::new(path))
         .to_string_lossy()
         .into_owned()
@@ -1086,6 +1091,7 @@ mod tests {
             engine: Arc::new(AudioEngine::new(config.audio.clone())),
             hub: Arc::new(Hub::new()),
             config: Arc::new(config),
+            config_path: PathBuf::from("/etc/dialf/config.yaml"),
             config_dir: Some(PathBuf::from("/etc/dialf")),
             card_busy: Arc::new(AtomicBool::new(false)),
             serve_busy: Arc::new(AtomicBool::new(false)),

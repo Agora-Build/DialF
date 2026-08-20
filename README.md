@@ -316,6 +316,31 @@ Linux behave identically.
 The app's shared key / device id / optional fixed `dialfd` address are set in its UI — see
 [`app/README.md`](app/README.md).
 
+### Export / import a setup
+
+Move a working setup (job scripts + audio samples + the config) to another machine as one zip:
+
+```sh
+dialf export ~/Dev/myEval                # -> myEval.dialf.zip; prints the zip's contents
+dialf import ~/Dev/myEval [--override]   # an unzipped bundle folder; installs config + restarts dialfd
+```
+
+`export` bundles the folder's YAML scripts and the samples they reference, plus the active
+config.yaml (`--config` to pick another; a `config.yaml` inside the folder wins by default) —
+**recordings are excluded** (per the config's `audio.record_dir`). Paths in the bundled config
+are rewritten relative so the zip is self-contained; jobs/samples referenced from outside the
+folder are pulled in under `scripts/`/`samples/`.
+
+`import` takes an **unzipped** bundle folder (direct `.zip` import isn't supported yet),
+validates it, and installs its `config.yaml` to the default config path with paths rewritten
+to point at that folder — the folder stays in place as the live setup. An existing config is
+only replaced after you type `override` (or pass `--override`); the old one is kept as
+`config.yaml.bak`. It then restarts the installed dialfd service (or tells you to restart a
+foreground `dialf daemon` / use `sudo` for a system service) and confirms via the daemon which
+config is now active. `--no-restart` skips that. Host-specific settings travel as-is — check
+the printed warnings for tools/devices (`audio.capture_cmd`, device names) that don't exist on
+the new machine.
+
 ## Development
 
 ```sh

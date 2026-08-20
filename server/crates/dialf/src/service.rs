@@ -272,6 +272,29 @@ fn status(scope: Scope) -> Result<()> {
     }
 }
 
+/// The scope whose service unit is installed, preferring the user's own over the system one.
+/// `None` when dialfd isn't installed as a service (foreground `dialf daemon`, or nothing).
+pub fn installed_scope() -> Option<Scope> {
+    if unit_path(Scope::User).exists() {
+        return Some(Scope::User);
+    }
+    if unit_path(Scope::System).exists() {
+        return Some(Scope::System);
+    }
+    None
+}
+
+/// Restart the installed service so it picks up a changed config. On macOS `start` already
+/// kills+restarts (`kickstart -k`); on Linux `systemctl start` is a no-op for a running unit,
+/// so use `restart`.
+pub fn restart(scope: Scope) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        start(scope)
+    } else {
+        systemctl(scope, &["restart", &service_name()])
+    }
+}
+
 fn launchd_domain(scope: Scope) -> String {
     match scope {
         Scope::System => "system".to_string(),

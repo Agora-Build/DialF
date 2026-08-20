@@ -25,10 +25,13 @@ pub struct Config {
     /// Path to the local control socket (`dialf` <-> `dialfd`). Unset → a per-user default (see
     /// [`Config::control_socket_path`] / [`Config::resolve_client_socket`]); the system installer
     /// sets it to a shared path so every user reaches one daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub control_socket: Option<PathBuf>,
     /// Group that owns the control socket (shared/system scope) so its members can connect.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub control_socket_group: Option<String>,
     /// Octal mode for the control socket, e.g. "0660"; pairs with `control_socket_group`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub control_socket_mode: Option<String>,
     /// `host:port` to bind the phone WebSocket server on.
     pub ws_bind: String,
@@ -70,16 +73,21 @@ pub struct AudioConfig {
     /// Channel count at the card (mono recommended for the call bridge).
     pub channels: u16,
     /// Capture device hint passed to the tool (e.g. ALSA `plughw:1,0`, ffmpeg index).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_device: Option<String>,
     /// Playback device hint passed to the tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub playback_device: Option<String>,
     /// Override the capture command template (argv). `{rate}`, `{channels}`, `{device}`
     /// are substituted; the tool MUST emit raw little-endian s16 PCM on stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_cmd: Option<Vec<String>>,
     /// Override the playback command template (argv). `{rate}`, `{channels}`, `{device}`,
     /// `{file}` are substituted; the tool reads s16 PCM/WAV from stdin or `{file}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub playback_cmd: Option<Vec<String>>,
     /// Directory to write call recordings into; `None` disables recording.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub record_dir: Option<PathBuf>,
     /// When recording, mix played + captured audio into one file (else keep two legs).
     pub mix_recording: bool,
