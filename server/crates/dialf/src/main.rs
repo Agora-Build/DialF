@@ -527,8 +527,26 @@ async fn restart_daemon_and_verify(socket: &Path, installed_config: &Path) -> an
                     installed_config.display()
                 );
             }
-            println!("restarting dialfd (user service)…");
-            service::restart(Scope::User)?;
+            // After an upgrade the unit can point at a deleted versioned binary path (npm
+            // removes the old vendor dir) — a plain restart would just crash-loop it
+            // (EX_CONFIG). Re-install to repoint it at this binary, keeping a baked --config.
+            match service::unit_program(Scope::User) {
+                Some(prog) if !prog.exists() => {
+                    println!(
+                        "service points at a missing binary ({}) — re-installing dialfd (user service)…",
+                        prog.display()
+                    );
+                    service::run(
+                        service::Action::Install,
+                        Scope::User,
+                        service::unit_baked_config(Scope::User),
+                    )?;
+                }
+                _ => {
+                    println!("restarting dialfd (user service)…");
+                    service::restart(Scope::User)?;
+                }
+            }
         }
         Some(Scope::System) => {
             // A system dialfd runs as root and reads root's config (or a --config baked into

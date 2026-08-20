@@ -291,6 +291,44 @@ pub fn unit_installed(scope: Scope) -> bool {
     unit_path(scope).exists()
 }
 
+/// The binary path the installed unit runs (its ProgramArguments / ExecStart argv[0]).
+pub fn unit_program(scope: Scope) -> Option<PathBuf> {
+    unit_argv(&std::fs::read_to_string(unit_path(scope)).ok()?)
+        .first()
+        .map(PathBuf::from)
+}
+
+/// The `--config <path>` baked into the installed unit, if any — so a reinstall keeps it.
+pub fn unit_baked_config(scope: Scope) -> Option<PathBuf> {
+    let argv = unit_argv(&std::fs::read_to_string(unit_path(scope)).ok()?);
+    let i = argv.iter().position(|a| a == "--config")?;
+    argv.get(i + 1).map(PathBuf::from)
+}
+
+/// Extract the service argv from a unit file: launchd `<string>` array entries, or the
+/// systemd `ExecStart=` line.
+fn unit_argv(text: &str) -> Vec<String> {
+    if text.contains("<plist") {
+        // Only the strings inside the ProgramArguments array (the first <string> in the
+        // plist is the Label).
+        let args = text
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .and_then(|rest| rest.split("</array>").next())
+            .unwrap_or("");
+        args.split("<string>")
+            .skip(1)
+            .filter_map(|s| s.split("</string>").next())
+            .map(str::to_string)
+            .collect()
+    } else {
+        text.lines()
+            .find_map(|l| l.trim_start().strip_prefix("ExecStart="))
+            .map(|cmd| cmd.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// Restart the installed service so it picks up a changed config. On macOS `start` already
 /// kills+restarts (`kickstart -k`); on Linux `systemctl start` is a no-op for a running unit,
 /// so use `restart`.
@@ -384,4 +422,30 @@ fn libc_getuid() -> u32 {
         fn getuid() -> u32;
     }
     unsafe { getuid() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_argv_parses_launchd_and_systemd() {
+        let plist = launchd_plist("/opt/dialf/dialf", Some("/etc/dialf/config.yaml"), Scope::User);
+        let argv = unit_argv(&plist);
+        assert_eq!(argv[0], "/opt/dialf/dialf");
+        assert_eq!(argv[1], "daemon");
+        let i = argv.iter().position(|a| a == "--config").unwrap();
+        assert_eq!(argv[i + 1], "/etc/dialf/config.yaml");
+
+        let unit = systemd_unit("/usr/local/bin/dialf", Some("/etc/dialf/config.yaml"), Scope::System);
+        let argv = unit_argv(&unit);
+        assert_eq!(argv[0], "/usr/local/bin/dialf");
+        let i = argv.iter().position(|a| a == "--config").unwrap();
+        assert_eq!(argv[i + 1], "/etc/dialf/config.yaml");
+        assert!(argv.contains(&"--system".to_string()));
+
+        // No baked --config -> none found.
+        let bare = systemd_unit("/usr/local/bin/dialf", None, Scope::User);
+        assert!(!unit_argv(&bare).contains(&"--config".to_string()));
+    }
 }
