@@ -94,12 +94,16 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
             }
         }
     }
-    let zip_abs = zip_path
+    // Canonicalize the zip's own path (including the bare "-o out.zip" / default-name case,
+    // whose parent is the cwd) so walk() reliably skips a stale zip inside the export dir —
+    // otherwise a re-export would copy the old zip into the new one while overwriting it.
+    let zip_parent_dir = zip_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.canonicalize())
-        .transpose()?
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or(Path::new("."));
+    let zip_abs = zip_parent_dir
+        .canonicalize()
+        .unwrap_or_else(|_| zip_parent_dir.to_path_buf())
         .join(zip_path.file_name().unwrap_or_default());
 
     // Walk the folder. Everything not excluded ships; scripts get their audio refs checked.
@@ -114,23 +118,24 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
     // Out-of-tree samples pulled into the bundle: original absolute path -> zip name.
     let mut pulled: BTreeMap<PathBuf, String> = BTreeMap::new();
 
+    // Reserve every in-tree file's zip name first, so a later pull_external can never pick
+    // (and be clobbered by / clobber) a name an in-tree file already owns.
     for f in &files {
+        entries.insert(zip_name(f.strip_prefix(&dir).unwrap()), Src::File(f.clone()));
+    }
+    for f in &files {
+        if !is_yaml(f) {
+            continue;
+        }
         let name = zip_name(f.strip_prefix(&dir).unwrap());
-        if is_yaml(f) {
-            match normalize_script(f, &name, &dir, &mut entries, &mut pulled, &mut warnings)? {
-                Some(job) => {
-                    warnings.push(format!(
-                        "{}: rewritten for the bundle (comments dropped)",
-                        f.display()
-                    ));
-                    entries.insert(name, Src::Bytes(serde_yaml::to_string(&job)?.into_bytes()));
-                }
-                None => {
-                    entries.insert(name, Src::File(f.clone()));
-                }
-            }
-        } else {
-            entries.insert(name, Src::File(f.clone()));
+        if let Some(job) =
+            normalize_script(f, &name, &dir, &excluded_dirs, &mut entries, &mut pulled, &mut warnings)?
+        {
+            warnings.push(format!(
+                "{}: rewritten for the bundle (comments dropped)",
+                f.display()
+            ));
+            entries.insert(name, Src::Bytes(serde_yaml::to_string(&job)?.into_bytes()));
         }
     }
 
@@ -246,6 +251,7 @@ fn normalize_script(
     script_disk: &Path,
     script_zip: &str,
     dir: &Path,
+    excluded_dirs: &[PathBuf],
     entries: &mut BTreeMap<String, Src>,
     pulled: &mut BTreeMap<PathBuf, String>,
     warnings: &mut Vec<String>,
@@ -270,6 +276,22 @@ fn normalize_script(
             ));
             continue;
         };
+        // An in-tree ref can still point at content the bundle won't carry (the excluded
+        // recordings dir, or a hidden path the walk skips) — that must not pass silently.
+        let bundled = target.starts_with(dir)
+            && !excluded_dirs.iter().any(|x| target.starts_with(x))
+            && !target
+                .strip_prefix(dir)
+                .unwrap()
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+        if target.starts_with(dir) && !bundled {
+            warnings.push(format!(
+                "{}: audio.play file {file} is under an excluded/hidden path — NOT in the bundle",
+                script_disk.display()
+            ));
+            continue;
+        }
         if Path::new(&*file).is_relative() && target.starts_with(dir) {
             continue; // same relative relationship holds inside the zip
         }
@@ -457,6 +479,24 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
             ));
         }
     }
+    // These can stop the daemon from starting at all on a machine with a different setup.
+    if cfg.control_socket.is_some()
+        || cfg.control_socket_group.is_some()
+        || cfg.control_socket_mode.is_some()
+    {
+        warnings.push(
+            "config pins control_socket settings from the exporting machine \
+             (control_socket/control_socket_group/control_socket_mode) — remove them unless \
+             this machine uses the same shared-socket setup"
+                .to_string(),
+        );
+    }
+    if cfg.ws_bind != crate::config::DEFAULT_WS_BIND {
+        warnings.push(format!(
+            "config ws_bind is \"{}\" — verify it's bindable on this machine",
+            cfg.ws_bind
+        ));
+    }
 
     // Install, confirming before replacing an existing config.
     let mut backup_path = None;
@@ -464,7 +504,14 @@ pub fn import_to(folder: &Path, dest: &Path, override_existing: bool) -> Result<
         if !override_existing {
             confirm_override(dest)?;
         }
-        let bak = dest.with_extension("yaml.bak");
+        // Never overwrite an earlier backup — a second import must not destroy the backup of
+        // the user's original config.
+        let mut bak = dest.with_extension("yaml.bak");
+        let mut n = 1;
+        while bak.exists() {
+            bak = dest.with_extension(format!("yaml.bak.{n}"));
+            n += 1;
+        }
         std::fs::copy(dest, &bak)
             .with_context(|| format!("back up {} to {}", dest.display(), bak.display()))?;
         backup_path = Some(bak);
@@ -510,8 +557,25 @@ fn confirm_override(dest: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Recursively collect regular files under `dir`, skipping excluded dirs, dotfiles, and
-/// `skip_file` (the zip being written).
+/// `skip_file` (the zip being written). Follows symlinks (a symlinked samples/ dir is real
+/// content), with a visited-set guard against symlink cycles.
 fn walk(dir: &Path, excluded: &[PathBuf], skip_file: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    walk_inner(dir, excluded, skip_file, out, &mut seen)
+}
+
+fn walk_inner(
+    dir: &Path,
+    excluded: &[PathBuf],
+    skip_file: &Path,
+    out: &mut Vec<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+) -> Result<()> {
+    if let Ok(c) = dir.canonicalize() {
+        if !seen.insert(c) {
+            return Ok(()); // symlink cycle
+        }
+    }
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))?;
     let mut items: Vec<_> = entries.collect::<std::io::Result<_>>()?;
@@ -524,13 +588,17 @@ fn walk(dir: &Path, excluded: &[PathBuf], skip_file: &Path, out: &mut Vec<PathBu
         {
             continue;
         }
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
+        // fs::metadata (not DirEntry::file_type) so symlinks resolve to what they point at;
+        // broken symlinks are skipped.
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
             if excluded.iter().any(|x| path.canonicalize().map(|c| c == *x).unwrap_or(false)) {
                 continue;
             }
-            walk(&path, excluded, skip_file, out)?;
-        } else if ft.is_file() && path != skip_file {
+            walk_inner(&path, excluded, skip_file, out, seen)?;
+        } else if meta.is_file() && path != skip_file {
             out.push(path);
         }
     }
@@ -759,6 +827,97 @@ mod tests {
         let bak = report.backup_path.unwrap();
         assert!(std::fs::read_to_string(&bak).unwrap().contains("old"));
         assert!(std::fs::read_to_string(&dest).unwrap().contains("new"));
+
+        // A further import must NOT clobber the original backup — it gets a numbered name.
+        let report2 = import_to(&bundle, &dest, true).unwrap();
+        let bak2 = report2.backup_path.unwrap();
+        assert_ne!(bak, bak2);
+        assert!(std::fs::read_to_string(&bak).unwrap().contains("old"));
+    }
+
+    #[test]
+    fn export_intree_file_wins_name_over_pulled_external() {
+        let root = tempdir("name-clash");
+        let proj = make_project(&root);
+        // a.yaml (sorts before samples/) plays an out-of-tree file whose basename collides
+        // with the in-tree samples/prompt.wav — the external must get a distinct zip name,
+        // not clobber (or be clobbered by) the in-tree file.
+        write(&root.join("shared/prompt.wav"), "RIFFexternal");
+        write(
+            &proj.join("a.yaml"),
+            &format!("- type: audio.play\n  file: {}/shared/prompt.wav\n", root.display()),
+        );
+        write(&root.join("cfg/config.yaml"), "shared_key: k\n");
+        let zip = root.join("out.zip");
+        export(&proj, Some(zip.clone()), Some(root.join("cfg/config.yaml"))).unwrap();
+
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        let mut in_tree = String::new();
+        za.by_name("samples/prompt.wav").unwrap().read_to_string(&mut in_tree).unwrap();
+        assert_eq!(in_tree, "RIFFfake");
+        let mut script = String::new();
+        za.by_name("a.yaml").unwrap().read_to_string(&mut script).unwrap();
+        let job = schema::parse(&script).unwrap();
+        let StepKind::AudioPlay { file } = &job[0].kind else { panic!() };
+        assert_ne!(file, "samples/prompt.wav", "external clobbered the in-tree name");
+        let mut external = String::new();
+        za.by_name(file).unwrap().read_to_string(&mut external).unwrap();
+        assert_eq!(external, "RIFFexternal");
+    }
+
+    #[test]
+    fn export_warns_on_refs_into_excluded_dirs() {
+        let root = tempdir("excluded-ref");
+        let proj = make_project(&root);
+        // A script replaying a recording: the ref resolves in-tree, but recordings/ is
+        // excluded from the bundle — that must produce a loud warning, not silence.
+        write(
+            &proj.join("replay.yaml"),
+            "- type: audio.play\n  file: recordings/dialf-job-1-rx.wav\n",
+        );
+        write(&root.join("cfg/config.yaml"), "shared_key: k\n");
+        let zip = root.join("out.zip");
+        let report =
+            export(&proj, Some(zip), Some(root.join("cfg/config.yaml"))).unwrap();
+        assert!(
+            report.warnings.iter().any(|w| w.contains("NOT in the bundle")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn export_follows_symlinked_sample_dirs() {
+        let root = tempdir("symlink");
+        let proj = root.join("proj");
+        write(&proj.join("job.yaml"), "- type: audio.play\n  file: samples/prompt.wav\n");
+        // samples/ is a symlink to a shared library elsewhere — its files must ship.
+        write(&root.join("library/prompt.wav"), "RIFFshared");
+        std::os::unix::fs::symlink(root.join("library"), proj.join("samples")).unwrap();
+        write(&root.join("cfg/config.yaml"), "shared_key: k\n");
+        let zip = root.join("out.zip");
+        let report =
+            export(&proj, Some(zip), Some(root.join("cfg/config.yaml"))).unwrap();
+        let names: Vec<&str> = report.entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"samples/prompt.wav"), "{names:?}");
+    }
+
+    #[test]
+    fn import_warns_on_pinned_socket_and_ws_bind() {
+        let root = tempdir("socket-warn");
+        let bundle = root.join("bundle");
+        write(
+            &bundle.join("config.yaml"),
+            "shared_key: k\ncontrol_socket: /run/dialf/dialfd.sock\nws_bind: \"192.168.1.50:8765\"\n",
+        );
+        write(&bundle.join("job.yaml"), "- type: wait\n  ms: 1\n");
+        let report = import_to(&bundle, &root.join("cfg/config.yaml"), false).unwrap();
+        assert!(
+            report.warnings.iter().any(|w| w.contains("control_socket")),
+            "{:?}",
+            report.warnings
+        );
+        assert!(report.warnings.iter().any(|w| w.contains("ws_bind")), "{:?}", report.warnings);
     }
 
     #[test]

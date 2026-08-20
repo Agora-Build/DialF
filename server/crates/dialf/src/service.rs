@@ -30,6 +30,7 @@ pub enum Action {
     Install,
     Uninstall,
     Start,
+    Restart,
     Stop,
     Status,
 }
@@ -40,6 +41,7 @@ pub fn run(action: Action, scope: Scope, config: Option<PathBuf>) -> Result<()> 
         Action::Install => install(scope, config),
         Action::Uninstall => uninstall(scope),
         Action::Start => start(scope),
+        Action::Restart => restart(scope),
         Action::Stop => stop(scope),
         Action::Status => status(scope),
     }
@@ -282,6 +284,11 @@ pub fn installed_scope() -> Option<Scope> {
         return Some(Scope::System);
     }
     None
+}
+
+/// Whether a service unit file exists for `scope` (says nothing about it running).
+pub fn unit_installed(scope: Scope) -> bool {
+    unit_path(scope).exists()
 }
 
 /// Restart the installed service so it picks up a changed config. On macOS `start` already

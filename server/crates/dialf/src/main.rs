@@ -127,6 +127,8 @@ enum ServiceAction {
     Uninstall,
     /// Start the installed service.
     Start,
+    /// Restart the installed service (e.g. to pick up a changed config).
+    Restart,
     /// Stop the running service.
     Stop,
     /// Show service status.
@@ -486,7 +488,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("skipped daemon restart (--no-restart)");
                 return Ok(());
             }
-            restart_daemon_and_verify(&socket).await
+            // Re-resolve the control socket: `socket` above was resolved from the config that
+            // the import just replaced, and the restarted daemon binds per the NEW config.
+            restart_daemon_and_verify(&Config::resolve_client_socket(), &report.config_path).await
         }
         Command::Service { action, user } => {
             let scope = if user {
@@ -498,6 +502,7 @@ async fn main() -> anyhow::Result<()> {
                 ServiceAction::Install { config } => (dialf::service::Action::Install, config),
                 ServiceAction::Uninstall => (dialf::service::Action::Uninstall, None),
                 ServiceAction::Start => (dialf::service::Action::Start, None),
+                ServiceAction::Restart => (dialf::service::Action::Restart, None),
                 ServiceAction::Stop => (dialf::service::Action::Stop, None),
                 ServiceAction::Status => (dialf::service::Action::Status, None),
             };
@@ -508,17 +513,32 @@ async fn main() -> anyhow::Result<()> {
 
 /// After `dialf import`: restart the installed dialfd service so the new config is live,
 /// then confirm via `server.info` which config the daemon now runs with.
-async fn restart_daemon_and_verify(socket: &Path) -> anyhow::Result<()> {
+async fn restart_daemon_and_verify(socket: &Path, installed_config: &Path) -> anyhow::Result<()> {
     use dialf::service::{self, Scope};
     match service::installed_scope() {
         Some(Scope::User) => {
+            if service::unit_installed(Scope::System) {
+                println!(
+                    "note: a system dialfd service is ALSO installed — if that's the active \
+                     one, point it at the imported config with: sudo dialf service install \
+                     --config {}",
+                    installed_config.display()
+                );
+            }
             println!("restarting dialfd (user service)…");
             service::restart(Scope::User)?;
         }
         Some(Scope::System) => {
-            // Restarting the system service needs root; print the command instead of failing.
-            println!("system dialfd service detected — restart it to activate the config:");
-            println!("  sudo dialf service start");
+            // A system dialfd runs as root and reads root's config (or a --config baked into
+            // its unit) — NOT the file we just installed. Re-installing the unit with
+            // --config both points it at the imported config and restarts it. Needs root,
+            // so print the command instead of failing here.
+            println!(
+                "system dialfd service detected — it does not read {} on its own.",
+                installed_config.display()
+            );
+            println!("point it at the imported config and restart it with:");
+            println!("  sudo dialf service install --config {}", installed_config.display());
             return Ok(());
         }
         None => {
