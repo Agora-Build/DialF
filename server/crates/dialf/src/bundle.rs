@@ -622,12 +622,14 @@ fn import_impl(
         if !override_existing {
             confirm_override(dest)?;
         }
-        // Never overwrite an earlier backup — a second import must not destroy the backup of
-        // the user's original config.
-        let mut bak = dest.with_extension("yaml.bak");
+        // Timestamped so backups sort by age and are never overwritten — a second import
+        // must not destroy the backup of the user's original config. The numeric suffix
+        // only disambiguates two imports within the same second.
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let mut bak = dest.with_extension(format!("yaml.bak.{stamp}"));
         let mut n = 1;
         while bak.exists() {
-            bak = dest.with_extension(format!("yaml.bak.{n}"));
+            bak = dest.with_extension(format!("yaml.bak.{stamp}-{n}"));
             n += 1;
         }
         std::fs::copy(dest, &bak)

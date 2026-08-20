@@ -341,8 +341,8 @@ config's own directory.
 validates it, and installs its `config.yaml` to the default config path with paths rewritten
 to point at that folder — the folder stays in place as the live setup. An existing config is
 only replaced after a `[y/N]` confirmation — Enter keeps it — or pass `--override` to replace
-directly without the prompt. Either way the old config is kept as `config.yaml.bak`
-(numbered — earlier backups are never overwritten). It then restarts the installed dialfd service (or tells you to restart a
+directly without the prompt. Either way the old config is kept as a timestamped backup
+(`config.yaml.bak.YYYYMMDD-HHMMSS`) — earlier backups are never overwritten. It then restarts the installed dialfd service (or tells you to restart a
 foreground `dialf daemon` / use `sudo` for a system service) and confirms via the daemon which
 config is now active. `--no-restart` skips that. Host-specific settings travel as-is — check
 the printed warnings for tools/devices (`audio.capture_cmd`, device names) that don't exist on
