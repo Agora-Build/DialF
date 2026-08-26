@@ -49,7 +49,11 @@ impl CommandCaptureSource {
                 Ok(())
             });
         }
-        let mut child = command.spawn()?;
+        // Name the tool in the error — a bare ENOENT ("No such file or directory") from a
+        // config pinning a tool this machine doesn't have is undiagnosable otherwise.
+        let mut child = command
+            .spawn()
+            .map_err(|e| io::Error::new(e.kind(), format!("spawn capture tool `{}`: {e}", argv[0])))?;
         let stdout = child
             .stdout
             .take()
@@ -134,7 +138,8 @@ pub fn play_file_blocking(cmd: &PlaybackCommand, force: &AtomicBool) -> io::Resu
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
     loop {
         if force.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -164,7 +169,8 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
         .args(&argv[1..])
         .stdin(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
     {
         let mut stdin = child
             .stdin
@@ -212,6 +218,22 @@ mod tests {
         let err = play_file_blocking(&cmd(&["false"]), &force)
             .expect_err("`false` exits non-zero -> error");
         assert!(err.to_string().contains("exited"), "got: {err}");
+    }
+
+    #[test]
+    fn spawn_errors_name_the_missing_tool() {
+        // A config pinning a tool this machine lacks must say WHICH tool — a bare
+        // "No such file or directory" is undiagnosable.
+        let force = AtomicBool::new(false);
+        let err = play_file_blocking(&cmd(&["/nonexistent/sox", "x"]), &force).unwrap_err();
+        assert!(err.to_string().contains("/nonexistent/sox"), "{err}");
+        let err = CommandCaptureSource::spawn(
+            &CaptureCommand { argv: vec!["/nonexistent/rec".into(), "-q".into()] },
+            48_000,
+        )
+        .err()
+        .expect("spawning a missing capture tool must fail");
+        assert!(err.to_string().contains("/nonexistent/rec"), "{err}");
     }
 
     #[test]
