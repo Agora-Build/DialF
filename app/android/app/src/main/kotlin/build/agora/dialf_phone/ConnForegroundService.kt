@@ -271,21 +271,37 @@ class ConnForegroundService : Service() {
             connectOrDiscover()
         }
         updateWakeLock() // hold the lock now if we're already plugged in
+        KeepAliveReceiver.schedule(this)
         return START_STICKY
+    }
+
+    /** FGS time budget exhausted (only time-limited types get this; specialUse shouldn't).
+     *  Without an override the SYSTEM CRASHES the process a few seconds later — stop cleanly
+     *  and schedule a comeback instead. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "foreground service timed out (type=$fgsType) — stopping, restart in 15m")
+        scheduleRestart(15 * 60_000L)
+        stopSelf()
+    }
+
+    /** Arm an alarm that restarts this service in `delayMs` (used by onTimeout/onTaskRemoved). */
+    private fun scheduleRestart(delayMs: Long) {
+        if (!keepRunning()) return
+        val restart = Intent(applicationContext, ConnForegroundService::class.java)
+        val pi = PendingIntent.getForegroundService(
+            this,
+            1,
+            restart,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        getSystemService(AlarmManager::class.java)
+            ?.set(AlarmManager.RTC, System.currentTimeMillis() + delayMs, pi)
     }
 
     /** App swiped from recents — reschedule a restart so the service keeps running. */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (running && keepRunning()) {
-            val restart = Intent(applicationContext, ConnForegroundService::class.java)
-            val pi = PendingIntent.getForegroundService(
-                this,
-                1,
-                restart,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
-            )
-            getSystemService(AlarmManager::class.java)
-                ?.set(AlarmManager.RTC, System.currentTimeMillis() + 1500, pi)
+        if (running) {
+            scheduleRestart(1500)
         }
         super.onTaskRemoved(rootIntent)
     }

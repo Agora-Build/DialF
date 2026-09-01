@@ -19,9 +19,12 @@
     <uses-permission android:name="android.permission.READ_SMS"/>
     <uses-permission android:name="android.permission.RECEIVE_SMS"/>
 
-    <!-- Foreground service to keep the WS connection alive + notifications -->
+    <!-- Foreground service to keep the WS connection alive + notifications. specialUse, NOT
+         dataSync: Android 15+ hard-limits dataSync FGS to 6h/day, then crashes the app
+         (ForegroundServiceDidNotStopInTime) — which took the phone offline for hours at a
+         time. specialUse has no time limit; the subtype property below justifies it. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
@@ -88,8 +91,12 @@
         <!-- Keeps the process (and WS connection) alive in the background -->
         <service
             android:name=".ConnForegroundService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false"/>
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent LAN control link to the dialfd daemon: the phone must stay reachable 24/7 to receive dial/answer/SMS commands and report inbound calls for call automation. No time-limited FGS type fits a standing control channel."/>
+        </service>
 
         <!-- Inbound SMS -> forwarded to dialfd in real time -->
         <receiver
