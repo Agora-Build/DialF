@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "dialf"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "ten-vad-sys"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "cc",
  "hound",
