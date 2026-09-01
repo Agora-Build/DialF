@@ -14,8 +14,6 @@ import androidx.core.content.ContextCompat
  * - A self-re-arming [AlarmManager] chain ([ACTION_TICK], every ~15 min): alarms live in
  *   the SYSTEM, so they survive app-process death, and an explicit broadcast to a manifest
  *   receiver is always deliverable. This is the one revival path that always fires.
- *   (Manifest-filtered implicit broadcasts like power/battery/wifi are NOT delivered on
- *   Android 8+; those filters stay only for OEMs that still send them.)
  * - MY_PACKAGE_REPLACED after an app update.
  *
  * Gated by the user's "keep running" preference. The alarm re-arms even when the service

@@ -118,7 +118,6 @@ impl Drop for CommandCaptureSource {
     }
 }
 
-/// Play an audio file via the resolved playback command, blocking until it finishes.
 /// Play a file to completion, but stop early if `force` flips true (a second Ctrl+C on
 /// `dialf run`). We poll the child rather than block on `status()` so a force-cancel can kill the
 /// playback mid-file; a deliberate force-kill returns `Ok` (it's an interrupt, not a failure) so
