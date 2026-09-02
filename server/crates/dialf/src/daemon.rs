@@ -393,6 +393,9 @@ fn warn_if_under_multiplexer() {
 
 pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     warn_if_under_multiplexer();
+    // macOS: surface the Microphone consent dialog at startup (right after an install or
+    // upgrade) rather than mid-call, and log the current grant state for diagnosis.
+    crate::audio::mic_permission::preflight();
     // Clean up `sox` orphaned by a previously hard-killed daemon (SIGKILL bypasses our Drop
     // cleanup). Skip if another daemon is already live on the control socket — its audio children
     // are legitimate, and the binds below will fail cleanly anyway.

@@ -74,6 +74,10 @@ impl AudioEngine {
 
     /// Open the configured sound-card capture source.
     pub fn open_capture(&self) -> anyhow::Result<CommandCaptureSource> {
+        // macOS: settle mic consent BEFORE spawning the tool — shows the dialog and waits
+        // for the click if never asked; fails fast with the fix if denied. The tool's own
+        // implicit access would just be silently denied (empty capture, vague timeout).
+        super::mic_permission::ensure_consent()?;
         let cmd = tool_detect::resolve_capture(&self.capture_params(), self.cfg.capture_cmd.as_deref())?;
         let src = CommandCaptureSource::spawn(&cmd, self.cfg.sample_rate)?;
         Ok(src)

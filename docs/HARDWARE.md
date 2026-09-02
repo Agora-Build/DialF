@@ -86,9 +86,17 @@ keep-alive restarts, and runs in the GUI session that can be granted the mic):
 dialf service install --user
 ```
 
-The first time it captures, macOS prompts to allow the microphone — **Allow** it (the binary
-then appears under System Settings → Privacy & Security → Microphone). If you never see the
-prompt, trigger it once from a GUI Terminal: `sox -d -n stat trim 0 2` → Allow.
+The daemon **asks for the microphone explicitly** (the official consent API): the dialog
+appears at daemon start (so right after install/upgrade), and a `dialf run` that needs
+capture shows it again and **waits up to 2 minutes for your click** before proceeding. This
+works on all macOS versions — including macOS 13, whose tccd silently denies the implicit
+access from a background daemon without ever prompting. Approve via the Mac's screen or
+Screen Sharing (an SSH session can never show the dialog).
+
+If access was previously **denied**, macOS never re-prompts (by design): enable `dialf` in
+System Settings → Privacy & Security → Microphone, then retry — `dialf run` reports exactly
+this when it applies. Grants are keyed to the versioned binary path, so each upgrade asks
+once more.
 
 A root **system** daemon can't record on macOS (no way to grant it the mic without MDM). For a
 true headless/boot service that records, run the bridge host on **Linux** (no TCC).
