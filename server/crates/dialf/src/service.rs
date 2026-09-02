@@ -246,6 +246,14 @@ fn unload(scope: Scope, path: &std::path::Path) -> Result<()> {
 
 fn start(scope: Scope) -> Result<()> {
     if cfg!(target_os = "macos") {
+        // A real `stop` boots the job out, so load it first (a no-op error when it's
+        // already loaded — discard like load() does), then kickstart.
+        let path = unit_path(scope);
+        let _ = Command::new("launchctl")
+            .args(["bootstrap", &launchd_domain(scope), &path.to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         run_cmd(
             "launchctl",
             &["kickstart", "-k", &format!("{}/{LABEL}", launchd_domain(scope))],
@@ -257,10 +265,27 @@ fn start(scope: Scope) -> Result<()> {
 
 fn stop(scope: Scope) -> Result<()> {
     if cfg!(target_os = "macos") {
-        run_cmd(
-            "launchctl",
-            &["kill", "SIGTERM", &format!("{}/{LABEL}", launchd_domain(scope))],
-        )
+        // NOT `launchctl kill`: the unit has KeepAlive, so launchd would resurrect it
+        // instantly and "stop" would be a no-op. Boot the job out instead — the plist stays
+        // on disk, and `start`/`install` loads it again. bootout's own exit code is noise
+        // ("not loaded" also fails), so verify by asking launchd whether the job is gone.
+        let domain = launchd_domain(scope);
+        let _ = Command::new("launchctl")
+            .args(["bootout", &domain, &unit_path(scope).to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let still_loaded = Command::new("launchctl")
+            .args(["print", &format!("{domain}/{LABEL}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if still_loaded {
+            bail!("could not stop {LABEL} (still loaded in {domain})");
+        }
+        Ok(())
     } else {
         systemctl(scope, &["stop", &service_name()])
     }
