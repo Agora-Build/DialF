@@ -68,8 +68,10 @@ pub(crate) fn parse_system_profiler(json: &str) -> Vec<AudioDevice> {
         .collect()
 }
 
-/// Parse a `/proc/asound` tree: the `cards` file names the cards; a `card<N>/pcm*c` dir
-/// means capture-capable, `pcm*p` playback-capable. Config value is ALSA `plughw:N,0`.
+/// Parse a `/proc/asound` tree: the `cards` file names the cards; each `card<N>/pcm<M>c`
+/// dir is a capture-capable pcm device (a "port"), `pcm<M>p` playback-capable. Every port
+/// gets its own entry — multi-port cards (`plughw:1,1`) must be matchable and pickable,
+/// not collapsed to device 0. Config value is ALSA `plughw:N,M`.
 pub(crate) fn parse_asound_dir(root: &Path) -> Vec<AudioDevice> {
     let Ok(cards) = std::fs::read_to_string(root.join("cards")) else {
         return Vec::new();
@@ -81,23 +83,29 @@ pub(crate) fn parse_asound_dir(root: &Path) -> Vec<AudioDevice> {
         let Some((idx, rest)) = t.split_once(' ') else { continue };
         let Ok(n) = idx.parse::<u32>() else { continue };
         let name = rest.rsplit_once(" - ").map(|(_, n)| n.trim()).unwrap_or(rest).to_string();
-        let card_dir = root.join(format!("card{n}"));
-        let (mut input, mut output) = (false, false);
-        if let Ok(entries) = std::fs::read_dir(&card_dir) {
+        // pcm device index -> (capture, playback)
+        let mut pcms: std::collections::BTreeMap<u32, (bool, bool)> = Default::default();
+        if let Ok(entries) = std::fs::read_dir(root.join(format!("card{n}"))) {
             for e in entries.flatten() {
                 let f = e.file_name().to_string_lossy().into_owned();
-                if f.starts_with("pcm") {
-                    input |= f.ends_with('c');
-                    output |= f.ends_with('p');
-                }
+                let Some(mid) = f.strip_prefix("pcm") else { continue };
+                let Ok(m) = mid[..mid.len().saturating_sub(1)].parse::<u32>() else { continue };
+                let slot = pcms.entry(m).or_default();
+                slot.0 |= f.ends_with('c');
+                slot.1 |= f.ends_with('p');
             }
         }
-        out.push(AudioDevice {
-            value: format!("plughw:{n},0"),
-            label: format!("{name} (card {n})"),
-            input,
-            output,
-        });
+        if pcms.is_empty() {
+            pcms.insert(0, (false, false));
+        }
+        for (m, (input, output)) in pcms {
+            out.push(AudioDevice {
+                value: format!("plughw:{n},{m}"),
+                label: format!("{name} (card {n}, device {m})"),
+                input,
+                output,
+            });
+        }
     }
     out
 }
@@ -441,12 +449,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_proc_asound_tree() {
+    fn parses_proc_asound_tree_with_ports() {
         let root = std::env::temp_dir().join(format!("dialf-asound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("card0/pcm0p")).unwrap();
         std::fs::create_dir_all(root.join("card1/pcm0c")).unwrap();
         std::fs::create_dir_all(root.join("card1/pcm0p")).unwrap();
+        // Multi-port card: device 1 is a second, capture-only port.
+        std::fs::create_dir_all(root.join("card1/pcm1c")).unwrap();
         std::fs::write(
             root.join("cards"),
             " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n\
@@ -456,12 +466,15 @@ mod tests {
         )
         .unwrap();
         let devs = parse_asound_dir(&root);
-        assert_eq!(devs.len(), 2);
+        assert_eq!(devs.len(), 3);
         assert_eq!(devs[0].value, "plughw:0,0");
         assert!(!devs[0].input && devs[0].output);
         assert_eq!(devs[1].value, "plughw:1,0");
-        assert_eq!(devs[1].label, "USB Audio Device (card 1)");
+        assert_eq!(devs[1].label, "USB Audio Device (card 1, device 0)");
         assert!(devs[1].input && devs[1].output);
+        // The second port is its own matchable/pickable entry.
+        assert_eq!(devs[2].value, "plughw:1,1");
+        assert!(devs[2].input && !devs[2].output);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
