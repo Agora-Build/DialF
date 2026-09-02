@@ -199,7 +199,19 @@ pub(crate) fn run_with(
             .filter(|d| if dir_input { d.input } else { d.output })
             .collect();
         if usable.iter().any(|d| d.value == current) {
-            writeln!(p.out, "{key} \"{current}\" ✓")?;
+            // Some cards (e.g. the TI "USB AUDIO  CODEC") expose their input and output
+            // halves as two devices with the SAME name — name-based selection can then
+            // open the wrong half and capture silence.
+            if devices.iter().filter(|d| d.value == current).count() > 1 {
+                writeln!(
+                    p.out,
+                    "{key} \"{current}\": more than one device carries this name (separate \
+                     input/output halves) — if capture is silent, remove {key} from the \
+                     config and make the card the system default instead"
+                )?;
+            } else {
+                writeln!(p.out, "{key} \"{current}\" ✓")?;
+            }
             continue;
         }
         if cfg!(target_os = "macos") && current.contains("BlackHole") {
