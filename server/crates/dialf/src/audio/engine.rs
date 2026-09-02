@@ -117,16 +117,18 @@ impl AudioEngine {
         let deadline = Instant::now() + Duration::from_millis(3_000);
         while session.rx_len() == 0 {
             if Instant::now() >= deadline {
+                // Permission problems are caught upfront by mic_permission::ensure_consent,
+                // so a silent capture here is almost always the device itself.
                 tracing::error!(
-                    "capture produced no audio — please grant the daemon Microphone permission \
-                     (macOS: System Settings -> Privacy & Security -> Microphone) and check the \
-                     sound card is connected"
+                    "capture produced no audio — the capture device delivered no frames: check \
+                     the sound card is connected and `audio.capture_device` matches its EXACT \
+                     name (see the capture tool's error output above)"
                 );
                 let _ = session.finish(); // kills the capture child, finalizes empty files
                 anyhow::bail!(
-                    "capture produced no audio (3s) — please grant Microphone permission to the \
-                     daemon (macOS: System Settings -> Privacy & Security -> Microphone) and \
-                     check the sound card is connected"
+                    "capture produced no audio (3s) — the capture device delivered no frames: \
+                     check the sound card is connected and `audio.capture_device` matches its \
+                     EXACT name (the daemon log has the capture tool's error output)"
                 );
             }
             std::thread::sleep(Duration::from_millis(50));

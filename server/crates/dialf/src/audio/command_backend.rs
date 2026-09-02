@@ -38,7 +38,10 @@ impl CommandCaptureSource {
         command
             .args(&argv[1..])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            // Piped, not discarded: the tool's stderr is often the ONLY clue for a dead
+            // capture (e.g. sox "can't open input device" on a device-name mismatch) —
+            // relay it into the daemon log below.
+            .stderr(Stdio::piped());
         // Best-effort: raise the capture tool's priority so it isn't starved on a loaded
         // host. Negative nice needs privilege (root / CAP_SYS_NICE); ignored otherwise.
         #[cfg(unix)]
@@ -58,6 +61,15 @@ impl CommandCaptureSource {
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "capture: no stdout"))?;
+        if let Some(stderr) = child.stderr.take() {
+            let tool = argv[0].clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                    tracing::warn!(target: "capture_tool", tool = %tool, "{line}");
+                }
+            });
+        }
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             stdout,
