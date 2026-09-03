@@ -16,13 +16,15 @@ use crate::config::{Config, DEFAULT_SERVICE_TYPE};
 
 /// Holds the native mDNS registration process; unregisters on drop.
 pub struct Advertiser {
-    child: Child,
+    child: Option<Child>,
 }
 
 impl Drop for Advertiser {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -32,6 +34,17 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         .ws_bind
         .parse()
         .with_context(|| format!("parse ws_bind `{}`", config.ws_bind))?;
+    // Clear orphaned advertisers from dead daemons before registering our own — see
+    // reap_stale_advertisers. Do this even when we won't advertise ourselves.
+    reap_stale_advertisers();
+
+    // A loopback bind is unreachable from the LAN — advertising it would only hand phones
+    // an unconnectable decoy (and a scratch/test daemon on 127.0.0.1 must never pollute
+    // the network's discovery).
+    if addr.ip().is_loopback() {
+        tracing::info!(ws_bind = %config.ws_bind, "loopback bind — not advertising via mDNS");
+        return Ok(Advertiser { child: None });
+    }
     let port = addr.port().to_string();
     let instance = &config.instance_name;
     // The CLIs take the bare service type (no instance, no trailing .local).
@@ -39,13 +52,6 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         .trim_end_matches('.')
         .trim_end_matches(".local");
     let ver = format!("ver={}", env!("CARGO_PKG_VERSION"));
-
-    // Clear any orphaned advertiser from a previous daemon instance before registering our
-    // own. The advertiser is a child process; if the daemon was SIGKILL'd (e.g. by
-    // `launchctl bootout`) its `Drop` never ran, so the old `dns-sd`/`avahi-publish` keeps
-    // advertising a dead daemon. Multiple stale registrations for the same instance name
-    // create mDNS conflicts that block phones from discovering the live daemon.
-    reap_stale_advertisers(instance);
 
     let (tool, child) = if cfg!(target_os = "macos") {
         // dns-sd -R <name> <type> <domain> <port> [k=v ...]
@@ -74,21 +80,33 @@ pub fn advertise(config: &Config) -> anyhow::Result<Advertiser> {
         via = tool,
         "advertising via mDNS"
     );
-    Ok(Advertiser { child })
+    Ok(Advertiser { child: Some(child) })
 }
 
-/// Best-effort: kill leftover advertisers for `instance` from a previous daemon run, so the
-/// LAN doesn't accumulate conflicting mDNS registrations. Safe because only one daemon owns
-/// the WS port at a time, and we run this just before registering our own advertiser.
-fn reap_stale_advertisers(instance: &str) {
-    let pattern = if cfg!(target_os = "macos") {
-        format!("dns-sd -R {instance} ")
-    } else {
-        format!("avahi-publish -s {instance} ")
+/// Best-effort: kill ORPHANED `_dialfd._tcp` advertisers — whatever their instance name.
+/// A live daemon's advertiser is its child process; when a daemon dies without `Drop`
+/// (SIGKILL, `launchctl bootout`, a killed scratch run) the advertiser is reparented to
+/// pid 1 and keeps advertising a dead endpoint forever, luring phones away from live
+/// daemons. Orphaned (ppid 1) + our service type is a precise signature: a healthy
+/// daemon's advertiser is never touched, regardless of scope or instance name.
+fn reap_stale_advertisers() {
+    let needle = DEFAULT_SERVICE_TYPE.trim_end_matches('.').trim_end_matches(".local");
+    let Ok(out) = Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output() else {
+        return;
     };
-    let _ = Command::new("pkill")
-        .args(["-f", &pattern])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (it.next(), it.next()) else { continue };
+        let cmd = it.collect::<Vec<_>>().join(" ");
+        if ppid != "1"
+            || !cmd.contains(needle)
+            || !(cmd.starts_with("dns-sd") || cmd.starts_with("avahi-publish"))
+        {
+            continue;
+        }
+        if let Ok(pid) = pid.parse::<i32>() {
+            tracing::info!(pid, cmd = %cmd, "reaping orphaned mDNS advertiser (its daemon is gone)");
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
 }
