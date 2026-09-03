@@ -59,6 +59,10 @@ class ConnForegroundService : Service() {
         // How long to keep the CPU awake on an inbound ring while we (re)build the link, report the
         // call, and let the daemon answer. Self-releasing so it can never leak.
         private const val RING_WAKE_MS = 30_000L
+        /** WebSocket close code dialfd sends for a shared-key mismatch (another pair's daemon). */
+        private const val CLOSE_BAD_KEY = 4001
+        /** How long a key-rejecting daemon is skipped during discovery before retrying it. */
+        private const val KEY_REJECT_TTL_MS = 10 * 60_000L
         private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
 
         /** Random id generated once per app *process* launch, sent in every `hello`. A changed
@@ -387,11 +391,29 @@ class ConnForegroundService : Service() {
         nsd.resolveService(info, object : NsdManager.ResolveListener {
             override fun onServiceResolved(resolved: NsdServiceInfo) {
                 val host = resolved.host?.hostAddress ?: return
+                // A daemon that rejected our shared key (close 4001) belongs to another
+                // pair — keep discovering for OUR daemon instead of ping-ponging with it.
+                if (isKeyRejected("ws://$host:${resolved.port}")) {
+                    Log.i(TAG, "skipping ws://$host:${resolved.port} — rejected our shared key recently")
+                    return
+                }
                 stopDiscovery()
                 connect(host, resolved.port)
             }
             override fun onResolveFailed(s: NsdServiceInfo, code: Int) {}
         })
+    }
+
+    /** Daemons that closed with [CLOSE_BAD_KEY] recently: url -> skip-until epoch ms. */
+    private val keyRejectedUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun isKeyRejected(url: String): Boolean {
+        val until = keyRejectedUntil[url] ?: return false
+        if (System.currentTimeMillis() > until) {
+            keyRejectedUntil.remove(url)
+            return false
+        }
+        return true
     }
 
     private fun connect(host: String, port: Int) {
@@ -462,6 +484,17 @@ class ConnForegroundService : Service() {
         override fun onMessage(webSocket: WebSocket, text: String) {
             lastDaemonResponseMs = System.currentTimeMillis() // heard from the daemon
             handle(webSocket, text)
+        }
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            // The close code arrives here (server-initiated close); record a key rejection
+            // BEFORE acknowledging — the server may TCP-drop right after its close frame,
+            // in which case onClosed never fires (onFailure does, without the code).
+            if (code == CLOSE_BAD_KEY) {
+                Log.w(TAG, "$url rejected our shared key — skipping it for ${KEY_REJECT_TTL_MS / 60_000} min")
+                keyRejectedUntil[url] = System.currentTimeMillis() + KEY_REJECT_TTL_MS
+                notify("Shared key rejected · $url")
+            }
+            webSocket.close(1000, null)
         }
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = dropped(webSocket)
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = dropped(webSocket)

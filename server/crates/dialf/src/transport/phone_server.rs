@@ -85,7 +85,17 @@ async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) ->
             ..
         } => {
             if key != state.config.shared_key {
-                let _ = sink.send(Message::Close(None)).await;
+                // Distinct close code so the app can tell "this daemon is another pair's"
+                // apart from ordinary drops — it then skips this endpoint during discovery
+                // instead of reconnecting to it forever on a multi-daemon LAN.
+                use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+                use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Library(4001),
+                        reason: "bad shared key".into(),
+                    })))
+                    .await;
                 anyhow::bail!("rejected device `{device_id}`: bad shared key");
             }
             (device_id, name, instance_id)
