@@ -31,7 +31,12 @@
 audio:
   sample_rate: 48000                # card native rate (resampled to 16k for VAD/recording)
   channels: 1
-  capture_device: "MiniFuse 2"      # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0"
+  # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0". Selects the device for auto-detected
+  # commands; with capture_cmd/playback_cmd pinned (below) the argv's device is what runs,
+  # but KEEP these set and in sync anyway — `dialf import` verifies them against the target
+  # machine (and carries a device rename into the pinned commands), and the daemon uses
+  # them to clean up stray audio processes holding the card.
+  capture_device: "MiniFuse 2"
   playback_device: "MiniFuse 2"
   record_dir: /Users/you/dialf/recordings   # enable rx/tx/mix recording; absolute, or relative
                                             # to this config file's directory (e.g. `recordings`)
