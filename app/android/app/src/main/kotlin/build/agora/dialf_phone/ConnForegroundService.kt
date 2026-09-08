@@ -63,6 +63,9 @@ class ConnForegroundService : Service() {
         private const val CLOSE_BAD_KEY = 4001
         /** How long a key-rejecting daemon is skipped during discovery before retrying it. */
         private const val KEY_REJECT_TTL_MS = 10 * 60_000L
+        /** Retries for an NSD resolve that lost the one-at-a-time race (FAILURE_ALREADY_ACTIVE). */
+        private const val RESOLVE_RETRIES = 3
+        private const val RESOLVE_RETRY_MS = 400L
         private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
 
         /** Random id generated once per app *process* launch, sent in every `hello`. A changed
@@ -350,8 +353,13 @@ class ConnForegroundService : Service() {
 
     private fun startDiscovery() {
         stopDiscovery()
+        candidates.clear()
+        resolveQueue.clear()
+        resolveAttempts.clear()
         val listener = object : NsdManager.DiscoveryListener {
-            override fun onServiceFound(info: NsdServiceInfo) = resolve(info)
+            override fun onServiceFound(info: NsdServiceInfo) {
+                main.post { enqueueResolve(info) }
+            }
             override fun onServiceLost(info: NsdServiceInfo) {}
             override fun onDiscoveryStarted(t: String) {}
             override fun onDiscoveryStopped(t: String) {}
@@ -361,12 +369,12 @@ class ConnForegroundService : Service() {
         discovery = listener
         try {
             nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
-            // Don't leave multicast running forever — stop after a window and back off.
+            // Keep discovering for the whole window even after connecting: on a LAN with
+            // several daemons we want every candidate on hand, so a shared-key rejection can
+            // fail over to the next one instantly instead of waiting out another round.
             val t = Runnable {
-                if (running && ws == null) {
-                    stopDiscovery()
-                    scheduleReconnect()
-                }
+                stopDiscovery()
+                if (running && ws == null) scheduleReconnect()
             }
             discoveryTimeout = t
             main.postDelayed(t, DISCOVERY_WINDOW_MS)
@@ -386,22 +394,70 @@ class ConnForegroundService : Service() {
         discovery = null
     }
 
+    // --- candidate resolution -------------------------------------------------
+    // NsdManager resolves ONE service at a time: a second resolveService() while one is in
+    // flight fails with FAILURE_ALREADY_ACTIVE. Several daemons announce together, so the
+    // losers of that race used to be dropped for the entire discovery window (a wrong-key
+    // daemon then kept winning round after round — ~90s to find the right one). Queue the
+    // resolves, run them one at a time, and retry the failures.
+
+    /** Daemons discovered this round, in discovery order: url -> (host, port). Main thread only. */
+    private val candidates = LinkedHashMap<String, Pair<String, Int>>()
+    private val resolveQueue = ArrayDeque<NsdServiceInfo>()
+    private val resolveAttempts = HashMap<String, Int>()
+    private var resolving = false
+
+    private fun enqueueResolve(info: NsdServiceInfo) {
+        resolveQueue.addLast(info)
+        pumpResolve()
+    }
+
     @Suppress("DEPRECATION")
-    private fun resolve(info: NsdServiceInfo) {
+    private fun pumpResolve() {
+        if (resolving || !running) return
+        val info = resolveQueue.removeFirstOrNull() ?: return
+        resolving = true
         nsd.resolveService(info, object : NsdManager.ResolveListener {
             override fun onServiceResolved(resolved: NsdServiceInfo) {
-                val host = resolved.host?.hostAddress ?: return
-                // A daemon that rejected our shared key (close 4001) belongs to another
-                // pair — keep discovering for OUR daemon instead of ping-ponging with it.
-                if (isKeyRejected("ws://$host:${resolved.port}")) {
-                    Log.i(TAG, "skipping ws://$host:${resolved.port} — rejected our shared key recently")
-                    return
+                main.post {
+                    resolving = false
+                    val host = resolved.host?.hostAddress
+                    if (host != null) {
+                        candidates["ws://$host:${resolved.port}"] = host to resolved.port
+                        connectNextCandidate()
+                    }
+                    pumpResolve()
                 }
-                stopDiscovery()
-                connect(host, resolved.port)
             }
-            override fun onResolveFailed(s: NsdServiceInfo, code: Int) {}
+
+            override fun onResolveFailed(s: NsdServiceInfo, code: Int) {
+                main.post {
+                    resolving = false
+                    // Mostly FAILURE_ALREADY_ACTIVE from a concurrent resolve — retry rather
+                    // than losing this daemon until the next discovery round.
+                    val n = (resolveAttempts[s.serviceName] ?: 0) + 1
+                    resolveAttempts[s.serviceName] = n
+                    if (n <= RESOLVE_RETRIES) {
+                        main.postDelayed({ enqueueResolve(s) }, RESOLVE_RETRY_MS)
+                    } else {
+                        Log.w(TAG, "giving up on ${s.serviceName} after $n resolve failures (code $code)")
+                    }
+                    pumpResolve()
+                }
+            }
         })
+    }
+
+    /** Connect to the first discovered daemon that hasn't rejected our shared key. */
+    private fun connectNextCandidate(): Boolean {
+        if (!running || ws != null) return false
+        val next = candidates.entries.firstOrNull { !isKeyRejected(it.key) }
+        if (next == null) {
+            candidates.keys.forEach { Log.i(TAG, "skipping $it — rejected our shared key recently") }
+            return false
+        }
+        connect(next.value.first, next.value.second)
+        return true
     }
 
     /** Daemons that closed with [CLOSE_BAD_KEY] recently: url -> skip-until epoch ms. */
@@ -493,6 +549,9 @@ class ConnForegroundService : Service() {
                 Log.w(TAG, "$url rejected our shared key — skipping it for ${KEY_REJECT_TTL_MS / 60_000} min")
                 keyRejectedUntil[url] = System.currentTimeMillis() + KEY_REJECT_TTL_MS
                 notify("Shared key rejected · $url")
+                // Fail over to another discovered daemon immediately: this one is another
+                // pair's, so there is nothing to back off from.
+                keyRejectFailover = true
             }
             webSocket.close(1000, null)
         }
@@ -510,8 +569,18 @@ class ConnForegroundService : Service() {
         ws = null
         notify("Reconnecting…")
         Dialf.emit(mapOf("type" to "status", "connected" to false))
-        scheduleReconnect()
+        val keyReject = keyRejectFailover
+        keyRejectFailover = false
+        main.post {
+            // A wrong-key daemon: try the next one we already discovered, right now. Any
+            // other drop goes through the normal backoff (it may be our own daemon blipping).
+            if (keyReject && connectNextCandidate()) return@post
+            scheduleReconnect()
+        }
     }
+
+    /** Set when the current socket was closed for a shared-key mismatch (see [CLOSE_BAD_KEY]). */
+    @Volatile private var keyRejectFailover = false
 
     /** Tear down the current socket and reconnect now — used when we *know* the link is dead
      *  (liveness timeout, or network back after sleep). Unlike waiting for a close callback, this
