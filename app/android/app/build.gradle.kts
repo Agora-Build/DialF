@@ -56,4 +56,6 @@ flutter {
 dependencies {
     // Native WebSocket client for the headless control-plane service.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // JVM unit tests (./gradlew :app:testDebugUnitTest) — no emulator needed.
+    testImplementation("junit:junit:4.13.2")
 }

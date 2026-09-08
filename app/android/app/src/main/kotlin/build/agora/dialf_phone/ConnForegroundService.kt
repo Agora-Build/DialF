@@ -353,7 +353,7 @@ class ConnForegroundService : Service() {
 
     private fun startDiscovery() {
         stopDiscovery()
-        candidates.clear()
+        daemons.clear()
         resolveQueue.clear()
         resolveAttempts.clear()
         val listener = object : NsdManager.DiscoveryListener {
@@ -401,8 +401,8 @@ class ConnForegroundService : Service() {
     // daemon then kept winning round after round — ~90s to find the right one). Queue the
     // resolves, run them one at a time, and retry the failures.
 
-    /** Daemons discovered this round, in discovery order: url -> (host, port). Main thread only. */
-    private val candidates = LinkedHashMap<String, Pair<String, Int>>()
+    /** Daemons discovered on the LAN + which of them rejected our shared key. */
+    private val daemons = DaemonCandidates(KEY_REJECT_TTL_MS)
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private val resolveAttempts = HashMap<String, Int>()
     private var resolving = false
@@ -423,7 +423,7 @@ class ConnForegroundService : Service() {
                     resolving = false
                     val host = resolved.host?.hostAddress
                     if (host != null) {
-                        candidates["ws://$host:${resolved.port}"] = host to resolved.port
+                        daemons.add(host, resolved.port)
                         connectNextCandidate()
                     }
                     pumpResolve()
@@ -451,24 +451,13 @@ class ConnForegroundService : Service() {
     /** Connect to the first discovered daemon that hasn't rejected our shared key. */
     private fun connectNextCandidate(): Boolean {
         if (!running || ws != null) return false
-        val next = candidates.entries.firstOrNull { !isKeyRejected(it.key) }
+        val now = System.currentTimeMillis()
+        val next = daemons.next(now)
         if (next == null) {
-            candidates.keys.forEach { Log.i(TAG, "skipping $it — rejected our shared key recently") }
+            daemons.skipped(now).forEach { Log.i(TAG, "skipping $it — rejected our shared key recently") }
             return false
         }
-        connect(next.value.first, next.value.second)
-        return true
-    }
-
-    /** Daemons that closed with [CLOSE_BAD_KEY] recently: url -> skip-until epoch ms. */
-    private val keyRejectedUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    private fun isKeyRejected(url: String): Boolean {
-        val until = keyRejectedUntil[url] ?: return false
-        if (System.currentTimeMillis() > until) {
-            keyRejectedUntil.remove(url)
-            return false
-        }
+        connect(next.host, next.port)
         return true
     }
 
@@ -547,7 +536,7 @@ class ConnForegroundService : Service() {
             // in which case onClosed never fires (onFailure does, without the code).
             if (code == CLOSE_BAD_KEY) {
                 Log.w(TAG, "$url rejected our shared key — skipping it for ${KEY_REJECT_TTL_MS / 60_000} min")
-                keyRejectedUntil[url] = System.currentTimeMillis() + KEY_REJECT_TTL_MS
+                daemons.markKeyRejected(url, System.currentTimeMillis())
                 notify("Shared key rejected · $url")
                 // Fail over to another discovered daemon immediately: this one is another
                 // pair's, so there is nothing to back off from.
