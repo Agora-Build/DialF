@@ -1,7 +1,6 @@
-//! Interactive host precheck for `dialf import`: verify the imported config's audio setup
-//! against THIS machine — capture/playback devices, the capture tool, record_dir — and
-//! prompt the user to fix mismatches (pick a detected device, auto-fix a tool path, install
-//! the tool) so an imported bundle actually runs, not just installs.
+//! Interactive host precheck for `dialf import`: verify the imported config against THIS
+//! machine — shared key, capture/playback devices, tools, and record_dir — and prompt the
+//! user to fix mismatches so an imported bundle actually runs, not just installs.
 //!
 //! Detection uses only what the OS ships: `system_profiler` (macOS) and `/proc/asound`
 //! (Linux). Prompts default to "keep as-is" on Enter, and everything here degrades to the
@@ -177,6 +176,14 @@ pub(crate) fn run_with(
 ) -> Result<()> {
     writeln!(p.out, "\nchecking this machine against the imported config…")?;
 
+    check_shared_key(doc, edits, p)?;
+    for key in rewrite_linux_sox_commands(doc, edits) {
+        writeln!(
+            p.out,
+            "{key}: changed SoX audio driver from coreaudio to alsa for Linux"
+        )?;
+    }
+
     // record_dir: confirm or redirect.
     if let Some(current) = audio_str(doc, "record_dir") {
         let ans = p.ask(&format!("record_dir [{current}] (Enter to keep, or type a new path): "))?;
@@ -249,7 +256,8 @@ pub(crate) fn run_with(
     }
 
     // Pinned capture/playback commands: fix device literals renamed above, then make sure
-    // the tool itself exists (auto-fix its path, or offer to install it).
+    // their audio backend fits this OS and the tool itself exists (auto-fix its path, or
+    // offer to install it).
     for key in ["capture_cmd", "playback_cmd"] {
         let Some(mut argv) = audio_argv(doc, key) else { continue };
         let mut changed = false;
@@ -293,6 +301,83 @@ pub(crate) fn run_with(
         offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
     }
     Ok(())
+}
+
+/// SoX names its host audio driver in the argv (`-t coreaudio` on macOS, `-t alsa` on
+/// Linux). Device and executable rewrites alone are not enough when importing across OSes.
+fn rewrite_sox_coreaudio_for_alsa(argv: &mut [String]) -> bool {
+    let Some(tool) = argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name())
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    if !matches!(tool, "sox" | "play" | "rec") {
+        return false;
+    }
+
+    let mut changed = false;
+    for i in 1..argv.len() {
+        if argv[i] == "coreaudio" && argv.get(i - 1).is_some_and(|arg| arg == "-t") {
+            argv[i] = "alsa".to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Apply the cross-platform SoX backend migration. Returns the config keys that changed for
+/// interactive status or non-interactive warning output.
+pub(crate) fn rewrite_linux_sox_commands(
+    doc: &mut serde_yaml::Value,
+    edits: &mut Vec<(String, String)>,
+) -> Vec<&'static str> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+
+    let mut changed = Vec::new();
+    for key in ["capture_cmd", "playback_cmd"] {
+        let Some(mut argv) = audio_argv(doc, key) else {
+            continue;
+        };
+        if rewrite_sox_coreaudio_for_alsa(&mut argv) {
+            set_audio_argv(doc, edits, key, &argv);
+            changed.push(key);
+        }
+    }
+    changed
+}
+
+fn check_shared_key(
+    doc: &mut serde_yaml::Value,
+    edits: &mut Vec<(String, String)>,
+    p: &mut Prompter<'_>,
+) -> Result<()> {
+    let current = doc
+        .get("shared_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("change-me");
+    if !shared_key_is_placeholder(current) {
+        writeln!(p.out, "shared_key is set ✓")?;
+        return Ok(());
+    }
+
+    let ans = p.ask(
+        "shared_key is missing or still the insecure `change-me` placeholder. Type a new key \
+         that will also be entered in the phone app, or Enter to keep it: ",
+    )?;
+    if ans.is_empty() || shared_key_is_placeholder(&ans) {
+        writeln!(p.out, "warning: shared_key remains `change-me`")?;
+    } else {
+        set_top_level_str(doc, edits, "shared_key", &ans);
+    }
+    Ok(())
+}
+
+pub(crate) fn shared_key_is_placeholder(key: &str) -> bool {
+    matches!(key.trim(), "" | "change-me")
 }
 
 /// The pinned tool at `argv[0]`: return a corrected path if the user accepts one, `None` if
@@ -430,6 +515,20 @@ fn set_audio_argv(
     }
 }
 
+fn set_top_level_str(
+    doc: &mut serde_yaml::Value,
+    edits: &mut Vec<(String, String)>,
+    key: &str,
+    val: &str,
+) {
+    let Some(map) = doc.as_mapping_mut() else {
+        return;
+    };
+    map.insert(serde_yaml::Value::String(key.to_string()), val.into());
+    edits.retain(|(k, _)| k != key);
+    edits.push((key.to_string(), yaml_quote(val)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,10 +593,73 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_only_sox_coreaudio_driver_tokens_for_alsa() {
+        let mut argv = vec![
+            "/opt/homebrew/bin/sox",
+            "-q",
+            "-t",
+            "coreaudio",
+            "BlackHole 16ch",
+            "-t",
+            "raw",
+            "-",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        assert!(rewrite_sox_coreaudio_for_alsa(&mut argv));
+        assert_eq!(argv[3], "alsa");
+        assert!(!rewrite_sox_coreaudio_for_alsa(&mut argv));
+
+        let mut unrelated = vec!["ffmpeg".into(), "-t".into(), "coreaudio".into()];
+        assert!(!rewrite_sox_coreaudio_for_alsa(&mut unrelated));
+        assert_eq!(unrelated[2], "coreaudio");
+    }
+
+    #[test]
+    fn precheck_replaces_placeholder_shared_key() {
+        let mut doc: serde_yaml::Value = serde_yaml::from_str("shared_key: change-me\n").unwrap();
+        let mut edits = Vec::new();
+        let mut input = std::io::Cursor::new(b"latency-eval-key\n".to_vec());
+        let mut out = Vec::new();
+        let mut p = Prompter {
+            input: &mut input,
+            out: &mut out,
+        };
+
+        check_shared_key(&mut doc, &mut edits, &mut p).unwrap();
+
+        assert_eq!(doc["shared_key"].as_str(), Some("latency-eval-key"));
+        assert_eq!(
+            edits,
+            vec![("shared_key".into(), "\"latency-eval-key\"".into())]
+        );
+    }
+
+    #[test]
+    fn noninteractive_linux_rewrite_updates_document_and_edits() {
+        let yaml = "audio:\n  capture_cmd: [\"sox\", \"-t\", \"coreaudio\", \"BlackHole\", \"-\"]\n  playback_cmd: [\"sox\", \"x.wav\", \"-t\", \"coreaudio\", \"BlackHole\"]\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let mut edits = Vec::new();
+
+        let changed = rewrite_linux_sox_commands(&mut doc, &mut edits);
+
+        if cfg!(target_os = "linux") {
+            assert_eq!(changed, vec!["capture_cmd", "playback_cmd"]);
+            assert_eq!(doc["audio"]["capture_cmd"][2].as_str(), Some("alsa"));
+            assert_eq!(doc["audio"]["playback_cmd"][3].as_str(), Some("alsa"));
+            assert_eq!(edits.len(), 2);
+        } else {
+            assert!(changed.is_empty());
+            assert!(edits.is_empty());
+        }
+    }
+
+    #[test]
     fn precheck_picks_devices_and_patches_pinned_cmd() {
         // Config pins BlackHole devices + a sox path that don't exist "here"; the user picks
         // detected devices — the cmd argv literals must follow the rename.
-        let yaml = "audio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n  capture_cmd: [\"/opt/homebrew/bin/sox\", \"-q\", \"-t\", \"coreaudio\", \"BlackHole 16ch\", \"-\"]\n";
+        let yaml = "shared_key: test-key\naudio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n  capture_cmd: [\"/opt/homebrew/bin/sox\", \"-q\", \"-t\", \"coreaudio\", \"BlackHole 16ch\", \"-\"]\n";
         let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let mut edits = Vec::new();
         let devices = vec![AudioDevice {
@@ -522,12 +684,16 @@ mod tests {
             .collect();
         assert!(argv.contains(&"MiniFuse 2"), "{argv:?}"); // "BlackHole 16ch" literal renamed
         assert!(!argv.contains(&"BlackHole 16ch"));
+        if cfg!(target_os = "linux") {
+            assert!(argv.contains(&"alsa"), "{argv:?}");
+            assert!(!argv.contains(&"coreaudio"));
+        }
         assert!(edits.iter().any(|(k, _)| k == "capture_cmd"));
     }
 
     #[test]
     fn precheck_keeps_everything_on_enter() {
-        let yaml = "audio:\n  record_dir: /x/recordings\n  capture_device: \"MiniFuse 2\"\n";
+        let yaml = "shared_key: test-key\naudio:\n  record_dir: /x/recordings\n  capture_device: \"MiniFuse 2\"\n";
         let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let orig = doc.clone();
         let mut edits = Vec::new();

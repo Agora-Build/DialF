@@ -566,11 +566,23 @@ fn import_impl(
         }
     }
 
-    // Host precheck: interactively verify/fix devices, the capture tool, and record_dir
-    // against THIS machine — or, without a terminal, fall back to plain warnings.
+    // Host precheck: interactively verify/fix the key, devices, tools, and record_dir against
+    // THIS machine. Without a terminal, apply safe platform rewrites and emit plain warnings.
     if interactive {
         crate::hostcheck::run(&mut doc, &mut edits, &folder)?;
     } else {
+        for key in crate::hostcheck::rewrite_linux_sox_commands(&mut doc, &mut edits) {
+            warnings.push(format!(
+                "audio.{key}: changed SoX audio driver from coreaudio to alsa for Linux"
+            ));
+        }
+        if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
+            warnings.push(
+                "config shared_key is still the insecure `change-me` placeholder — set it to a \
+                 private value that matches the phone app"
+                    .to_string(),
+            );
+        }
         for (label, cmd) in [
             ("capture_cmd", cfg.audio.capture_cmd.as_ref()),
             ("playback_cmd", cfg.audio.playback_cmd.as_ref()),
@@ -1022,6 +1034,30 @@ mod tests {
         write(&noscript.join("config.yaml"), "shared_key: k\n");
         let err = import_to(&noscript, &root.join("c.yaml"), false).unwrap_err().to_string();
         assert!(err.contains("no job script"), "{err}");
+    }
+
+    #[test]
+    fn noninteractive_import_warns_about_key_and_migrates_linux_sox_backend() {
+        let root = tempdir("import-host-settings");
+        let bundle = make_project(&root);
+        write(
+            &bundle.join("config.yaml"),
+            "shared_key: change-me\naudio:\n  capture_cmd: [\"/opt/homebrew/bin/sox\", \"-t\", \"coreaudio\", \"BlackHole 16ch\", \"-\"]\n  playback_cmd: [\"/opt/homebrew/bin/sox\", \"x.wav\", \"-t\", \"coreaudio\", \"BlackHole 2ch\"]\n",
+        );
+        let dest = root.join("dest/config.yaml");
+
+        let report = import_to(&bundle, &dest, false).unwrap();
+
+        assert!(report.warnings.iter().any(|w| w.contains("shared_key")));
+        let installed = std::fs::read_to_string(dest).unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(installed.contains(r#""-t", "alsa""#), "{installed}");
+            assert!(!installed.contains(r#""-t", "coreaudio""#), "{installed}");
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.contains("CoreAudio") || w.contains("coreaudio")));
+        }
     }
 
     #[test]

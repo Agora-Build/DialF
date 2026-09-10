@@ -346,18 +346,19 @@ only replaced after a `[y/N]` confirmation — Enter keeps it — or pass `--ove
 directly without the prompt. Either way the old config is kept as a timestamped backup
 (`config.yaml.bak.YYYYMMDD-HHMMSS`) — earlier backups are never overwritten. It then restarts the installed dialfd service (or tells you to restart a
 foreground `dialf daemon` / use `sudo` for a system service) and confirms via the daemon which
-config is now active. `--no-restart` skips that. Host-specific settings travel as-is — check
-the printed warnings for tools/devices (`audio.capture_cmd`, device names) that don't exist on
-the new machine.
+config is now active. `--no-restart` skips that. Host-specific settings generally travel as-is
+(except the SoX CoreAudio-to-ALSA migration described below) — check the printed warnings for
+tools/devices (`audio.capture_cmd`, device names) that don't exist on the new machine.
 
 On a terminal, `import` runs an **interactive host precheck** instead of just warning: it
-detects this machine's audio devices (`system_profiler` on macOS, `/proc/asound` on Linux)
-and lets you pick replacements for devices the config names that don't exist here, confirms
-`record_dir`, fixes a pinned capture/playback tool path that moved (e.g. `/opt/homebrew` vs
-`/usr/local` sox), and offers to install a missing tool (`brew install sox` on macOS;
-`apt-get`/`dnf`/`pacman`/`zypper` on Linux). Missing BlackHole virtual devices get the
-matching `brew install blackhole-*` hint. Enter always keeps the current value; piped/non-TTY
-runs skip the prompts and keep the warning behavior.
+prompts to replace a missing/empty/`change-me` shared key, detects this machine's audio devices
+(`system_profiler` on macOS, `/proc/asound` on Linux), and lets you pick replacements for device
+names that don't exist here. It also confirms `record_dir`, translates SoX commands from
+CoreAudio to ALSA when importing a macOS config on Linux, fixes a pinned tool path that moved
+(e.g. `/opt/homebrew` vs `/usr/local` sox), and offers to install a missing tool (`brew install
+sox` on macOS; `apt-get`/`dnf`/`pacman`/`zypper` on Linux). Missing BlackHole virtual devices get
+the matching `brew install blackhole-*` hint. Enter always keeps the current value; piped/non-TTY
+runs skip the prompts and warn when the shared key is still a placeholder.
 
 ## Development
 
