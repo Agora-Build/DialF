@@ -228,10 +228,17 @@ fn load(scope: Scope, path: &std::path::Path) -> Result<()> {
             .context("launchctl bootstrap")?;
         let _ = run_cmd("launchctl", &["enable", &format!("{domain}/{LABEL}")]);
     } else {
-        systemctl(scope, &["daemon-reload"])?;
-        systemctl(scope, &["enable", "--now", &service_name()])?;
+        load_systemd(|args| systemctl(scope, args))?;
     }
     Ok(())
+}
+
+fn load_systemd(mut run: impl FnMut(&[&str]) -> Result<()>) -> Result<()> {
+    let name = service_name();
+    run(&["daemon-reload"])?;
+    run(&["enable", &name])?;
+    // `enable --now` leaves an already-running process untouched after ExecStart changes.
+    run(&["restart", &name])
 }
 
 fn unload(scope: Scope, path: &std::path::Path) -> Result<()> {
@@ -452,6 +459,29 @@ fn libc_getuid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn systemd_install_restarts_an_existing_service() {
+        let mut calls = Vec::new();
+        load_systemd(|args| {
+            calls.push(
+                args.iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>(),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![
+                vec!["daemon-reload"],
+                vec!["enable", "build.agora.dialfd.service"],
+                vec!["restart", "build.agora.dialfd.service"],
+            ]
+        );
+    }
 
     #[test]
     fn unit_argv_parses_launchd_and_systemd() {
