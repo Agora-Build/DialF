@@ -126,6 +126,26 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   one shared socket owned by the `dialf` group (0660). The control socket has **no auth
   beyond fs permissions** — group members can dial/SMS/run jobs.
 
+### Device sharing (`dialf devices share`)
+- **The ADB server protocol has no authentication** — its loopback bind *is* its security
+  model. Reaching the port means `shell`, APK install, `/sdcard` read/write, screen capture,
+  and port-forwarding *into* the device. So the share gates every connection on an
+  HMAC-SHA256 challenge-response (`share/handshake.rs`) before forwarding a byte.
+- **The token authenticates; it does not encrypt.** The proxied session after the handshake is
+  plaintext, so an on-path attacker can read or hijack it. Off-LAN use belongs inside a VPN or
+  SSH tunnel. TLS is deliberately not implemented.
+- **A byte splice is not enough** — `share/adb.rs` reads each connection's first request so
+  `--target` is *enforced*, not advisory. It blocks `host:kill` (a remote `adb kill-server`,
+  or just a peer on a mismatched platform-tools version, would otherwise stop the host's adb
+  server), filters `host:devices` to shared serials only, and refuses `transport-any` when
+  several devices are shared.
+- **adb-over-WiFi serials contain colons** (`192.168.1.5:5555`), so never parse
+  `host-serial:<serial>:<cmd>` by splitting on the first colon — match against known serials.
+- Sharing **never defaults to everything**: no `--target`/`--all` is an error listing what is
+  attached. A host that grows a second phone must not start sharing it silently.
+- `ShareHandle::stop` waits for the accept loop to exit rather than aborting it, but the last
+  of the socket teardown is the kernel's — re-binding the same port can need ~30ms on macOS.
+
 ## Diagnosing a phone that isn't connected
 
 ```sh

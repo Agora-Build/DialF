@@ -99,6 +99,9 @@ pub struct DaemonState {
     pub mmi_results: Arc<Mutex<HashMap<String, MmiResult>>>,
     /// Most recent voicemail enable/disable result, per device id.
     pub voicemail_results: Arc<Mutex<HashMap<String, VoicemailResult>>>,
+    /// The running device share, if any (`dialf adb share start`). Runtime-controlled rather
+    /// than config-only so an exposed port can be closed without restarting the daemon.
+    pub share: Arc<tokio::sync::Mutex<Option<crate::share::server::ShareHandle>>>,
 }
 
 /// RAII lock on the sound card (one call/recording at a time). Releases on drop.
@@ -445,6 +448,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         sims: Arc::new(Mutex::new(HashMap::new())),
         mmi_results: Arc::new(Mutex::new(HashMap::new())),
         voicemail_results: Arc::new(Mutex::new(HashMap::new())),
+        share: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     // Advertise on the LAN (non-fatal if it fails). Kept alive for the daemon's lifetime.
@@ -464,12 +468,108 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         "dialfd ready (phone WS plane)"
     );
 
+    // Autostart the device share only if config asks for it. Failure here is non-fatal: a
+    // misconfigured share must not stop the daemon from driving calls.
+    if state.config.adb_share.enabled {
+        if let Err(e) = start_share(&state, crate::share::Profile::Adb, None, Vec::new(), false).await
+        {
+            tracing::warn!(error = %format!("{e:#}"), "adb share autostart failed");
+        }
+    }
+
     tokio::try_join!(
         control_server::serve(state.clone()),
         phone_server::serve(state.clone()),
         phone_server::reap_stale(state.clone()),
     )?;
     Ok(())
+}
+
+/// Resolve the config for `profile`. Only `adb` ships today; the lookup exists so adding a
+/// second profile is a match arm rather than a rewrite.
+fn share_config(state: &DaemonState, profile: crate::share::Profile) -> &crate::share::ShareConfig {
+    match profile {
+        crate::share::Profile::Adb => &state.config.adb_share,
+    }
+}
+
+/// Start a share, replacing any already running for that profile.
+///
+/// `bind_override` applies to this run only and is never written back to config — an exposed
+/// port should have to be asked for again after a restart.
+async fn start_share(
+    state: &DaemonState,
+    profile: crate::share::Profile,
+    bind_override: Option<String>,
+    targets: Vec<String>,
+    all: bool,
+) -> anyhow::Result<crate::share::ResolvedShare> {
+    let mut cfg = share_config(state, profile).clone();
+    if let Some(bind) = bind_override {
+        cfg.bind = Some(bind);
+    }
+    // A request that names devices replaces config's list outright, rather than adding to it —
+    // "share exactly these" must not be widened by a stale config entry.
+    if all {
+        cfg.all = true;
+        cfg.targets.clear();
+    } else if !targets.is_empty() {
+        cfg.targets = targets;
+        cfg.all = false;
+    }
+    let resolved = cfg.resolve(profile)?;
+
+    // An adb server that isn't running yet would make every proxied connection fail with a
+    // refused upstream; start it the way a person would.
+    if let crate::share::Upstream::Tcp(_) = &resolved.upstream {
+        if !crate::share::server::upstream_reachable(&resolved.upstream).await {
+            ensure_adb_server();
+        }
+    }
+
+    // Named serials are checked against what is actually attached: a typo'd serial would
+    // otherwise start a share that silently reaches nothing.
+    if let crate::share::Targets::Only(wanted) = &resolved.targets {
+        if let Ok(attached) = crate::share::adb::list_devices(&resolved.upstream).await {
+            let missing: Vec<&String> = wanted
+                .iter()
+                .filter(|w| !attached.iter().any(|d| &d.serial == *w))
+                .collect();
+            if !missing.is_empty() {
+                let have: Vec<String> = attached.iter().map(|d| d.serial.clone()).collect();
+                anyhow::bail!(
+                    "not attached: {} (attached: {})",
+                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                    if have.is_empty() { "none".to_string() } else { have.join(", ") }
+                );
+            }
+        }
+    }
+
+    let handle = crate::share::server::start(resolved.clone()).await?;
+    let mut slot = state.share.lock().await;
+    if let Some(old) = slot.take() {
+        old.stop().await;
+    }
+    *slot = Some(handle);
+    Ok(resolved)
+}
+
+/// Best-effort `adb start-server`. Silent when adb isn't installed — `share status` reports
+/// the unreachable upstream, which is a clearer signal than an error here.
+fn ensure_adb_server() {
+    let Ok(adb) = which::which("adb") else {
+        return;
+    };
+    match std::process::Command::new(&adb).arg("start-server").output() {
+        Ok(out) if out.status.success() => tracing::info!("started the local adb server"),
+        Ok(out) => tracing::warn!(
+            status = ?out.status.code(),
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "adb start-server failed"
+        ),
+        Err(e) => tracing::warn!(error = %e, "could not run adb start-server"),
+    }
 }
 
 /// Dispatch a control request, never failing the connection — errors become error
@@ -725,6 +825,111 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
         ControlOp::JobStatus { job_id } => {
             anyhow::bail!("job.status not tracked yet (job_id={job_id})")
         }
+        ControlOp::ShareStart {
+            profile,
+            bind,
+            targets,
+            all,
+        } => {
+            let profile = parse_profile(profile.as_deref())?;
+            let resolved = start_share(state, profile, bind, targets, all).await?;
+            Ok(ok_data(
+                &id,
+                json!({
+                    "profile": profile.as_str(),
+                    "bind": resolved.bind.to_string(),
+                    "upstream": resolved.upstream.to_string(),
+                    "public": resolved.is_public(),
+                    "targets": share_targets_json(&resolved.targets),
+                }),
+            ))
+        }
+        ControlOp::ShareDevices { profile } => {
+            let profile = parse_profile(profile.as_deref())?;
+            let upstream = share_config(state, profile)
+                .upstream
+                .as_deref()
+                .map(|s| s.parse())
+                .transpose()?
+                .unwrap_or_else(|| profile.default_upstream());
+            if !crate::share::server::upstream_reachable(&upstream).await {
+                ensure_adb_server();
+            }
+            let devices = crate::share::adb::list_devices(&upstream).await?;
+            Ok(ok_data(
+                &id,
+                json!({
+                    "devices": devices
+                        .iter()
+                        .map(|d| json!({
+                            "serial": d.serial,
+                            "state": d.state,
+                            "model": d.model,
+                            "ready": d.is_ready(),
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+            ))
+        }
+        ControlOp::ShareStop { profile } => {
+            let profile = parse_profile(profile.as_deref())?;
+            let running = state.share.lock().await.take();
+            match running {
+                Some(handle) => {
+                    let bind = handle.config.bind.to_string();
+                    handle.stop().await;
+                    tracing::info!(profile = %profile, %bind, "device share stopped");
+                    Ok(ok_data(&id, json!({ "stopped": true, "bind": bind })))
+                }
+                None => Ok(ok_data(&id, json!({ "stopped": false }))),
+            }
+        }
+        ControlOp::ShareStatus { profile } => {
+            let profile = parse_profile(profile.as_deref())?;
+            let slot = state.share.lock().await;
+            match slot.as_ref() {
+                Some(handle) => {
+                    let upstream = handle.config.upstream.clone();
+                    let data = json!({
+                        "running": true,
+                        "profile": profile.as_str(),
+                        "bind": handle.config.bind.to_string(),
+                        "upstream": upstream.to_string(),
+                        "upstream_reachable": crate::share::server::upstream_reachable(&upstream).await,
+                        "public": handle.config.is_public(),
+                        "targets": share_targets_json(&handle.config.targets),
+                        "active_connections": handle.active_connections(),
+                        "served_connections": handle.served_connections(),
+                    });
+                    Ok(ok_data(&id, data))
+                }
+                None => Ok(ok_data(
+                    &id,
+                    json!({
+                        "running": false,
+                        "profile": profile.as_str(),
+                        "autostart": share_config(state, profile).enabled,
+                    }),
+                )),
+            }
+        }
+    }
+}
+
+/// Profile name from a request, defaulting to adb (the only one shipped).
+fn parse_profile(name: Option<&str>) -> anyhow::Result<crate::share::Profile> {
+    match name {
+        Some(s) => s.parse(),
+        None => Ok(crate::share::Profile::Adb),
+    }
+}
+
+/// Report the share's scope as either the string "all" or the explicit serial list, so a
+/// client can tell "everything" from "these two" without re-deriving it.
+fn share_targets_json(targets: &crate::share::Targets) -> serde_json::Value {
+    match targets {
+        crate::share::Targets::All => json!("all"),
+        crate::share::Targets::Only(list) => json!(list),
     }
 }
 
@@ -1111,6 +1316,7 @@ mod tests {
             sims: Arc::new(Mutex::new(HashMap::new())),
             mmi_results: Arc::new(Mutex::new(HashMap::new())),
             voicemail_results: Arc::new(Mutex::new(HashMap::new())),
+            share: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 

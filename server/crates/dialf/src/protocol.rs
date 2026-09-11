@@ -329,6 +329,40 @@ pub enum ControlOp {
         #[serde(default)]
         force: bool,
     },
+    /// Start sharing a locally-attached device (`adb`) with remote machines. `bind` overrides
+    /// `adb_share.bind` for this run only — nothing is written back to config, so an exposed
+    /// port never outlives the daemon that was asked for it.
+    #[serde(rename = "share.start")]
+    ShareStart {
+        #[serde(default)]
+        profile: Option<String>,
+        #[serde(default)]
+        bind: Option<String>,
+        /// Device serials to expose. Empty + `all: false` is an error, not "share everything".
+        #[serde(default)]
+        targets: Vec<String>,
+        /// Expose every attached device instead of a named list.
+        #[serde(default)]
+        all: bool,
+    },
+    /// List the devices attached to the host (what `--target` can name).
+    #[serde(rename = "share.devices")]
+    ShareDevices {
+        #[serde(default)]
+        profile: Option<String>,
+    },
+    /// Stop a running share and drop its in-flight connections.
+    #[serde(rename = "share.stop")]
+    ShareStop {
+        #[serde(default)]
+        profile: Option<String>,
+    },
+    /// Report whether a share is running, where it listens, and whether its upstream answers.
+    #[serde(rename = "share.status")]
+    ShareStatus {
+        #[serde(default)]
+        profile: Option<String>,
+    },
 }
 
 /// A response (or streamed event) on the control socket.

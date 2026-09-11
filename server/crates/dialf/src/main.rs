@@ -39,6 +39,10 @@ enum Command {
         /// Pretty, human-readable output (one line per phone).
         #[arg(long)]
         human: bool,
+        /// Share an attached device, or reach one shared elsewhere. Without this, lists the
+        /// phones connected to dialfd.
+        #[command(subcommand)]
+        action: Option<DevicesAction>,
     },
     /// Place/answer/hang up calls and read the call log.
     Call {
@@ -114,6 +118,54 @@ enum Command {
         /// Install for the current user (login) instead of system-wide (boot).
         #[arg(long, global = true)]
         user: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesAction {
+    /// Share attached devices with remote machines.
+    ///
+    /// Name what to expose with `--target <serial>` (repeatable) or `--all`. The token
+    /// authenticates connections but does NOT encrypt them — outside a trusted LAN, tunnel
+    /// this over a VPN or SSH.
+    Share {
+        /// Share over adb (Android). The default, and currently the only protocol.
+        #[arg(long)]
+        adb: bool,
+        /// Device serial to expose, as `adb devices` reports it. Repeat for several.
+        #[arg(long = "target", value_name = "SERIAL")]
+        targets: Vec<String>,
+        /// Expose every attached device, including ones plugged in later.
+        #[arg(long, conflicts_with = "targets")]
+        all: bool,
+        /// Listen address; overrides `adb_share.bind` for this run only.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Show what is being shared, and whether adb answers behind it.
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind"])]
+        status: bool,
+        /// Stop sharing and drop in-flight connections.
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status"])]
+        stop: bool,
+        /// List the attached devices that `--target` can name.
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status", "stop"])]
+        list: bool,
+        /// Print a fresh random token for `adb_share.token`.
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status", "stop", "list"])]
+        new_token: bool,
+    },
+    /// Connect to a host sharing its devices, exposing them as a local port.
+    ///
+    /// Then use stock tooling: `adb -H 127.0.0.1 -P 5038 …`. Runs until Ctrl+C.
+    Connect {
+        /// Host running the share: `hostname`, `host:port`, or `[::1]:port`.
+        host: String,
+        /// Shared token. Falls back to $DIALF_SHARE_TOKEN, then `adb_share.token` in config.
+        #[arg(long)]
+        token: Option<String>,
+        /// Local address to expose (loopback only — this port inherits full device access).
+        #[arg(long, default_value = "127.0.0.1:5038")]
+        bind: String,
     },
 }
 
@@ -318,7 +370,11 @@ async fn main() -> anyhow::Result<()> {
             dialf::daemon::run(cfg, config_path).await
         }
 
-        Command::Devices { human } => {
+        Command::Devices {
+            action: Some(action),
+            ..
+        } => run_devices_action(action).await,
+        Command::Devices { human, .. } => {
             let resp = call(&socket, ControlOp::DevicesList).await?;
             if human && resp.ok != Some(false) {
                 match resp.data.as_ref().and_then(|v| v.as_array()) {
@@ -511,6 +567,207 @@ async fn main() -> anyhow::Result<()> {
             };
             dialf::service::run(act, scope, config)
         }
+    }
+}
+
+/// `dialf devices share|connect …`
+async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
+    use dialf::share::{handshake, Profile};
+
+    match action {
+        DevicesAction::Share {
+            adb: _, // the only protocol today; accepted so scripts can be explicit
+            targets,
+            all,
+            bind,
+            status,
+            stop,
+            list,
+            new_token,
+        } => {
+            // Generating a token needs no daemon — it's just entropy for the config file.
+            if new_token {
+                println!("{}", handshake::new_token());
+                println!("# put this in config.yaml as:\n#   adb_share:\n#     token: <above>");
+                return Ok(());
+            }
+            let socket = Config::resolve_client_socket();
+            let op = if stop {
+                ControlOp::ShareStop { profile: None }
+            } else if status {
+                ControlOp::ShareStatus { profile: None }
+            } else if list {
+                ControlOp::ShareDevices { profile: None }
+            } else {
+                // Starting is the default, but only once it is clear what to expose.
+                if targets.is_empty() && !all {
+                    print_attachable_devices(&socket).await;
+                    anyhow::bail!("name what to share with --target <serial>, or pass --all");
+                }
+                ControlOp::ShareStart {
+                    profile: None,
+                    bind,
+                    targets,
+                    all,
+                }
+            };
+            let resp = call(&socket, op).await?;
+            if resp.ok == Some(false) {
+                anyhow::bail!(resp.error.unwrap_or_else(|| "share request failed".to_string()));
+            }
+            print_share_result(resp.data.as_ref());
+            Ok(())
+        }
+        DevicesAction::Connect { host, token, bind } => {
+            let target = dialf::share::client::target_addr(&host, Profile::Adb)?;
+            let token = resolve_share_token(token)?;
+            let bind: std::net::SocketAddr = bind
+                .parse()
+                .with_context(|| format!("parse --bind `{bind}` (want host:port)"))?;
+            if !bind.ip().is_loopback() {
+                anyhow::bail!(
+                    "--bind must be loopback: this port carries full device access with no \
+                     authentication of its own"
+                );
+            }
+            dialf::share::client::run(bind, target, Profile::Adb, token).await
+        }
+    }
+}
+
+/// Token for `dialf adb connect`: explicit flag, then env, then this machine's own config
+/// (handy when the same config is shared between host and client).
+fn resolve_share_token(flag: Option<String>) -> anyhow::Result<String> {
+    if let Some(t) = flag.filter(|t| !t.trim().is_empty()) {
+        return Ok(t);
+    }
+    if let Ok(t) = std::env::var("DIALF_SHARE_TOKEN") {
+        if !t.trim().is_empty() {
+            return Ok(t);
+        }
+    }
+    let cfg = Config::load(&Config::default_path()).unwrap_or_default();
+    if !cfg.adb_share.token.trim().is_empty() {
+        return Ok(cfg.adb_share.token);
+    }
+    anyhow::bail!(
+        "no share token — pass --token, set $DIALF_SHARE_TOKEN, or put `adb_share.token` \
+         in {}",
+        Config::default_path().display()
+    )
+}
+
+/// Show what `--target` could name, for the error path when nothing was named.
+async fn print_attachable_devices(socket: &Path) {
+    let resp = match call(socket, ControlOp::ShareDevices { profile: None }).await {
+        Ok(r) if r.ok != Some(false) => r,
+        // Don't claim "no devices" when the real problem was the request — an older daemon
+        // that doesn't know `share.devices` would otherwise look like an empty host.
+        Ok(r) => {
+            eprintln!(
+                "could not list devices: {}",
+                r.error.unwrap_or_else(|| "request rejected".to_string())
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("could not list devices: {e:#}");
+            return;
+        }
+    };
+    let rows = resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("devices"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        eprintln!("no devices are attached to this host");
+        return;
+    }
+    eprintln!("attached devices:");
+    for r in rows {
+        let serial = r.get("serial").and_then(|v| v.as_str()).unwrap_or("?");
+        let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let note = if r.get("ready").and_then(|v| v.as_bool()) == Some(true) {
+            String::new()
+        } else {
+            format!("  ({state})")
+        };
+        eprintln!("  {serial}  {model}{note}");
+    }
+}
+
+/// Render a `share.*` response as a few readable lines rather than raw JSON.
+fn print_share_result(data: Option<&serde_json::Value>) {
+    let Some(d) = data else {
+        println!("ok");
+        return;
+    };
+    let get = |k: &str| d.get(k).cloned().unwrap_or(serde_json::Value::Null);
+
+    // `--list` output.
+    if let Some(rows) = get("devices").as_array() {
+        if rows.is_empty() {
+            println!("no devices attached");
+            return;
+        }
+        for r in rows {
+            let serial = r.get("serial").and_then(|v| v.as_str()).unwrap_or("?");
+            let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            println!("{serial}\t{state}\t{model}");
+        }
+        return;
+    }
+
+    if get("running") == serde_json::Value::Bool(false) {
+        println!("adb share: not running");
+        if get("autostart") == serde_json::Value::Bool(true) {
+            println!("  (config has adb_share.enabled: true — it failed to start; check the log)");
+        }
+        return;
+    }
+    if get("stopped") == serde_json::Value::Bool(true) {
+        println!("adb share stopped ({})", get("bind").as_str().unwrap_or("?"));
+        return;
+    }
+    if get("stopped") == serde_json::Value::Bool(false) {
+        println!("adb share: was not running");
+        return;
+    }
+
+    let bind = get("bind");
+    let bind = bind.as_str().unwrap_or("?");
+    println!("adb share on {bind}  ->  {}", get("upstream").as_str().unwrap_or("?"));
+    match get("targets") {
+        serde_json::Value::String(s) if s == "all" => println!("  sharing: all attached devices"),
+        serde_json::Value::Array(list) => println!(
+            "  sharing: {}",
+            list.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => {}
+    }
+    if let Some(reachable) = get("upstream_reachable").as_bool() {
+        if !reachable {
+            println!("  WARNING: the adb server is not answering — start it with `adb start-server`");
+        }
+    }
+    if let Some(n) = get("active_connections").as_u64() {
+        println!("  connections: {n} active, {} served", get("served_connections").as_u64().unwrap_or(0));
+    }
+    let port = bind.rsplit(':').next().unwrap_or("5038");
+    println!("  remote: dialf devices connect <this-host>:{port}   then  adb -H 127.0.0.1 -P 5038 …");
+    if get("public") == serde_json::Value::Bool(true) {
+        println!(
+            "  NOTE: reachable off-box. Connections are authenticated but NOT encrypted — \
+             tunnel over VPN/SSH outside a trusted LAN."
+        );
     }
 }
 

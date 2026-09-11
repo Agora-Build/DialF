@@ -30,6 +30,9 @@ tracing-appender = { workspace = true }
 hound = { workspace = true }
 which = { workspace = true }
 zip = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 chrono = "0.4"
 phonenumber = "0.3"
 thread-priority = "1"

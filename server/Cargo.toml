@@ -11,6 +11,9 @@ rust-version = "1.75"
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
 futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

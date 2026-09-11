@@ -74,3 +74,20 @@ audio:
   #   capture_device:  "BlackHole 16ch"
   #   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "BlackHole 2ch"]
   #   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "BlackHole 16ch", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1"]
+
+# --- Device sharing: let another machine drive this host's phone over adb ---------------
+# `dialf devices share --target <serial>` exposes the host's adb server so a remote machine
+# can run `adb shell`, `install`, `logcat`, `push`/`pull` against a phone plugged in here.
+#
+# The token authenticates connections (HMAC challenge-response — it never crosses the wire)
+# but does NOT encrypt them: the adb session after the handshake is plaintext. Outside a
+# trusted LAN, tunnel this over a VPN or SSH.
+#
+# Sharing is off unless started, and never defaults to "everything": name serials with
+# --target (repeatable) or pass --all. `dialf devices share --list` shows what is attached.
+#
+# adb_share:
+#   enabled: false            # start with the daemon? runtime --stop/--start works either way
+#   bind: 0.0.0.0:5038        # default 127.0.0.1:5038 — a LAN bind should be deliberate
+#   token: <dialf devices share --new-token>
+#   targets: ["4B2B1C"]       # or `all: true`

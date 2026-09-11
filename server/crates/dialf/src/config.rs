@@ -44,6 +44,9 @@ pub struct Config {
     pub autoanswer: BTreeMap<String, Option<String>>,
     /// Audio engine / sound-card settings.
     pub audio: AudioConfig,
+    /// Share the host's `adb` server with another machine. Off unless `enabled` is set; the
+    /// token gates connections but does not encrypt them (see `share::handshake`).
+    pub adb_share: crate::share::ShareConfig,
 }
 
 /// Sound-card + external-tool settings.
@@ -106,6 +109,7 @@ impl Default for Config {
             instance_name: "dialfd".to_string(),
             autoanswer: BTreeMap::new(),
             audio: AudioConfig::default(),
+            adb_share: crate::share::ShareConfig::default(),
         }
     }
 }
