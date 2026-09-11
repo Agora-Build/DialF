@@ -117,8 +117,8 @@ fn records_rx_tx_and_mix() {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let rx_path = dir.join("call-rx.wav");
     let tx_path = dir.join("call-tx.wav");
-    let rx = WavFileSink::create(&rx_path, RECORD_RATE).expect("rx sink");
-    let tx = WavFileSink::create(&tx_path, RECORD_RATE).expect("tx sink");
+    let rx = WavFileSink::create(&rx_path, RECORD_RATE, 1).expect("rx sink");
+    let tx = WavFileSink::create(&tx_path, RECORD_RATE, 1).expect("tx sink");
     let cap = WavFileSource::open(Path::new(FIXTURE)).expect("open fixture");
 
     // The fixture EOFs on its own, so finish() simply joins the capture thread after the
@@ -171,4 +171,144 @@ fn records_rx_tx_and_mix() {
     assert_eq!(mix_peak, 0, "mix left channel = tx (silent when nothing injected)");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// End-to-end through the REAL capture subprocess: a stereo byte stream on a pipe must land
+/// in rx.wav at the card's own rate and channel count, channels un-swapped. Uses `cat` so it
+/// runs anywhere (no sox/ffmpeg, no microphone).
+#[test]
+fn records_stereo_at_native_rate_through_a_real_pipe() {
+    use dialf::audio::backend::WavFileSink;
+    use dialf::audio::command_backend::CommandCaptureSource;
+    use dialf::audio::record::DuplexSession;
+    use dialf::audio::tool_detect::CaptureCommand;
+
+    let dir = std::env::temp_dir().join(format!("dialf-stereo-it-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 1000 stereo frames: left = +4000, right = -4000, as raw little-endian s16.
+    let raw = dir.join("cap.raw");
+    let mut bytes = Vec::new();
+    for _ in 0..1000 {
+        bytes.extend_from_slice(&4000i16.to_le_bytes());
+        bytes.extend_from_slice(&(-4000i16).to_le_bytes());
+    }
+    std::fs::write(&raw, &bytes).unwrap();
+
+    let cmd = CaptureCommand {
+        argv: vec!["cat".into(), raw.to_string_lossy().into_owned()],
+    };
+    let src = CommandCaptureSource::spawn(&cmd, 48_000, 2).expect("spawn capture");
+    let rx_path = dir.join("s-rx.wav");
+    let tx_path = dir.join("s-tx.wav");
+    let rx = WavFileSink::create(&rx_path, 48_000, 2).unwrap();
+    let tx = WavFileSink::create(&tx_path, 48_000, 2).unwrap();
+    let sess = DuplexSession::start(
+        src,
+        rx,
+        tx,
+        rx_path.clone(),
+        tx_path,
+        dir.clone(),
+        "s".to_string(),
+        true,
+        true,
+        Box::new(|| {}),
+    )
+    .expect("session");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sess.rx_len() < 1000 {
+        assert!(std::time::Instant::now() < deadline, "stalled at {} frames", sess.rx_len());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let out = sess.finish().expect("finish");
+
+    let mut r = hound::WavReader::open(&out.rx).unwrap();
+    let spec = r.spec();
+    assert_eq!(
+        (spec.sample_rate, spec.channels),
+        (48_000, 2),
+        "rx.wav must keep the capture's native shape"
+    );
+    let s: Vec<i16> = r.samples::<i16>().map(|x| x.unwrap()).collect();
+    assert_eq!(s.len(), 2000, "1000 stereo frames");
+    assert!(s.iter().step_by(2).all(|&v| v == 4000), "left channel intact");
+    assert!(s.iter().skip(1).step_by(2).all(|&v| v == -4000), "right channel intact");
+
+    // The mix collapses each leg to its call channel, at the same rate.
+    let mix = hound::WavReader::open(out.mix.as_ref().unwrap()).unwrap();
+    assert_eq!((mix.spec().sample_rate, mix.spec().channels), (48_000, 2));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The crux of the split: rx keeps the card's 48 kHz stereo, while the VAD branch still
+/// receives 16 kHz MONO. Counts what reaches the VAD — a missing downmix would triple it
+/// (interleaved read as mono) and a missing resample would triple it again, so every turn
+/// timeout would fire at the wrong wall time.
+#[test]
+fn vad_gets_16k_mono_from_a_48k_stereo_capture() {
+    use dialf::audio::backend::{CaptureSource, WavFileSink};
+    use dialf::audio::command_backend::CommandCaptureSource;
+    use dialf::audio::record::{DuplexSession, VadFrameSource};
+    use dialf::audio::tool_detect::CaptureCommand;
+
+    let dir = std::env::temp_dir().join(format!("dialf-vadmix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 0.5 s of 48 kHz stereo = 24000 frames. Left carries a tone, right is silent, so a
+    // downmix that averaged instead of picking the call channel would halve the amplitude.
+    let raw = dir.join("cap.raw");
+    let mut bytes = Vec::new();
+    for i in 0..24_000 {
+        let v = if (i / 24) % 2 == 0 { 6000i16 } else { -6000 };
+        bytes.extend_from_slice(&v.to_le_bytes()); // left = tone
+        bytes.extend_from_slice(&0i16.to_le_bytes()); // right = silence
+    }
+    std::fs::write(&raw, &bytes).unwrap();
+
+    let cmd = CaptureCommand {
+        argv: vec!["cat".into(), raw.to_string_lossy().into_owned()],
+    };
+    let src = CommandCaptureSource::spawn(&cmd, 48_000, 2).expect("spawn");
+    let rx_path = dir.join("v-rx.wav");
+    let tx_path = dir.join("v-tx.wav");
+    let rx = WavFileSink::create(&rx_path, 48_000, 2).unwrap();
+    let tx = WavFileSink::create(&tx_path, 48_000, 2).unwrap();
+    let mut sess = DuplexSession::start(
+        src, rx, tx, rx_path, tx_path, dir.clone(), "v".to_string(), false, true, Box::new(|| {}),
+    )
+    .expect("session");
+
+    sess.vad_begin();
+    let mut got = 0usize;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    {
+        let mut vsrc = VadFrameSource::new(sess.vad_receiver_mut());
+        assert_eq!(vsrc.sample_rate(), 16_000, "the VAD branch must report 16 kHz");
+        let mut buf = vec![0i16; 4096];
+        while got < 6_000 && std::time::Instant::now() < deadline {
+            match vsrc.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("vad read: {e}"),
+            }
+        }
+    }
+    sess.vad_end();
+    let out = sess.finish().expect("finish");
+
+    // 24000 stereo frames at 48k = 0.5 s -> ~8000 mono samples at 16 kHz. Allow slack for
+    // frames produced before vad_begin armed, but the ORDER OF MAGNITUDE is the assertion:
+    // no downmix would give ~16000+, no resample ~24000+.
+    assert!(
+        (4_000..=9_000).contains(&got),
+        "expected ~8000 16k-mono samples from 0.5s of 48k stereo, got {got}"
+    );
+    let rxr = hound::WavReader::open(&out.rx).unwrap();
+    assert_eq!((rxr.spec().sample_rate, rxr.spec().channels), (48_000, 2), "rx stays native");
+    std::fs::remove_dir_all(&dir).ok();
 }

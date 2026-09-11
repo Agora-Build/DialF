@@ -155,16 +155,18 @@ and every channel reads silent.)
 
 Each recorded job writes (paths returned by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (far end), mono
-- `<job>-tx.wav` — audio injected into the card (our prompts), mono
+- `<job>-rx.wav` — captured from the card (far end), at the card's own `audio.sample_rate` /
+  `audio.channels` (no resampling — set `channels: 2` to record a stereo pair)
+- `<job>-tx.wav` — audio injected into the card (our prompts), matching rx's rate/channels
 - `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two
   voices stay separated. Set `mix_channels: rx_tx` to swap the channels.
 
 Recording is **full-duplex on a single clock**: rx is captured continuously for the whole
 job — including while a prompt plays and across `wait`/dial gaps — and tx carries each prompt
 at its true offset (silence elsewhere). The master clock is the rx sample count (the card's
-own clock), so the legs are the **same length and sample-aligned**: frame *i* is the same
-instant in `rx`, `tx`, and each channel of the stereo `mix`.
+own clock), so the legs are the **same length and frame-aligned**: frame *i* is the same
+instant in `rx`, `tx`, and each channel of the stereo `mix`. (`mix.wav` stays 2-channel
+whatever the legs' channel count — it carries one call channel per leg.)
 
 ```sh
 dialf run server/jobs/live-call.yaml   --device <id>   # call + record
@@ -177,17 +179,20 @@ Tip: serve the WAVs to listen from another machine — `atem serv files <dir> --
 
 Because rx/tx/mix share one timeline you can read latency straight off the files:
 
-- **Round-trip / echo latency** — cross-correlate `tx` against `rx` (both 16 kHz mono). The
+- **Round-trip / echo latency** — cross-correlate `tx` against `rx` (same rate and channel
+  count as each other). The
   lag at the correlation peak is how long our injected audio takes to come back through the
   bridge (host → card → phone mic → cellular → earpiece → card). Example with Python/NumPy:
 
   ```python
   import numpy as np, soundfile as sf
-  tx, _ = sf.read("job-tx.wav"); rx, _ = sf.read("job-rx.wav")
+  tx, sr = sf.read("job-tx.wav"); rx, _ = sf.read("job-rx.wav")
+  if tx.ndim > 1: tx = tx[:, 0]                  # call channel (rx/tx may be multi-channel)
+  if rx.ndim > 1: rx = rx[:, 0]
   n = min(len(tx), len(rx))                      # equal length already
   c = np.correlate(rx[:n], tx[:n], "full")
-  lag = c.argmax() - (n - 1)                     # samples; /16000 = seconds
-  print(lag / 16000 * 1000, "ms")
+  lag = c.argmax() - (n - 1)                     # samples
+  print(lag / sr * 1000, "ms")                   # sr comes from the file, not hardcoded
   ```
 
 - **Response-gap latency** — on the shared clock, measure (onset of the reply in `rx`) −

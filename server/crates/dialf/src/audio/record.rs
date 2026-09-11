@@ -297,6 +297,9 @@ impl CaptureSource for VadFrameSource<'_> {
 pub struct DuplexSession {
     tx: Option<WavFileSink>,
     tx_len: u64,
+    /// Shape shared by both legs — the capture's own rate/channels.
+    rate: u32,
+    channels: u16,
     rx_path: PathBuf,
     tx_path: PathBuf,
     dir: PathBuf,
@@ -418,6 +421,8 @@ impl DuplexSession {
         Ok(Self {
             tx: Some(tx),
             tx_len: 0,
+            rate: src_rate,
+            channels: src_channels as u16,
             rx_path,
             tx_path,
             dir,
@@ -431,6 +436,16 @@ impl DuplexSession {
             join: Some(join),
             silence: vec![0i16; 4096],
         })
+    }
+
+    /// Sample rate of both legs (the capture's own rate).
+    pub fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// Channel count of both legs (the capture's own).
+    pub fn channels(&self) -> u16 {
+        self.channels
     }
 
     /// Current rx clock (frames captured so far).

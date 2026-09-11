@@ -52,6 +52,18 @@ pub struct AudioParams {
 /// Resolve a capture command: config override if present, else auto-detect.
 pub fn resolve_capture(params: &AudioParams, override_cmd: Option<&[String]>) -> Result<CaptureCommand> {
     if let Some(tpl) = override_cmd {
+        // The recording is written with the shape declared by `audio.channels`, so a pinned
+        // command that hardcodes a different channel count produces a file whose header
+        // lies about its contents (half speed, channels interleaved wrong) with no error
+        // anywhere. We can't read the tool's mind — say so instead.
+        if params.channels > 1 && !tpl.iter().any(|a| a.contains("{channels}")) {
+            tracing::warn!(
+                channels = params.channels,
+                "audio.capture_cmd is pinned and doesn't use {{channels}} — make sure it \
+                 really emits {} channels, or the recording will be mislabeled",
+                params.channels
+            );
+        }
         return Ok(CaptureCommand {
             argv: fill(tpl, params, None),
         });

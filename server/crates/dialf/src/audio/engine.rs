@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 
 use crate::config::AudioConfig;
 
-use super::backend::{CaptureSource, WavFileSink, WavFileSource};
+use super::backend::{CaptureSource, DownmixMono, WavFileSink, WavFileSource};
 use super::command_backend::{self, CommandCaptureSource};
-use super::record::{DuplexSession, VadFrameSource, RECORD_RATE};
-use super::resample::Resampler16k;
+use super::record::{DuplexSession, VadFrameSource};
+use super::resample::{Resampler, Resampler16k};
 use super::tool_detect::{self, AudioParams};
 use super::vad::{EndReason, Segmenter, TurnConfig, TurnEvent};
 
@@ -47,8 +47,8 @@ impl AudioEngine {
     }
 
     /// Play an audio file out the sound card (blocking until done). If `sess` is set, the
-    /// file's audio (resampled to 16 kHz) is also written to the tx leg, anchored at the
-    /// current rx clock so it aligns with what the continuous capture records.
+    /// file's audio (converted to the tx leg's shape) is also written to the tx leg,
+    /// anchored at the current rx clock so it aligns with what the capture records.
     pub fn play_file(
         &self,
         file: &Path,
@@ -104,8 +104,12 @@ impl AudioEngine {
         });
         let rx_path = dir.join(format!("{session_name}-rx.wav"));
         let tx_path = dir.join(format!("{session_name}-tx.wav"));
-        let rx = WavFileSink::create(&rx_path, RECORD_RATE, 1)?;
-        let tx = WavFileSink::create(&tx_path, RECORD_RATE, 1)?;
+        // Record exactly what the card gives us — no resampling, nothing discarded. Both
+        // legs share the shape so they share one frame clock and can be mixed; the VAD gets
+        // its own 16 kHz mono copy inside the capture thread.
+        let (rate, channels) = (source.sample_rate(), source.channels());
+        let rx = WavFileSink::create(&rx_path, rate, channels)?;
+        let tx = WavFileSink::create(&tx_path, rate, channels)?;
         let session = DuplexSession::start(
             source, rx, tx, rx_path, tx_path, dir, session_name, mix, mix_tx_left, unblock,
         )?;
@@ -156,18 +160,28 @@ impl AudioEngine {
                 reason
             }
             None => {
-                let mut src = self.open_capture()?;
+                // No recording session: capture straight for the VAD. Reduce to the call
+                // channel first — feeding interleaved audio to the segmenter would double
+                // the apparent rate and halve every turn timeout.
+                let mut src = DownmixMono::new(self.open_capture()?);
                 run_wait_for_speech(&mut src, turn, cancel)
             }
         }
     }
 }
 
-/// Read `file`, resample to 16 kHz, and append it to the session's tx leg as one block
-/// anchored at the current rx clock.
+/// Read `file`, convert it to the tx leg's shape (the card's rate and channel count), and
+/// append it as one block anchored at the current rx clock.
+///
+/// The prompt is read as mono (`WavFileSource` keeps channel 0) and duplicated across the
+/// leg's channels: tx is a reference copy of what we injected, and matching rx's shape is
+/// what lets the two legs share one frame clock and be mixed. Resampling here is never in
+/// the path of audio the far end hears — the card is fed the original file by the playback
+/// tool.
 fn tee_tx(sess: &mut DuplexSession, file: &Path) -> anyhow::Result<()> {
     let mut src = WavFileSource::open(file)?;
-    let mut rs = Resampler16k::new(src.sample_rate());
+    let mut rs = Resampler::new(src.sample_rate(), sess.sample_rate());
+    let channels = sess.channels().max(1) as usize;
     let mut buf = vec![0i16; 4096];
     let mut prompt: Vec<i16> = Vec::new();
     loop {
@@ -175,7 +189,11 @@ fn tee_tx(sess: &mut DuplexSession, file: &Path) -> anyhow::Result<()> {
         if n == 0 {
             break;
         }
-        prompt.extend(rs.process(&buf[..n]));
+        for s in rs.process(&buf[..n]) {
+            for _ in 0..channels {
+                prompt.push(s);
+            }
+        }
     }
     sess.push_tx(&prompt)?;
     Ok(())

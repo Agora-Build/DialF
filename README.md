@@ -260,8 +260,10 @@ A USB sound card bridges the phone and host: card **output → phone mic** (inje
 card **input ← phone earpiece** (capture the far end). A recorded job writes (paths returned
 by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (the phone / far end), mono
-- `<job>-tx.wav` — audio injected into the card (our prompts), mono
+- `<job>-rx.wav` — captured from the card (the phone / far end), recorded **exactly as the
+  card delivers it**: `audio.sample_rate` and `audio.channels`, no resampling, nothing discarded
+- `<job>-tx.wav` — audio injected into the card (our prompts), same rate/channels as rx so the
+  two legs share one clock
 - `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two
   voices stay separated. Swap with `mix_channels: rx_tx`.
 
@@ -281,7 +283,9 @@ for the host app; Linux/ALSA has no such gate.
 - **macOS:** `ffmpeg` or `sox` for capture; `afplay`/`ffplay`/`play` for playback
 
 Auto-detected via `PATH`; override with `audio.capture_cmd` / `audio.playback_cmd`. Capture
-must emit raw little-endian s16 mono PCM on stdout.
+must emit raw little-endian s16 PCM on stdout, interleaved at `audio.channels` (mono by
+default). Speech detection always runs on 16 kHz mono — the daemon derives that internally
+from the call channel, so recording fidelity and VAD are independent.
 
 ## Configuration
 

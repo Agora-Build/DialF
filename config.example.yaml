@@ -29,8 +29,11 @@
 #   "+15559876":                          # answer only (no job)
 
 audio:
-  sample_rate: 48000                # card native rate (resampled to 16k for VAD/recording)
-  channels: 1
+  sample_rate: 48000                # card native rate — ALSO the recording rate (rx/tx are
+                                    # written exactly as captured; 16k for VAD is derived
+                                    # internally). Lower it to shrink recordings.
+  channels: 1                       # capture channels; 2 records a true stereo rx.wav
+                                    # (a stereo bridge/breakout — one source per input)
   # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0". Selects the device for auto-detected
   # commands; with capture_cmd/playback_cmd pinned (below) the argv's device is what runs,
   # but KEEP these set and in sync anyway — `dialf import` verifies them against the target
