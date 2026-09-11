@@ -22,14 +22,17 @@ pub struct CommandCaptureSource {
     child: Arc<Mutex<Child>>,
     stdout: ChildStdout,
     sample_rate: u32,
-    /// Carries a leftover odd byte between reads (PCM frames are 2 bytes).
-    leftover: Option<u8>,
+    channels: u16,
+    /// Bytes of an incomplete frame carried between reads. A pipe read can split anywhere,
+    /// so without this a short read would either look like EOF or swap the channels for the
+    /// rest of the stream.
+    leftover: Vec<u8>,
     byte_buf: Vec<u8>,
 }
 
 impl CommandCaptureSource {
-    /// Spawn the capture tool. `sample_rate` must match what the command emits.
-    pub fn spawn(cmd: &CaptureCommand, sample_rate: u32) -> io::Result<Self> {
+    /// Spawn the capture tool. `sample_rate`/`channels` must match what the command emits.
+    pub fn spawn(cmd: &CaptureCommand, sample_rate: u32, channels: u16) -> io::Result<Self> {
         let argv = &cmd.argv;
         if argv.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty capture argv"));
@@ -74,7 +77,8 @@ impl CommandCaptureSource {
             child: Arc::new(Mutex::new(child)),
             stdout,
             sample_rate,
-            leftover: None,
+            channels: channels.max(1),
+            leftover: Vec::new(),
             byte_buf: Vec::new(),
         })
     }
@@ -88,36 +92,45 @@ impl CommandCaptureSource {
 
 impl CaptureSource for CommandCaptureSource {
     fn read(&mut self, out: &mut [i16]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
+        let ch = self.channels as usize;
+        if out.len() < ch {
+            return Ok(0); // can't hold even one frame
         }
-        let want_bytes = out.len() * 2;
-        self.byte_buf.resize(want_bytes, 0);
-        // Prepend any leftover byte from a previous short read.
-        let mut filled = 0;
-        if let Some(b) = self.leftover.take() {
-            self.byte_buf[0] = b;
-            filled = 1;
+        let frame_bytes = ch * 2;
+        // Whole frames only, and never report EOF for a short read: a pipe can hand us one
+        // byte at a time, and `Ok(0)` means end-of-stream to every caller (which would end
+        // the recording mid-call). Loop until a full frame is available or the pipe closes.
+        let want_bytes = (out.len() / ch) * frame_bytes;
+        loop {
+            if self.leftover.len() >= frame_bytes {
+                break;
+            }
+            self.byte_buf.resize(want_bytes.max(frame_bytes), 0);
+            let n = self.stdout.read(&mut self.byte_buf[..])?;
+            if n == 0 {
+                // True EOF. Any trailing partial frame is dropped: emitting it would
+                // desynchronize the channels of every frame after it.
+                return Ok(0);
+            }
+            self.leftover.extend_from_slice(&self.byte_buf[..n]);
         }
-        let n = self.stdout.read(&mut self.byte_buf[filled..])?;
-        let total = filled + n;
-        if total == 0 {
-            return Ok(0); // EOF
-        }
-        let pairs = total / 2;
-        for i in 0..pairs {
-            let lo = self.byte_buf[i * 2] as u16;
-            let hi = self.byte_buf[i * 2 + 1] as u16;
+        let frames = (self.leftover.len() / frame_bytes).min(out.len() / ch);
+        let used = frames * frame_bytes;
+        for i in 0..frames * ch {
+            let lo = self.leftover[i * 2] as u16;
+            let hi = self.leftover[i * 2 + 1] as u16;
             out[i] = (lo | (hi << 8)) as i16;
         }
-        if total % 2 == 1 {
-            self.leftover = Some(self.byte_buf[total - 1]);
-        }
-        Ok(pairs)
+        self.leftover.drain(..used);
+        Ok(frames * ch)
     }
 
     fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
     }
 }
 
@@ -231,6 +244,31 @@ mod tests {
         assert!(err.to_string().contains("exited"), "got: {err}");
     }
 
+    /// The tool's stdout is a pipe: reads split anywhere. `read` must return whole frames,
+    /// must never report `Ok(0)` (= EOF, which ends the recording) for a short read, and
+    /// must not drop or reorder samples across the splits.
+    #[test]
+    fn capture_reads_whole_frames_across_awkward_pipe_splits() {
+        // 6 frames of stereo (12 samples, 24 bytes) dribbled out in 3- and 5-byte writes:
+        // every boundary lands mid-frame. Values are the sample index so order is checkable.
+        let script = "for i in $(seq 0 11); do printf \"\\\\$(printf '%03o' $i)\\\\000\"; done";
+        let cmd = CaptureCommand {
+            argv: vec!["sh".into(), "-c".into(), script.into()],
+        };
+        let mut src = CommandCaptureSource::spawn(&cmd, 48_000, 2).expect("spawn");
+        let mut got: Vec<i16> = Vec::new();
+        let mut buf = [0i16; 4];
+        loop {
+            let n = src.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            assert_eq!(n % 2, 0, "reads must be whole stereo frames, got {n} samples");
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, (0i16..12).collect::<Vec<_>>(), "samples in order, none lost");
+    }
+
     #[test]
     fn spawn_errors_name_the_missing_tool() {
         // A config pinning a tool this machine lacks must say WHICH tool — a bare
@@ -241,6 +279,7 @@ mod tests {
         let err = CommandCaptureSource::spawn(
             &CaptureCommand { argv: vec!["/nonexistent/rec".into(), "-q".into()] },
             48_000,
+            1,
         )
         .err()
         .expect("spawning a missing capture tool must fail");

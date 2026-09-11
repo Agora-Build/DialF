@@ -1,47 +1,68 @@
-//! Lightweight mono resampling to 16 kHz for the VAD path.
+//! Lightweight mono resampling between arbitrary rates.
 //!
-//! Sound cards typically capture at 44.1/48 kHz; ten-vad needs 16 kHz. We use a small,
-//! dependency-free streaming resampler:
+//! Sound cards typically capture at 44.1/48 kHz; ten-vad needs 16 kHz, and a prompt file
+//! may need lifting to the card rate for the tx leg. Small, dependency-free, streaming:
+//! - **Equal rates**: pass through (byte-exact).
 //! - **Integer downsample** (e.g. 48000 -> 16000, factor 3): a windowed-sinc FIR low-pass
-//!   at the 16 kHz Nyquist, then decimate — proper anti-aliasing.
-//! - **Other ratios** (e.g. 44100 -> 16000): linear interpolation. Adequate for VAD,
-//!   though not audiophile quality.
+//!   at the target Nyquist, then decimate — proper anti-aliasing.
+//! - **Other ratios** (e.g. 44100 -> 16000, or upsampling 16000 -> 48000): linear
+//!   interpolation. Adequate for VAD and for tx as an analysis reference, though not
+//!   audiophile quality — it is never in the path of audio the far end hears.
 //!
-//! `Resampler16k` is stateful so it can be fed arbitrary-length chunks from a capture
-//! stream and emit whatever 16 kHz samples are ready.
+//! Resamplers are stateful so they can be fed arbitrary-length chunks from a capture
+//! stream and emit whatever output samples are ready.
 
 /// Target rate for the VAD path.
 pub const TARGET_RATE: u32 = 16_000;
 
-/// Streaming mono i16 -> 16 kHz i16 resampler.
-pub enum Resampler16k {
-    /// Source already at 16 kHz; pass through.
+/// Streaming mono i16 resampler between two rates.
+pub enum Resampler {
+    /// Rates match; pass through.
     Passthrough,
     /// Integer decimation with an anti-alias FIR.
     Decimate(Decimator),
-    /// Arbitrary-ratio linear interpolation.
+    /// Arbitrary-ratio linear interpolation (also handles upsampling).
     Linear(LinearResampler),
 }
+
+impl Resampler {
+    /// Build a resampler from `src_rate` to `dst_rate`.
+    pub fn new(src_rate: u32, dst_rate: u32) -> Self {
+        if src_rate == dst_rate {
+            Resampler::Passthrough
+        } else if src_rate > dst_rate && dst_rate > 0 && src_rate % dst_rate == 0 {
+            // Downsample only: `Decimator` low-passes then drops samples, which is not the
+            // upsampling operation (that needs zero-stuff then low-pass). Without the
+            // `src > dst` guard an upward integer ratio would build factor 0 -> 1 and
+            // silently pass audio through at the wrong rate.
+            Resampler::Decimate(Decimator::new((src_rate / dst_rate) as usize))
+        } else {
+            Resampler::Linear(LinearResampler::new(src_rate, dst_rate))
+        }
+    }
+
+    /// Push input samples; returns newly produced output samples.
+    pub fn process(&mut self, input: &[i16]) -> Vec<i16> {
+        match self {
+            Resampler::Passthrough => input.to_vec(),
+            Resampler::Decimate(d) => d.process(input),
+            Resampler::Linear(l) => l.process(input),
+        }
+    }
+}
+
+/// Streaming mono i16 -> 16 kHz i16 resampler (the VAD path).
+pub struct Resampler16k(Resampler);
 
 impl Resampler16k {
     /// Build a resampler from `src_rate` to 16 kHz.
     pub fn new(src_rate: u32) -> Self {
-        if src_rate == TARGET_RATE {
-            Resampler16k::Passthrough
-        } else if src_rate % TARGET_RATE == 0 {
-            Resampler16k::Decimate(Decimator::new((src_rate / TARGET_RATE) as usize))
-        } else {
-            Resampler16k::Linear(LinearResampler::new(src_rate, TARGET_RATE))
-        }
+        Self(Resampler::new(src_rate, TARGET_RATE))
     }
 
     /// Push input samples; returns newly produced 16 kHz samples.
     pub fn process(&mut self, input: &[i16]) -> Vec<i16> {
-        match self {
-            Resampler16k::Passthrough => input.to_vec(),
-            Resampler16k::Decimate(d) => d.process(input),
-            Resampler16k::Linear(l) => l.process(input),
-        }
+        self.0.process(input)
     }
 }
 
@@ -235,6 +256,49 @@ mod tests {
         assert!((out.len() as i64 - 16_000).abs() <= 5, "got {}", out.len());
         // Constant input -> constant output.
         assert!(out.iter().all(|&s| (s - 500).abs() <= 1));
+    }
+
+    #[test]
+    fn upsamples_16k_to_48k() {
+        // The tx leg lifts prompts to the card rate — a path that only exists post-change.
+        let mut r = Resampler::new(16_000, 48_000);
+        let out = r.process(&vec![1000i16; 100]);
+        let ratio = out.len() as f64 / 100.0;
+        assert!((ratio - 3.0).abs() < 0.1, "expected ~3x, got {ratio} ({} samples)", out.len());
+        // Constant in -> constant out (no ringing/zero-stuffing artifacts).
+        assert!(
+            out.iter().all(|&s| (s - 1000).abs() <= 1),
+            "constant input must stay constant"
+        );
+    }
+
+    #[test]
+    fn upsample_is_linear_not_decimate() {
+        // Guard the branch test: an integer ratio in the UP direction must not build a
+        // decimator (factor 0 -> 1), which would silently pass audio through at 16k.
+        let mut r = Resampler::new(16_000, 48_000);
+        assert!(matches!(r, Resampler::Linear(_)), "upsampling must use the linear path");
+        assert!(r.process(&[5i16; 10]).len() > 10, "output must be longer than input");
+    }
+
+    #[test]
+    fn upsample_streaming_matches_chunked() {
+        // Chunk boundaries must not drop or duplicate samples (the carry path).
+        let input: Vec<i16> = (0..500).map(|i| ((i * 37) % 2000 - 1000) as i16).collect();
+        let whole = Resampler::new(16_000, 44_100).process(&input);
+        let mut r = Resampler::new(16_000, 44_100);
+        let mut chunked = Vec::new();
+        for c in input.chunks(37) {
+            chunked.extend(r.process(c));
+        }
+        assert_eq!(whole.len(), chunked.len(), "chunking changed the output length");
+        assert_eq!(whole, chunked, "chunking changed the samples");
+    }
+
+    #[test]
+    fn equal_rates_are_byte_exact() {
+        let mut r = Resampler::new(48_000, 48_000);
+        assert_eq!(r.process(&[1i16, -2, 3, -4]), vec![1i16, -2, 3, -4]);
     }
 
     #[test]

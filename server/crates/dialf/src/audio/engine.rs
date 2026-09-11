@@ -79,7 +79,7 @@ impl AudioEngine {
         // implicit access would just be silently denied (empty capture, vague timeout).
         super::mic_permission::ensure_consent()?;
         let cmd = tool_detect::resolve_capture(&self.capture_params(), self.cfg.capture_cmd.as_deref())?;
-        let src = CommandCaptureSource::spawn(&cmd, self.cfg.sample_rate)?;
+        let src = CommandCaptureSource::spawn(&cmd, self.cfg.sample_rate, self.cfg.channels)?;
         Ok(src)
     }
 
@@ -104,8 +104,8 @@ impl AudioEngine {
         });
         let rx_path = dir.join(format!("{session_name}-rx.wav"));
         let tx_path = dir.join(format!("{session_name}-tx.wav"));
-        let rx = WavFileSink::create(&rx_path, RECORD_RATE)?;
-        let tx = WavFileSink::create(&tx_path, RECORD_RATE)?;
+        let rx = WavFileSink::create(&rx_path, RECORD_RATE, 1)?;
+        let tx = WavFileSink::create(&tx_path, RECORD_RATE, 1)?;
         let session = DuplexSession::start(
             source, rx, tx, rx_path, tx_path, dir, session_name, mix, mix_tx_left, unblock,
         )?;
