@@ -87,6 +87,9 @@ class ConnForegroundService : Service() {
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
+        // A LAN daemon answers in milliseconds; the 10s default just delays failing over to
+        // the next candidate on a multi-daemon network.
+        .connectTimeout(4, TimeUnit.SECONDS)
         .build()
     private val main = Handler(Looper.getMainLooper())
 
@@ -468,11 +471,28 @@ class ConnForegroundService : Service() {
         // device, and replies/heartbeats went out on a different socket than commands came in
         // on — commands "worked" but acks never matched). `ws` is cleared in dropped().
         if (!running || ws != null) return
-        val url = "ws://$host:$port"
+        // wsUrl() brackets IPv6 literals and drops link-local addresses. An unbracketed
+        // IPv6 host used to throw IllegalArgumentException here and kill the process on
+        // every discovery round; belt-and-braces, a malformed URL must never be fatal.
+        val url = wsUrl(host, port)
+        if (url == null) {
+            Log.w(TAG, "skipping undialable address $host:$port")
+            return
+        }
         Log.i(TAG, "connecting to $url")
-        val req = Request.Builder().url(url).build()
+        val req = try {
+            Request.Builder().url(url).build()
+        } catch (e: Exception) {
+            Log.w(TAG, "bad daemon URL $url", e)
+            daemons.markUnreachable(url, System.currentTimeMillis())
+            return
+        }
+        connecting = url
         ws = client.newWebSocket(req, Listener(url))
     }
+
+    /** URL of the socket we opened but haven't seen a handshake for yet. */
+    @Volatile private var connecting: String? = null
 
     private fun scheduleReconnect() {
         if (!running) return
@@ -515,6 +535,8 @@ class ConnForegroundService : Service() {
             reconnectRunnable?.let { main.removeCallbacks(it) }
             notify("Connected · $url")
             Log.i(TAG, "connected to $url")
+            connecting = null
+            daemons.markReachable(url)
             Dialf.emit(mapOf("type" to "status", "connected" to true, "server" to url))
             // Re-report the current call (any state) so the freshly-registered daemon has accurate
             // state after a reconnect: a ringing call so it can still auto-answer, and — crucially —
@@ -560,10 +582,20 @@ class ConnForegroundService : Service() {
         Dialf.emit(mapOf("type" to "status", "connected" to false))
         val keyReject = keyRejectFailover
         keyRejectFailover = false
+        // Did this socket ever complete a handshake? If not, the endpoint is a black hole
+        // (connect timeout / refused / not a daemon). It never rejects our key, so without
+        // this it would hold the front of the queue forever, burning a connect timeout per
+        // attempt while a working daemon sits untried.
+        val neverOpened = connecting
+        connecting = null
         main.post {
-            // A wrong-key daemon: try the next one we already discovered, right now. Any
-            // other drop goes through the normal backoff (it may be our own daemon blipping).
-            if (keyReject && connectNextCandidate()) return@post
+            if (neverOpened != null) {
+                Log.i(TAG, "$neverOpened never completed a handshake — trying another daemon")
+                daemons.markUnreachable(neverOpened, System.currentTimeMillis())
+            }
+            // A wrong-key or dead daemon: try the next one we already discovered, right now.
+            // Any other drop goes through the normal backoff (our own daemon may be blipping).
+            if ((keyReject || neverOpened != null) && connectNextCandidate()) return@post
             scheduleReconnect()
         }
     }
