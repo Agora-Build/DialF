@@ -30,23 +30,13 @@ pub trait CaptureSource: Send {
 /// would feed our own prompt to the VAD. Channel 0 is the call channel by convention.
 pub struct DownmixMono<C: CaptureSource> {
     inner: C,
-    channel: usize,
     buf: Vec<i16>,
 }
 
 impl<C: CaptureSource> DownmixMono<C> {
-    /// Wrap `inner`, keeping channel 0.
+    /// Wrap `inner`, keeping the call channel.
     pub fn new(inner: C) -> Self {
-        Self::channel(inner, 0)
-    }
-
-    /// Wrap `inner`, keeping `channel` (clamped into range).
-    pub fn channel(inner: C, channel: usize) -> Self {
-        Self {
-            inner,
-            channel,
-            buf: Vec::new(),
-        }
+        Self { inner, buf: Vec::new() }
     }
 }
 
@@ -56,13 +46,12 @@ impl<C: CaptureSource> CaptureSource for DownmixMono<C> {
         if ch == 1 {
             return self.inner.read(out);
         }
-        let pick = self.channel.min(ch - 1);
         // Read up to `out.len()` frames' worth of interleaved samples.
         self.buf.resize(out.len().saturating_mul(ch).max(ch), 0);
         let n = self.inner.read(&mut self.buf)?;
         let frames = n / ch; // the source guarantees whole frames; this is belt-and-braces
         for (slot, f) in out.iter_mut().zip(0..frames) {
-            *slot = self.buf[f * ch + pick];
+            *slot = self.buf[f * ch];
         }
         Ok(frames.min(out.len()))
     }
@@ -72,7 +61,7 @@ impl<C: CaptureSource> CaptureSource for DownmixMono<C> {
     }
 }
 
-/// A sink that plays mono i16 PCM.
+/// A sink that consumes interleaved i16 PCM.
 pub trait PlaybackSink: Send {
     /// Play all of `samples`.
     fn write(&mut self, samples: &[i16]) -> io::Result<()>;
@@ -80,7 +69,7 @@ pub trait PlaybackSink: Send {
     fn flush(&mut self) -> io::Result<()>;
 }
 
-/// Reads a WAV file as a capture source (mono; multi-channel is downmixed to ch 0).
+/// Reads a WAV file as a mono capture source (multi-channel files: channel 0 is kept).
 pub struct WavFileSource {
     samples: std::vec::IntoIter<i16>,
     sample_rate: u32,
@@ -97,7 +86,7 @@ impl WavFileSource {
             .samples::<i16>()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("read wav samples: {e}"))?;
-        // Downmix to channel 0 if needed.
+        // Keep channel 0 (not an average — see DownmixMono).
         let mono: Vec<i16> = if channels <= 1 {
             all
         } else {

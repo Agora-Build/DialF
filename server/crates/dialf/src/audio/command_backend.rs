@@ -1,6 +1,7 @@
 //! External-tool audio backend (subprocess).
 //!
-//! Capture: spawn the detected tool, read raw little-endian s16 mono PCM from its stdout.
+//! Capture: spawn the detected tool, read raw little-endian s16 PCM from its stdout,
+//! interleaved at the configured channel count (whole frames only — see `read`).
 //! Playback (file): spawn the detected tool with the file path and wait for it to exit.
 //!
 //! Synchronous on purpose — the daemon drives these from `tokio::task::spawn_blocking`.

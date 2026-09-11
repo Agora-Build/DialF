@@ -1,15 +1,16 @@
 //! Call recording: full-duplex, on a single clock, for latency measurement.
 //!
-//! - **rx** — audio captured from the sound card (the phone's earpiece / far end).
+//! - **rx** — audio captured from the sound card (the phone's earpiece / far end), written
+//!   at the card's own rate and channel count; tx matches that shape.
 //! - **tx** — audio we injected into the card (our prompts / TTS).
 //!
 //! rx is recorded **continuously** for the whole job by a background capture thread —
 //! including while we play tx and during `wait`/dial gaps. tx is written at its true
-//! offset on the same timeline (silence elsewhere). The **master clock is the rx sample
+//! offset on the same timeline (silence elsewhere). The **master clock is the rx frame
 //! count** (driven by the capture card, so there is no wall-clock drift). On
 //! [`DuplexSession::finish`] both legs are padded to the same length and an optional stereo
 //! `*-mix.wav` is produced with **left = tx, right = rx**. rx, tx, and the mix are the same
-//! length and sample-aligned, so a tx↔rx cross-correlation yields round-trip (echo) latency,
+//! length and frame-aligned, so a tx↔rx cross-correlation yields round-trip (echo) latency,
 //! and the gap between a tx prompt and the rx reply yields response latency.
 //!
 //! Note on scheduling: the real capture timing is owned by the external recording tool +
@@ -31,7 +32,8 @@ use anyhow::{anyhow, Context};
 use crate::audio::backend::{CaptureSource, PlaybackSink, WavFileSink};
 use crate::audio::resample::Resampler16k;
 
-/// Recording sample rate (matches the VAD path).
+/// Default rate for [`DuplexRecorder`] and tests. NOT the live recording rate — a session
+/// records at the capture's own rate (see [`DuplexSession::sample_rate`]).
 pub const RECORD_RATE: u32 = 16_000;
 
 /// Bound on the VAD frame channel. The bg thread forwards with `try_send` (never blocks),
@@ -292,8 +294,8 @@ impl CaptureSource for VadFrameSource<'_> {
 }
 
 /// Active, full-duplex recording session. A background thread records rx continuously; tx
-/// is written from the job thread at the current rx offset. The rx sample count is the
-/// master clock.
+/// is written from the job thread at the current rx offset. The rx FRAME count is the
+/// master clock, and both legs share the capture's rate/channels.
 pub struct DuplexSession {
     tx: Option<WavFileSink>,
     tx_len: u64,
