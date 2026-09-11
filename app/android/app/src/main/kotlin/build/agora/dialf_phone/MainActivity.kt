@@ -46,7 +46,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 try {
                     when (call.method) {
-                        "deviceDefaults" -> result.success(deviceDefaults())
+                        "savedConfig" -> result.success(savedConfig())
                         "getWiredHeadset" -> result.success(prefs().getBoolean("wired_headset", true))
                         "setWiredHeadset" -> {
                             val wired = call.argument<Boolean>("wired") ?: true
@@ -126,16 +126,25 @@ class MainActivity : FlutterActivity() {
     private fun prefs() = getSharedPreferences(ConnForegroundService.PREFS, Context.MODE_PRIVATE)
 
     /**
-     * Suggested config for first-run UI: a friendly phone name (the user's "Device name", or
-     * the brand + model) and a device id of `<slug>-<4 digits>`. Persisted on first call so
-     * the random suffix stays stable across launches.
+     * The config the service actually uses, for the UI to show: the saved shared key and
+     * pinned daemon address, plus a friendly phone name (the user's "Device name", or the
+     * brand + model) and a device id of `<slug>-<4 digits>`. Name/id are persisted on first
+     * call so the random suffix stays stable across launches.
+     *
+     * The UI must load this before it can save: it writes back whatever it displays, so a
+     * field it never filled in would overwrite the real value with a default.
      */
-    private fun deviceDefaults(): Map<String, String> {
+    private fun savedConfig(): Map<String, String> {
         val p = prefs()
         val name = p.getString("name", null)?.takeIf { it.isNotBlank() } ?: detectPhoneName()
         val id = p.getString("device_id", null)?.takeIf { it.isNotBlank() } ?: deviceIdFor(name)
         p.edit().putString("name", name).putString("device_id", id).apply()
-        return mapOf("device_id" to id, "name" to name)
+        return mapOf(
+            "device_id" to id,
+            "name" to name,
+            "key" to (p.getString("key", null)?.takeIf { it.isNotBlank() } ?: PhoneConfig.DEFAULT_KEY),
+            "server" to (p.getString("server", null) ?: ""),
+        )
     }
 
     /** The user-set "Device name", falling back to "<Manufacturer> <Model>". */
@@ -158,10 +167,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun saveConfig(call: io.flutter.plugin.common.MethodCall) {
-        prefs().edit()
+        val p = prefs()
+        p.edit()
             .putString("device_id", call.argument<String>("device_id") ?: "phone1")
             .putString("name", call.argument<String>("name") ?: "DialF Phone")
-            .putString("key", call.argument<String>("key") ?: "change-me")
+            // Blank key -> keep the stored one (see mergedKey). A blank SERVER is meaningful
+            // — it clears the pin so mDNS discovery takes over — so it is stored as sent.
+            .putString("key", PhoneConfig.mergedKey(p.getString("key", null), call.argument<String>("key")))
             .putString("server", call.argument<String>("server") ?: "")
             .apply()
     }

@@ -16,10 +16,12 @@ class Native {
     return _events!;
   }
 
-  /// Suggested first-run config: `{device_id, name}` derived from the phone's name/brand,
-  /// with a stable 4-digit suffix on the id (persisted natively).
-  static Future<Map<String, String>> deviceDefaults() async {
-    final m = await _m.invokeMethod<Map>('deviceDefaults');
+  /// The config the service is actually using: `{device_id, name, key, server}`. On a fresh
+  /// install the id/name are derived from the phone (stable 4-digit suffix, persisted
+  /// natively) and the key is the default. The UI MUST load this before saving — [saveConfig]
+  /// writes back whatever is displayed, so an unloaded field would overwrite the real value.
+  static Future<Map<String, String>> savedConfig() async {
+    final m = await _m.invokeMethod<Map>('savedConfig');
     return m == null ? {} : Map<String, String>.from(m);
   }
 

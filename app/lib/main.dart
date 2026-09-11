@@ -32,7 +32,9 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _id = TextEditingController();
   final _name = TextEditingController();
-  final _key = TextEditingController(text: 'change-me');
+  // Filled from the saved config in _bootstrap(); never hardcode a default here — _start()
+  // saves whatever these hold, so a stale default would overwrite the real shared key.
+  final _key = TextEditingController();
   final _addr = TextEditingController();
 
   bool _isDefaultDialer = false;
@@ -54,9 +56,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _bootstrap() async {
     await [Permission.phone, Permission.sms, Permission.notification].request();
-    final defaults = await Native.deviceDefaults();
-    if (_id.text.isEmpty) _id.text = defaults['device_id'] ?? 'phone1';
-    if (_name.text.isEmpty) _name.text = defaults['name'] ?? 'DialF Phone';
+    final saved = await Native.savedConfig();
+    if (_id.text.isEmpty) _id.text = saved['device_id'] ?? 'phone1';
+    if (_name.text.isEmpty) _name.text = saved['name'] ?? 'DialF Phone';
+    // Blank rather than a default if the native side ever fails to answer: the save path
+    // reads a blank key as "the UI never loaded it" and keeps the stored one.
+    if (_key.text.isEmpty) _key.text = saved['key'] ?? '';
+    if (_addr.text.isEmpty) _addr.text = saved['server'] ?? '';
     _isDefaultDialer = await Native.isDefaultDialer();
     _wiredHeadset = await Native.getWiredHeadset();
     _keepRunning = await Native.getKeepRunning();

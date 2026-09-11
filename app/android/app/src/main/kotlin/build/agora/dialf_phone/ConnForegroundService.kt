@@ -521,7 +521,7 @@ class ConnForegroundService : Service() {
                 .put("type", "hello")
                 .put("device_id", prefs.getString("device_id", "phone1"))
                 .put("name", prefs.getString("name", "DialF Phone"))
-                .put("key", prefs.getString("key", "change-me"))
+                .put("key", prefs.getString("key", PhoneConfig.DEFAULT_KEY))
                 .put("caps", org.json.JSONArray(listOf("call", "sms")))
                 .put("app_version", appVersion)
                 .put("instance_id", INSTANCE_ID)
