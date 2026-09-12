@@ -6,8 +6,31 @@ each other over a LAN or a Netbird/WireGuard overlay, and neither is on the publ
 `dialf devices share` on A exposes A's adb server; B reaches it and then uses stock tooling —
 `adb shell`, `install`, `logcat`, `push`/`pull` all behave as if the phone were plugged into B.
 
-> **Status: not released yet.** Until a release is cut, both A and B need a local build:
-> `cd server && cargo build --release --bin dialf`.
+Both machines need `dialf` (0.3.0 or newer):
+
+```sh
+npm install -g @agora-build/dialf
+# or: curl -fsSL https://dl.agora.build/dialf/install.sh | bash
+```
+
+B needs it only for the token route; the other two work with stock `adb` on B.
+
+---
+
+## Quick version
+
+```sh
+# A — the machine with the phone
+dialf devices share --list                     # find the serial
+dialf devices share --target 4B2B1C            # share it (open, expires in 1h)
+
+# B — the machine that wants adb
+export ADB_SERVER_SOCKET=tcp:<A-address>:5939
+adb devices
+```
+
+That is the whole thing on a trusted network. The rest of this guide is about the cases where
+"trusted" doesn't hold, and about what the share does and doesn't protect.
 
 ---
 

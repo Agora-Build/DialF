@@ -181,11 +181,59 @@ dialf run  <job.yaml> [--device <id>]          # run a scripted job once
 dialf run  <job.yaml> --autoanswer <numbers>   # serve: answer those numbers with this job (Ctrl-C reverts)
 dialf play <file>                              # inject audio out the sound card
 dialf --version                                # CLI + running daemon (dialfd) versions
+
+dialf devices share --list                     # adb devices attached to this host
+dialf devices share --target <serial> [--token] [--expire-after N]
+dialf devices share --status | --stop          # what's shared / close it
+dialf devices connect <host> --token <dvs_…>   # reach a token-protected share (runs until Ctrl-C)
 ```
 
 `<device>` is the id the phone registered as (see `dialf devices`). `dialf` talks to `dialfd`
 over a local control socket, so it must run on the same host. `--human` formats
 times/numbers/durations; omit it for JSON (scriptable).
+
+## Sharing a phone with another machine
+
+The phone is plugged into machine **A**; you want `adb` on machine **B**. `dialf devices share`
+exposes A's adb server so B can run `adb shell`, `install`, `logcat`, `push`/`pull` as if the
+phone were plugged into B. Useful on a LAN or a Netbird/Tailscale/VPN overlay.
+
+```sh
+# on A — what can I share?
+dialf devices share --list
+# 4B2B1C   device   Pixel 9 Pro
+
+# on A — share it
+dialf devices share --target 4B2B1C
+```
+
+That prints where to connect, when the share expires, and a warning if it's open. Then on B:
+
+```sh
+export ADB_SERVER_SOCKET=tcp:<A-address>:5939
+adb devices          # the phone, as if it were local
+adb shell
+```
+
+**Three things to know before you use it:**
+
+**The default share is open.** It binds `0.0.0.0:5939`, so anyone who can reach that port can
+install apps, read `/sdcard` and open a shell on the phone. That's fine on an overlay or a
+trusted LAN — the network is the boundary — and not on one you don't control. Add `--token`
+for a one-time secret (printed once, never stored); B then uses `dialf devices connect`
+instead, because `adb` has no way to authenticate by itself. Or bind loopback and reach it
+with `ssh -L`, which is the only option that also encrypts the session.
+
+**Shares expire** — one hour by default, `--expire-after 0` to disable (it warns). Expiry
+closes in-flight connections too, not just the port.
+
+**Sharing never guesses.** With no `--target` and no `--all` it errors and lists what's
+attached, so a host that gains a second phone won't start sharing it silently. Scope is
+enforced per connection, not advertised: a device you didn't share can't be reached even with
+a valid token, and `adb kill-server` from B can't stop A's adb server.
+
+Full walkthrough, including the Netbird setup and the security trade-offs:
+[`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md).
 
 ## How It Works
 
