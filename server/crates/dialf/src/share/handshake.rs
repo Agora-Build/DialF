@@ -12,7 +12,7 @@
 //! plaintext. Off-LAN use belongs inside a VPN or SSH tunnel. See `AGENTS.md`.
 
 use hmac::{Hmac, Mac};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use sha2::Sha256;
 
 /// Protocol banner; the version guards against a future format change.
@@ -25,57 +25,6 @@ pub const MIN_TOKEN_LEN: usize = 16;
 /// Longest preamble line we will read, so a peer can't make us buffer without bound.
 pub const MAX_LINE: usize = 256;
 
-/// Tokens that look like a placeholder someone forgot to replace.
-const PLACEHOLDERS: [&str; 4] = ["change-me", "changeme", "secret", "token"];
-
-/// Why a token is unusable. Checked before binding, so a misconfigured share never listens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TokenError {
-    Missing,
-    TooShort(usize),
-    Placeholder,
-}
-
-impl std::fmt::Display for TokenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TokenError::Missing => write!(
-                f,
-                "no share token set — generate one with `dialf devices share --new-token` \
-                 and put it in `adb_share.token`"
-            ),
-            TokenError::TooShort(n) => write!(
-                f,
-                "share token is {n} chars; {MIN_TOKEN_LEN}+ required \
-                 (`dialf devices share --new-token` prints a good one)"
-            ),
-            TokenError::Placeholder => write!(
-                f,
-                "share token is a placeholder — replace it with a real secret \
-                 (`dialf devices share --new-token`)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TokenError {}
-
-/// Reject a token that would make the gate decorative. Callers run this *before* binding:
-/// refusing to listen is the only safe response to a misconfigured secret.
-pub fn check_token(token: &str) -> Result<(), TokenError> {
-    let t = token.trim();
-    if t.is_empty() {
-        return Err(TokenError::Missing);
-    }
-    if PLACEHOLDERS.iter().any(|p| t.eq_ignore_ascii_case(p)) {
-        return Err(TokenError::Placeholder);
-    }
-    if t.chars().count() < MIN_TOKEN_LEN {
-        return Err(TokenError::TooShort(t.chars().count()));
-    }
-    Ok(())
-}
-
 /// A fresh random nonce, hex-encoded — the challenge half of the handshake.
 pub fn new_nonce() -> String {
     let mut buf = [0u8; NONCE_BYTES];
@@ -83,9 +32,27 @@ pub fn new_nonce() -> String {
     hex(&buf)
 }
 
-/// A fresh random token for `adb_share.token` (same entropy as a nonce).
+/// Prefix on every issued share token, so one is recognisable on sight in a shell history
+/// or a paste ("device share").
+pub const TOKEN_PREFIX: &str = "dvs_";
+
+/// Characters a token body is drawn from: unambiguous in a font that confuses 0/O and 1/l/I,
+/// since these get copied between machines by hand.
+const TOKEN_ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzACDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// Length of the random part; with the prefix the token is 16 characters.
+pub const TOKEN_BODY_LEN: usize = 12;
+
+/// Mint a share token: `dvs_` plus 12 random characters.
+///
+/// Issued fresh for every share and kept only in memory — it is never written to config, so
+/// it cannot be read back later, and a restarted share has a different secret.
 pub fn new_token() -> String {
-    new_nonce()
+    let mut rng = rand::thread_rng();
+    let body: String = (0..TOKEN_BODY_LEN)
+        .map(|_| TOKEN_ALPHABET[rng.gen_range(0..TOKEN_ALPHABET.len())] as char)
+        .collect();
+    format!("{TOKEN_PREFIX}{body}")
 }
 
 /// The answer a client holding `token` must give for `nonce`.
@@ -183,21 +150,38 @@ mod tests {
     }
 
     #[test]
-    fn weak_tokens_are_refused_before_we_ever_listen() {
-        assert_eq!(check_token(""), Err(TokenError::Missing));
-        assert_eq!(check_token("   "), Err(TokenError::Missing));
-        assert_eq!(check_token("change-me"), Err(TokenError::Placeholder));
-        assert_eq!(check_token("CHANGE-ME"), Err(TokenError::Placeholder));
-        assert_eq!(check_token("short"), Err(TokenError::TooShort(5)));
-        assert!(check_token("a-perfectly-fine-token").is_ok());
-        assert!(check_token(&new_token()).is_ok());
+    fn issued_tokens_have_the_documented_shape() {
+        let t = new_token();
+        assert!(t.starts_with(TOKEN_PREFIX), "got: {t}");
+        assert_eq!(t.len(), TOKEN_PREFIX.len() + TOKEN_BODY_LEN);
+        assert_eq!(t.len(), 16);
+        let body = &t[TOKEN_PREFIX.len()..];
+        assert!(body.chars().all(|c| TOKEN_ALPHABET.contains(&(c as u8))), "stray char in {body}");
+        // Tokens are read off one screen and typed into another, so the alphabet leaves out
+        // the pairs that get misread.
+        for confusable in ['0', 'O', '1', 'l', 'I', 'B'] {
+            assert!(
+                !TOKEN_ALPHABET.contains(&(confusable as u8)),
+                "{confusable} is ambiguous and should not be in the alphabet"
+            );
+        }
     }
 
     #[test]
-    fn generated_tokens_pass_their_own_check() {
-        // Guards against new_token() drifting below MIN_TOKEN_LEN.
-        for _ in 0..5 {
-            assert!(check_token(&new_token()).is_ok());
+    fn every_share_gets_a_different_token() {
+        // The token is never persisted, so a repeat must not be predictable either.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            assert!(seen.insert(new_token()), "new_token repeated itself");
         }
     }
+
+    #[test]
+    fn an_issued_token_works_end_to_end_through_the_handshake() {
+        let token = new_token();
+        let nonce = new_nonce();
+        assert!(verify(&token, &nonce, &expected_auth(&token, &nonce)));
+        assert!(!verify(&new_token(), &nonce, &expected_auth(&token, &nonce)));
+    }
+
 }

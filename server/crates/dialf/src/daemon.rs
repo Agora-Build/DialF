@@ -471,7 +471,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     // Autostart the device share only if config asks for it. Failure here is non-fatal: a
     // misconfigured share must not stop the daemon from driving calls.
     if state.config.adb_share.enabled {
-        if let Err(e) = start_share(&state, crate::share::Profile::Adb, None, Vec::new(), false).await
+        if let Err(e) =
+            start_share(&state, crate::share::Profile::Adb, None, Vec::new(), false, false, None)
+                .await
         {
             tracing::warn!(error = %format!("{e:#}"), "adb share autostart failed");
         }
@@ -503,10 +505,15 @@ async fn start_share(
     bind_override: Option<String>,
     targets: Vec<String>,
     all: bool,
+    with_token: bool,
+    expire_after: Option<i64>,
 ) -> anyhow::Result<crate::share::ResolvedShare> {
     let mut cfg = share_config(state, profile).clone();
     if let Some(bind) = bind_override {
         cfg.bind = Some(bind);
+    }
+    if let Some(secs) = expire_after {
+        cfg.expire_after = secs;
     }
     // A request that names devices replaces config's list outright, rather than adding to it —
     // "share exactly these" must not be widened by a stale config entry.
@@ -517,7 +524,7 @@ async fn start_share(
         cfg.targets = targets;
         cfg.all = false;
     }
-    let resolved = cfg.resolve(profile)?;
+    let resolved = cfg.resolve(profile, with_token)?;
 
     // An adb server that isn't running yet would make every proxied connection fail with a
     // refused upstream; start it the way a person would.
@@ -830,9 +837,18 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             bind,
             targets,
             all,
+            token,
+            expire_after,
         } => {
             let profile = parse_profile(profile.as_deref())?;
-            let resolved = start_share(state, profile, bind, targets, all).await?;
+            let resolved =
+                start_share(state, profile, bind, targets, all, token, expire_after).await?;
+            let remaining = state
+                .share
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|h| h.seconds_remaining());
             Ok(ok_data(
                 &id,
                 json!({
@@ -840,7 +856,14 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                     "bind": resolved.bind.to_string(),
                     "upstream": resolved.upstream.to_string(),
                     "public": resolved.is_public(),
-                    "auth": resolved.require_auth,
+                    "auth": resolved.require_auth(),
+                    // The only time this secret is ever readable. Not stored, not logged.
+                    "token": resolved.token,
+                    "expires_in": remaining,
+                    "addresses": crate::share::local_addresses()
+                        .iter()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>(),
                     "targets": share_targets_json(&resolved.targets),
                 }),
             ))
@@ -874,7 +897,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
         }
         ControlOp::ShareStop { profile } => {
             let profile = parse_profile(profile.as_deref())?;
-            let running = state.share.lock().await.take();
+            let running = state.share.lock().await.take().filter(|h| h.is_live());
             match running {
                 Some(handle) => {
                     let bind = handle.config.bind.to_string();
@@ -888,7 +911,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
         ControlOp::ShareStatus { profile } => {
             let profile = parse_profile(profile.as_deref())?;
             let slot = state.share.lock().await;
-            match slot.as_ref() {
+            match slot.as_ref().filter(|h| h.is_live()) {
                 Some(handle) => {
                     let upstream = handle.config.upstream.clone();
                     let data = json!({
@@ -898,7 +921,12 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                         "upstream": upstream.to_string(),
                         "upstream_reachable": crate::share::server::upstream_reachable(&upstream).await,
                         "public": handle.config.is_public(),
-                        "auth": handle.config.require_auth,
+                        "auth": handle.config.require_auth(),
+                        "expires_in": handle.seconds_remaining(),
+                        "addresses": crate::share::local_addresses()
+                            .iter()
+                            .map(|ip| ip.to_string())
+                            .collect::<Vec<_>>(),
                         "targets": share_targets_json(&handle.config.targets),
                         "active_connections": handle.active_connections(),
                         "served_connections": handle.served_connections(),

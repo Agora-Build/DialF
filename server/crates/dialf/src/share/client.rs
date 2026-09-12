@@ -8,9 +8,10 @@
 //! round trip per invocation and keeps the shim stateless.
 //!
 //! This exists only because the adb client has no way to authenticate, so *something* must
-//! perform the handshake for it. An open (loopback) share needs no handshake and therefore no
-//! shim — point adb at it directly, through an SSH tunnel if it is on another host. Connecting
-//! the shim to an open share is refused with that advice rather than silently half-working.
+//! perform the handshake for it. A share started without `--token` needs no handshake and
+//! therefore no shim — point adb at it directly, through an SSH tunnel if you want the
+//! transport encrypted. Connecting the shim to an open share is refused with that advice
+//! rather than silently half-working.
 
 use std::net::SocketAddr;
 
@@ -82,8 +83,8 @@ pub async fn connect(addr: &str, profile: Profile, token: &str) -> anyhow::Resul
 fn describe_refusal(line: &str) -> String {
     match line.strip_prefix("ERR ") {
         Some("auth failed") => {
-            "share rejected the token — check `adb_share.token` on the host matches the one \
-             passed here (--token / DIALF_SHARE_TOKEN)"
+            "share rejected the token — it must be the one the host printed when it ran \
+             `dialf devices share --token` (a restarted share issues a new one)"
                 .to_string()
         }
         Some("bad magic") => {
@@ -166,10 +167,11 @@ mod tests {
 
     #[test]
     fn target_gets_the_default_port_when_bare() {
-        assert_eq!(target_addr("lab-mac", Profile::Adb).unwrap(), "lab-mac:5038");
+        // The bare-host default is the *share's* port, since that is what we dial.
+        assert_eq!(target_addr("lab-mac", Profile::Adb).unwrap(), "lab-mac:5939");
         assert_eq!(
             target_addr("192.168.1.50", Profile::Adb).unwrap(),
-            "192.168.1.50:5038"
+            "192.168.1.50:5939"
         );
     }
 
@@ -181,7 +183,7 @@ mod tests {
     #[test]
     fn ipv6_must_be_bracketed() {
         assert_eq!(target_addr("[::1]:9000", Profile::Adb).unwrap(), "[::1]:9000");
-        assert_eq!(target_addr("[::1]", Profile::Adb).unwrap(), "[::1]:5038");
+        assert_eq!(target_addr("[::1]", Profile::Adb).unwrap(), "[::1]:5939");
         // Bare IPv6 is ambiguous; guessing here is what crashed the phone app on an
         // unbracketed URL, so it's an error with the fix in the message.
         let err = target_addr("fe80::1:2:3", Profile::Adb).unwrap_err();

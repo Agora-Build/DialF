@@ -1,19 +1,17 @@
 //! Host side: the listener that fronts the local device endpoint.
 //!
-//! Whether a connection must pass [`handshake`] follows the bind. An off-box share always
-//! authenticates, and a rejected peer never opens an upstream socket at all — that ordering
-//! is the security property this module exists to provide, and it is what the
-//! `rejects_a_wrong_token` test pins down.
+//! A share either issues a token or it doesn't. With one, every connection must pass
+//! [`handshake`] and a rejected peer never opens an upstream socket at all — that ordering is
+//! the security property this module provides, pinned down by `rejects_a_wrong_token`.
+//! Without one the share is open, and stock `adb -H … -P …` connects with no client shim,
+//! since the adb client cannot perform a handshake.
 //!
-//! A loopback share is open by default, because a token there would guard a door that is
-//! already ajar: anything that can reach this port can reach `127.0.0.1:5037` directly. Being
-//! open is what lets stock `adb -H … -P …` connect over an SSH tunnel with no client shim,
-//! since the adb client cannot perform a handshake. `require_token: true` overrides this for
-//! a multi-user host.
+//! Either way the share **expires**: the accept loop stops itself at a deadline, so a door
+//! left open at the end of a session closes on its own.
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,11 +35,30 @@ pub struct ShareHandle {
     pub config: ResolvedShare,
     pub active: Arc<AtomicU64>,
     pub served: Arc<AtomicU64>,
+    /// Wall-clock moment the share stops itself, for reporting. `None` never expires.
+    pub expires_at: Option<std::time::SystemTime>,
+    /// Cleared when the accept loop exits — by `stop`, or by the share expiring on its own.
+    live: Arc<AtomicBool>,
     cancel: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl ShareHandle {
+    /// Whether the share is still listening. False once it expired or was stopped.
+    pub fn is_live(&self) -> bool {
+        self.live.load(Ordering::Relaxed)
+    }
+
+    /// Seconds left before the share expires, if it expires at all.
+    pub fn seconds_remaining(&self) -> Option<u64> {
+        let at = self.expires_at?;
+        Some(
+            at.duration_since(std::time::SystemTime::now())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
+    }
+
     /// Connections currently spliced through.
     pub fn active_connections(&self) -> u64 {
         self.active.load(Ordering::Relaxed)
@@ -72,49 +89,42 @@ impl ShareHandle {
 
 /// Bind the share and serve it in the background.
 ///
-/// Binding happens here, before returning, so `share.start` can report "address in use" or a
-/// bad token to the caller instead of failing invisibly in a spawned task.
+/// Binding happens here, before returning, so `share.start` can report "address in use" to the
+/// caller instead of failing invisibly in a spawned task.
 pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
-    // Re-check even though `resolve` did: `start` is public, and a share must never listen on
-    // a token that wouldn't survive validation.
-    if config.require_auth {
-        handshake::check_token(&config.token)?;
-    } else if !config.bind.ip().is_loopback() {
-        // Belt and braces: the only way here is a hand-built ResolvedShare.
-        anyhow::bail!("refusing to serve an unauthenticated share on {}", config.bind);
-    }
-
     let listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("bind {} share on {}", config.profile, config.bind))?;
     // Report where we actually landed, so port 0 shows the assigned port rather than ":0".
     config.bind = listener.local_addr().unwrap_or(config.bind);
 
-    if config.is_public() {
+    if config.is_public() && !config.require_auth() {
         tracing::warn!(
             bind = %config.bind,
-            profile = %config.profile,
-            "device sharing is reachable off-box — the session is authenticated but NOT \
-             encrypted; use a VPN or SSH tunnel outside a trusted LAN"
+            "device share is open on the network — anyone who can reach this port can drive \
+             the phone; use a token or a trusted network"
+        );
+    } else if config.is_public() {
+        tracing::warn!(
+            bind = %config.bind,
+            "device share is reachable off-box — authenticated but NOT encrypted; use a VPN \
+             or SSH tunnel outside a trusted LAN"
         );
     }
     tracing::info!(
         bind = %config.bind,
         upstream = %config.upstream,
         profile = %config.profile,
-        auth = config.require_auth,
+        auth = config.require_auth(),
+        expires_in = ?config.expires_after,
         "device share listening"
     );
-    if !config.require_auth && !config.token.trim().is_empty() {
-        tracing::info!(
-            "a token is configured but unused: this share is loopback-only, so adb connects \
-             directly (set `require_token: true` to demand it anyway)"
-        );
-    }
 
     let cancel = Arc::new(Notify::new());
     let active = Arc::new(AtomicU64::new(0));
     let served = Arc::new(AtomicU64::new(0));
+    let live = Arc::new(AtomicBool::new(true));
+    let expires_at = config.expires_after.map(|d| std::time::SystemTime::now() + d);
 
     let task = tokio::spawn(accept_loop(
         listener,
@@ -122,12 +132,15 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
         cancel.clone(),
         active.clone(),
         served.clone(),
+        live.clone(),
     ));
 
     Ok(ShareHandle {
         config,
         active,
         served,
+        expires_at,
+        live,
         cancel,
         task,
     })
@@ -139,10 +152,31 @@ async fn accept_loop(
     cancel: Arc<Notify>,
     active: Arc<AtomicU64>,
     served: Arc<AtomicU64>,
+    live: Arc<AtomicBool>,
 ) {
+    // A share is a door held open. Unless told otherwise it closes itself, so one forgotten
+    // at the end of a session doesn't stay open overnight.
+    let deadline = config
+        .expires_after
+        .map(|d| tokio::time::Instant::now() + d);
+
     loop {
         let accepted = tokio::select! {
-            _ = cancel.notified() => return,
+            _ = cancel.notified() => break,
+            _ = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    // No expiry: never completes, so the select waits on the other branches.
+                    None => std::future::pending().await,
+                }
+            } => {
+                // Expiry closes the door *and* clears the room: a connection opened before
+                // the deadline would otherwise keep the phone reachable indefinitely, which
+                // is exactly what the expiry is meant to prevent.
+                tracing::info!(bind = %config.bind, "device share expired");
+                cancel.notify_waiters();
+                break;
+            }
             r = listener.accept() => r,
         };
         let (stream, peer) = match accepted {
@@ -152,6 +186,7 @@ async fn accept_loop(
                 continue;
             }
         };
+
         let config = config.clone();
         let active = active.clone();
         let served = served.clone();
@@ -163,6 +198,7 @@ async fn accept_loop(
             }
         });
     }
+    live.store(false, Ordering::Relaxed);
 }
 
 async fn serve_conn(
@@ -173,7 +209,7 @@ async fn serve_conn(
     served: &Arc<AtomicU64>,
     cancel: Arc<Notify>,
 ) -> anyhow::Result<()> {
-    let mut stream = if config.require_auth {
+    let mut stream = if config.require_auth() {
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, authenticate(stream, config)).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
@@ -234,6 +270,7 @@ async fn decline_handshake(stream: TcpStream) -> anyhow::Result<TcpStream> {
 /// Run the challenge-response. Returns the stream only when the peer proved it holds the
 /// token; every failure path returns an error and the caller closes without touching upstream.
 async fn authenticate(stream: TcpStream, config: &ResolvedShare) -> anyhow::Result<TcpStream> {
+    let token = config.token.as_deref().unwrap_or_default();
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read);
 
@@ -258,7 +295,7 @@ async fn authenticate(stream: TcpStream, config: &ResolvedShare) -> anyhow::Resu
 
     let answer = read_line(&mut lines).await?;
     let auth = answer.strip_prefix("AUTH ").unwrap_or_default();
-    if !handshake::verify(&config.token, &nonce, auth) {
+    if !handshake::verify(token, &nonce, auth) {
         let _ = write.write_all(b"ERR auth failed\n").await;
         anyhow::bail!("auth failed");
     }
@@ -382,7 +419,6 @@ mod tests {
     use crate::share::{Profile, ShareConfig};
     use tokio::io::AsyncReadExt;
 
-    const TOKEN: &str = "a-perfectly-fine-token";
 
     /// Stands in for the adb server: consumes the one framed request the gate forwards, then
     /// echoes. `hits` counts connections, which is how we prove a rejected peer never reached
@@ -419,20 +455,21 @@ mod tests {
         FakeUpstream { addr, hits }
     }
 
+    fn token_of(share: &ShareHandle) -> String {
+        share.config.token.clone().expect("share should have issued a token")
+    }
+
     async fn start_share(upstream: &FakeUpstream) -> ShareHandle {
         let cfg = ShareConfig {
             enabled: false,
             bind: Some("127.0.0.1:0".to_string()),
-            token: TOKEN.to_string(),
             upstream: Some(format!("tcp:{}", upstream.addr)),
             targets: Vec::new(),
             all: true,
-            // These tests are about the token gate, and they bind loopback — which is open by
-            // default — so demand auth explicitly.
-            require_token: Some(true),
+            expire_after: 3600,
         };
         // Bind on port 0, then recover the real port for clients to dial.
-        let mut resolved = cfg.resolve(Profile::Adb).unwrap();
+        let mut resolved = cfg.resolve(Profile::Adb, true).unwrap();
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         resolved.bind = probe.local_addr().unwrap();
         drop(probe);
@@ -465,7 +502,7 @@ mod tests {
         let up = fake_upstream().await;
         let share = start_share(&up).await;
 
-        let mut s = handshake_as_client(share.config.bind, TOKEN).await.unwrap();
+        let mut s = handshake_as_client(share.config.bind, &token_of(&share)).await.unwrap();
         // Past the token gate the connection still has to pass the adb gate, so send a real
         // request before the raw payload.
         crate::share::adb::write_message(&mut s, "host:transport-any").await.unwrap();
@@ -552,26 +589,24 @@ mod tests {
         let up = fake_upstream().await;
         let share = start_share(&up).await;
         let addr = share.config.bind;
+        let tok = token_of(&share);
         share.stop().await;
 
         // Give the listener a moment to actually release the port.
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
-            handshake_as_client(addr, TOKEN).await.is_err(),
+            handshake_as_client(addr, &tok).await.is_err(),
             "share should refuse connections once stopped"
         );
     }
 
     #[tokio::test]
-    async fn start_refuses_a_weak_token() {
-        let cfg = ShareConfig {
-            token: "short".to_string(),
-            bind: Some("127.0.0.1:0".to_string()),
-            all: true,
-            require_token: Some(true),
-            ..Default::default()
-        };
-        assert!(cfg.resolve(Profile::Adb).is_err());
+    async fn a_share_only_has_a_token_when_one_was_asked_for() {
+        // Every issued token is machine-generated, so the only way to be tokenless now is to
+        // not ask for one — which is an open share, not an error.
+        let cfg = ShareConfig { all: true, ..Default::default() };
+        assert!(cfg.resolve(Profile::Adb, false).unwrap().token.is_none());
+        assert!(cfg.resolve(Profile::Adb, true).unwrap().token.is_some());
     }
 
     #[tokio::test]

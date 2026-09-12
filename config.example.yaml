@@ -78,19 +78,21 @@ audio:
 # --- Device sharing: let another machine drive this host's phone over adb ---------------
 # `dialf devices share --target <serial>` exposes the host's adb server so a remote machine
 # can run `adb shell`, `install`, `logcat`, `push`/`pull` against a phone plugged in here.
+# `dialf devices share --list` shows what is attached; sharing never defaults to everything.
 #
-# Auth follows the bind. A loopback share is OPEN — stock `adb -H 127.0.0.1 -P 5038` connects
-# with no token and no client-side shim, so a remote machine only needs `ssh -L`. Binding
-# off-box requires a token (HMAC challenge-response; it never crosses the wire), which
-# authenticates connections but does NOT encrypt them: the adb session after the handshake is
-# plaintext, so outside a trusted LAN tunnel it over a VPN or SSH.
+# The default bind is 0.0.0.0:5939 — reachable from the network. Without `--token` the share
+# is OPEN: anyone who can reach the port can drive the phone. That is fine on a trusted or
+# overlay network (Netbird/Tailscale/VPN) and not on one you do not control.
 #
-# Sharing is off unless started, and never defaults to "everything": name serials with
-# --target (repeatable) or pass --all. `dialf devices share --list` shows what is attached.
+# `--token` issues a one-time secret, printed once when the share starts and never written
+# anywhere; clients then need `dialf devices connect`. It authenticates them but does not
+# encrypt the session, so tunnel it (VPN or `ssh -L`) outside a trusted network either way.
+#
+# Shares expire on their own — 1h by default, `expire_after: 0` never — so a door left open
+# at the end of a session closes itself.
 #
 # adb_share:
-#   enabled: false            # start with the daemon? runtime --stop/--start works either way
-#   bind: 0.0.0.0:5038        # default 127.0.0.1:5038 — a LAN bind should be deliberate
-#   token: <dialf devices share --new-token>   # required only for an off-box bind
+#   enabled: false            # start with the daemon? runtime start/--stop works either way
+#   bind: 0.0.0.0:5939
 #   targets: ["4B2B1C"]       # or `all: true`
-#   require_token: true       # demand the token even on a loopback bind (multi-user host)
+#   expire_after: 3600        # seconds; <= 0 never expires

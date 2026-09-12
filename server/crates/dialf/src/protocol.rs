@@ -344,6 +344,13 @@ pub enum ControlOp {
         /// Expose every attached device instead of a named list.
         #[serde(default)]
         all: bool,
+        /// Issue a one-time token for this share. The token comes back in the response and is
+        /// never persisted, so it can only be read at the moment the share starts.
+        #[serde(default)]
+        token: bool,
+        /// Seconds before the share stops itself; <= 0 never expires. Overrides config.
+        #[serde(default)]
+        expire_after: Option<i64>,
     },
     /// List the devices attached to the host (what `--target` can name).
     #[serde(rename = "share.devices")]

@@ -127,10 +127,12 @@ enum DevicesAction {
     ///
     /// Name what to expose with `--target <serial>` (repeatable) or `--all`.
     ///
-    /// A loopback share is open — stock `adb -H 127.0.0.1 -P <port>` connects directly, so an
-    /// SSH tunnel is all a remote machine needs. Binding off-box requires a token, which
-    /// authenticates connections but does NOT encrypt them: outside a trusted LAN, tunnel it
-    /// over a VPN or SSH.
+    /// Without `--token` the share is open to anyone who can reach it — fine on a trusted or
+    /// overlay network, not on one you don't control. With `--token` a one-time secret is
+    /// printed and clients must use `dialf devices connect`; it authenticates them but does
+    /// not encrypt the session, so tunnel it outside a trusted network either way.
+    ///
+    /// Shares expire on their own (default 1h) so a forgotten one closes itself.
     Share {
         /// Share over adb (Android). The default, and currently the only protocol.
         #[arg(long)]
@@ -141,34 +143,39 @@ enum DevicesAction {
         /// Expose every attached device, including ones plugged in later.
         #[arg(long, conflicts_with = "targets")]
         all: bool,
+        /// Issue a one-time token that clients must present. Printed once when the share
+        /// starts and never stored, so a restarted share has a new one.
+        #[arg(long)]
+        token: bool,
+        /// Seconds before the share stops itself; 0 or less never expires (default 3600).
+        #[arg(long, value_name = "SECONDS")]
+        expire_after: Option<i64>,
         /// Listen address; overrides `adb_share.bind` for this run only.
         #[arg(long)]
         bind: Option<String>,
         /// Show what is being shared, and whether adb answers behind it.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token"])]
         status: bool,
         /// Stop sharing and drop in-flight connections.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "status"])]
         stop: bool,
         /// List the attached devices that `--target` can name.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status", "stop"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "status", "stop"])]
         list: bool,
-        /// Print a fresh random token for `adb_share.token`.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status", "stop", "list"])]
-        new_token: bool,
     },
-    /// Connect to a host whose share requires a token, exposing it as a local port.
+    /// Connect to a token-protected share, exposing it as a local port.
     ///
-    /// Needed only for a share bound off-box (`--bind 0.0.0.0:…`), because those require a
-    /// token handshake and `adb` cannot perform one — this does it per connection. Then use
-    /// stock tooling: `adb -H 127.0.0.1 -P 5038 …`. Runs until Ctrl+C.
+    /// Needed only when the host ran `share --token`, because `adb` cannot perform the token
+    /// handshake — this does it per connection. Then use stock tooling:
+    /// `adb -H 127.0.0.1 -P 5038 …`. Runs until Ctrl+C.
     ///
-    /// If the share is on loopback it needs no token: skip this entirely and reach it with
-    /// `ssh -L 5038:127.0.0.1:5038 <host>`, then point adb at 127.0.0.1:5038.
+    /// A share started without `--token` needs none of this: point adb straight at the host,
+    /// or tunnel first with `ssh -L`.
     Connect {
         /// Host running the share: `hostname`, `host:port`, or `[::1]:port`.
         host: String,
-        /// Shared token. Falls back to $DIALF_SHARE_TOKEN, then `adb_share.token` in config.
+        /// The token the host printed when it started the share. Falls back to
+        /// $DIALF_SHARE_TOKEN.
         #[arg(long)]
         token: Option<String>,
         /// Local address to expose (loopback only — this port inherits full device access).
@@ -580,25 +587,20 @@ async fn main() -> anyhow::Result<()> {
 
 /// `dialf devices share|connect …`
 async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
-    use dialf::share::{handshake, Profile};
+    use dialf::share::Profile;
 
     match action {
         DevicesAction::Share {
             adb: _, // the only protocol today; accepted so scripts can be explicit
             targets,
             all,
+            token,
+            expire_after,
             bind,
             status,
             stop,
             list,
-            new_token,
         } => {
-            // Generating a token needs no daemon — it's just entropy for the config file.
-            if new_token {
-                println!("{}", handshake::new_token());
-                println!("# put this in config.yaml as:\n#   adb_share:\n#     token: <above>");
-                return Ok(());
-            }
             let socket = Config::resolve_client_socket();
             let op = if stop {
                 ControlOp::ShareStop { profile: None }
@@ -617,6 +619,8 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
                     bind,
                     targets,
                     all,
+                    token,
+                    expire_after,
                 }
             };
             let resp = call(&socket, op).await?;
@@ -643,8 +647,10 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
     }
 }
 
-/// Token for `dialf devices connect`: explicit flag, then env, then this machine's own config
-/// (handy when the same config is shared between host and client).
+/// Token for `dialf devices connect`: the flag, else the environment.
+///
+/// There is no config fallback — a share token is minted per share and printed once, never
+/// written to a file, so there is nowhere on disk for it to have come from.
 fn resolve_share_token(flag: Option<String>) -> anyhow::Result<String> {
     if let Some(t) = flag.filter(|t| !t.trim().is_empty()) {
         return Ok(t);
@@ -654,14 +660,9 @@ fn resolve_share_token(flag: Option<String>) -> anyhow::Result<String> {
             return Ok(t);
         }
     }
-    let cfg = Config::load(&Config::default_path()).unwrap_or_default();
-    if !cfg.adb_share.token.trim().is_empty() {
-        return Ok(cfg.adb_share.token);
-    }
     anyhow::bail!(
-        "no share token — pass --token, set $DIALF_SHARE_TOKEN, or put `adb_share.token` \
-         in {}",
-        Config::default_path().display()
+        "no share token — pass --token <dvs_…> or set $DIALF_SHARE_TOKEN. The host prints \
+         the token once, when it runs `dialf devices share --token`."
     )
 }
 
@@ -749,44 +750,112 @@ fn print_share_result(data: Option<&serde_json::Value>) {
 
     let bind = get("bind");
     let bind = bind.as_str().unwrap_or("?");
+    let port = bind.rsplit(':').next().unwrap_or("5939").to_string();
     println!("adb share on {bind}  ->  {}", get("upstream").as_str().unwrap_or("?"));
     match get("targets") {
-        serde_json::Value::String(s) if s == "all" => println!("  sharing: all attached devices"),
+        serde_json::Value::String(t) if t == "all" => println!("  sharing: all attached devices"),
         serde_json::Value::Array(list) => println!(
             "  sharing: {}",
-            list.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            list.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
         ),
         _ => {}
     }
-    if let Some(reachable) = get("upstream_reachable").as_bool() {
-        if !reachable {
-            println!("  WARNING: the adb server is not answering — start it with `adb start-server`");
-        }
+    print_expiry(get("expires_in").as_u64(), d.get("expires_in").is_some());
+
+    if get("upstream_reachable") == serde_json::Value::Bool(false) {
+        println!("  WARNING: the adb server is not answering — start it with `adb start-server`");
     }
     if let Some(n) = get("active_connections").as_u64() {
-        println!("  connections: {n} active, {} served", get("served_connections").as_u64().unwrap_or(0));
+        println!(
+            "  connections: {n} active, {} served",
+            get("served_connections").as_u64().unwrap_or(0)
+        );
     }
-    let port = bind.rsplit(':').next().unwrap_or("5038");
-    if get("auth") == serde_json::Value::Bool(false) {
-        // Loopback share: no handshake, so adb connects straight to it and the shim is not
-        // just unnecessary but unsupported.
-        println!("  open (loopback only — no token needed)");
-        println!("  local:  adb -H 127.0.0.1 -P {port} …");
-        println!("  remote: ssh -L {port}:127.0.0.1:{port} <this-host>   then the same command");
+
+    // Where a client should point. `0.0.0.0` is not typeable, so name the real addresses.
+    let hosts: Vec<String> = get("addresses")
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+        .unwrap_or_default();
+    let host = pick_host(bind, &hosts);
+    let authed = get("auth") == serde_json::Value::Bool(true);
+    let public = get("public") == serde_json::Value::Bool(true);
+
+    // Shown once and never again — the daemon keeps it nowhere readable.
+    if let Some(token) = get("token").as_str() {
+        println!("\n  token: {token}");
+        println!("  (shown once, not saved — a restarted share issues a new one)");
+    }
+
+    println!("\n  From the other machine:");
+    if authed {
+        println!("    dialf devices connect {host}:{port} --token <token above>");
+        println!("    adb -H 127.0.0.1 -P 5038 devices");
     } else {
+        println!("    adb -H {host} -P {port} devices");
+        println!("  or, if you have SSH to this host, tunnel first:");
+        println!("    ssh -L {port}:127.0.0.1:{port} {host}");
+        println!("    adb -H 127.0.0.1 -P {port} devices");
+    }
+    if hosts.len() > 1 {
+        println!("  (also reachable at {})", hosts[1..].join(", "));
+    }
+
+    if public && !authed {
         println!(
-            "  remote: dialf devices connect <this-host>:{port}   then  adb -H 127.0.0.1 -P 5038 …"
+            "\n  OPEN SHARE — anyone who can reach {host}:{port} can install apps, read /sdcard\n  \
+             and open a shell on this phone. Safe only on a network you trust (VPN/Netbird).\n  \
+             Otherwise stop it and re-share with --token."
+        );
+    } else if public {
+        println!(
+            "\n  NOTE: connections are authenticated but NOT encrypted — tunnel over VPN/SSH\n  \
+             outside a trusted network."
         );
     }
-    if get("public") == serde_json::Value::Bool(true) {
-        println!(
-            "  NOTE: reachable off-box. Connections are authenticated but NOT encrypted — \
-             tunnel over VPN/SSH outside a trusted LAN."
-        );
+}
+
+/// Say when the share closes itself, and flag the two answers worth a second look.
+fn print_expiry(seconds: Option<u64>, present: bool) {
+    match seconds {
+        Some(secs) => {
+            println!("  expires: in {}", human_duration(secs));
+            if secs as i64 > dialf::share::LONG_EXPIRY_WARN {
+                println!(
+                    "  WARNING: that is a long time to leave a device share open — \
+                     consider a shorter --expire-after"
+                );
+            }
+        }
+        // The field is there but null: this share was told never to expire.
+        None if present => println!(
+            "  expires: never\n  \
+             WARNING: this share stays open until you stop it or the daemon restarts"
+        ),
+        None => {}
     }
+}
+
+/// "1h 5m" / "45m" / "30s" — enough precision to act on, no more.
+fn human_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// The address to show a remote user: a real interface address when the share is bound to
+/// every interface, else whatever it was bound to.
+fn pick_host(bind: &str, addresses: &[String]) -> String {
+    let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind);
+    if host == "0.0.0.0" || host == "[::]" || host == "::" {
+        return addresses
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<this-host>".to_string());
+    }
+    host.to_string()
 }
 
 /// After `dialf import`: restart the installed dialfd service so the new config is live,
@@ -1240,7 +1309,7 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_duration, fmt_number, ver_rel, VerRel};
+    use super::{fmt_duration, fmt_number, human_duration, pick_host, ver_rel, VerRel};
 
     #[test]
     fn version_relation() {
@@ -1253,6 +1322,31 @@ mod tests {
         assert_eq!(ver_rel("0.1.20-dev", "0.1.20"), VerRel::Same);
         // Unparseable either side → Unknown (no claim about which is ahead).
         assert_eq!(ver_rel("unknown", "0.1.20"), VerRel::Unknown);
+    }
+
+    #[test]
+    fn a_wildcard_bind_is_shown_as_a_dialable_address() {
+        // `adb -H 0.0.0.0` is not a thing anyone can type, so the hint must name a real one.
+        assert_eq!(
+            pick_host("0.0.0.0:5939", &["100.1.2.3".into(), "192.168.1.9".into()]),
+            "100.1.2.3"
+        );
+        // Nothing to offer: a placeholder beats printing 0.0.0.0.
+        assert_eq!(pick_host("0.0.0.0:5939", &[]), "<this-host>");
+        // An explicit bind is already dialable and wins over any interface list.
+        assert_eq!(pick_host("192.168.1.9:5939", &["100.1.2.3".into()]), "192.168.1.9");
+        assert_eq!(pick_host("127.0.0.1:5939", &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn durations_read_at_a_glance() {
+        assert_eq!(human_duration(30), "30s");
+        assert_eq!(human_duration(59), "59s");
+        assert_eq!(human_duration(60), "1m");
+        assert_eq!(human_duration(3599), "59m");
+        assert_eq!(human_duration(3600), "1h 0m");
+        assert_eq!(human_duration(5400), "1h 30m");
+        assert_eq!(human_duration(90000), "25h 0m");
     }
 
     #[test]

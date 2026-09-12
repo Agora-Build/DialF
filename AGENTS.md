@@ -130,33 +130,38 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **The ADB server protocol has no authentication** — its loopback bind *is* its security
   model. Reaching the port means `shell`, APK install, `/sdcard` read/write, screen capture,
   and port-forwarding *into* the device.
-- **Auth follows the bind.** An off-box share gates every connection on an HMAC-SHA256
-  challenge-response (`share/handshake.rs`) before forwarding a byte; `require_token: false`
-  cannot waive that. A loopback share is **open**, because a token there would guard a door
-  already ajar — anything that reaches it can reach `127.0.0.1:5037` directly. Set
-  `require_token: true` to authenticate a loopback share anyway (multi-user hosts).
+- **The default bind is `0.0.0.0:5939` and a token is opt-in.** So the default share is open
+  to the network, by deliberate choice: it is meant for a trusted LAN or an overlay
+  (Netbird/Tailscale). The CLI prints an unmissable OPEN SHARE warning naming what an
+  attacker could do; do not quietly remove it.
+- **Tokens are minted per share and never persisted** — `dvs_` + 12 chars, printed once, held
+  only in `ResolvedShare`. There is no config field and no file to read one back from, so a
+  restarted share always has a new secret and `connect` has no on-disk fallback.
+- **The token authenticates; it does not encrypt.** The proxied session after the handshake is
+  plaintext. Off-LAN use belongs inside a VPN or SSH tunnel. TLS is deliberately not
+  implemented.
+- **Shares expire** (1h default, `<= 0` never). Expiry closes the listener *and* cancels
+  in-flight connections — otherwise a held `adb shell` would outlive the deadline, which is
+  the thing expiry exists to prevent.
 - **The shim exists only because adb cannot authenticate.** `adb -H` opens a socket and starts
   speaking adb; it has no handshake hook, so `dialf devices connect` performs one on its
-  behalf. Against an *open* share no shim is needed — point adb straight at it (over `ssh -L`
-  from another host), and the shim refuses with that advice if pointed there.
-- **Don't delete the shim as "redundant with SSH".** It has been questioned twice and kept
-  twice. It serves the off-box bind, which *is* the original feature request ("expose an adb
-  server URL"); loopback + `ssh -L` is a tunnel you could build without dialf. The considered
-  alternatives were dropping off-box access entirely (walks back the feature) and swapping the
-  token for an IP allowlist so stock adb works remotely (spoofable, DHCP-fragile, still
-  unencrypted — rejected as too weak for a phone holding a live SIM).
-- **The token authenticates; it does not encrypt.** The proxied session after the handshake is
-  plaintext, so an on-path attacker can read or hijack it. Off-LAN use belongs inside a VPN or
-  SSH tunnel. TLS is deliberately not implemented.
+  behalf. Against a share with no token no shim is needed — point adb straight at it, and the
+  shim refuses with that advice if pointed there.
+- **Don't delete the shim as "redundant with SSH".** It has been questioned three times and
+  kept each time. It serves token-protected shares, which is the original feature request
+  ("expose an adb server URL"). The considered alternatives were dropping remote access
+  entirely and swapping the token for an IP allowlist (spoofable, DHCP-fragile).
 - **A byte splice is not enough** — `share/adb.rs` reads each connection's first request so
   `--target` is *enforced*, not advisory. It blocks `host:kill` (a remote `adb kill-server`,
   or just a peer on a mismatched platform-tools version, would otherwise stop the host's adb
   server), filters `host:devices` to shared serials only, and refuses `transport-any` when
-  several devices are shared.
+  several devices are shared. This holds on an open share too — no token does not mean no
+  policy.
 - **adb-over-WiFi serials contain colons** (`192.168.1.5:5555`), so never parse
   `host-serial:<serial>:<cmd>` by splitting on the first colon — match against known serials.
-- Sharing **never defaults to everything**: no `--target`/`--all` is an error listing what is
-  attached. A host that grows a second phone must not start sharing it silently.
+- **A host cannot reach its own overlay IP.** Netbird/Tailscale (100.64/10) route it off-box
+  and don't hairpin, so only a *peer* can dial it; testing a share from the sharing machine
+  must use its LAN address or loopback, or adb hangs until its connect timeout.
 - `ShareHandle::stop` waits for the accept loop to exit rather than aborting it, but the last
   of the socket teardown is the kernel's — re-binding the same port can need ~30ms on macOS.
 

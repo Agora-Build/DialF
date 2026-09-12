@@ -18,7 +18,6 @@ use dialf::share::{client, server, Profile, ShareConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-const TOKEN: &str = "an-end-to-end-share-token";
 const DEV_A: &str = "AAAA1111";
 const DEV_B: &str = "BBBB2222";
 
@@ -72,26 +71,31 @@ async fn fake_adb(devices: &'static str) -> FakeAdb {
     FakeAdb { addr, hits, seen }
 }
 
+/// An authenticated share on an ephemeral port. Returns the handle; its issued token is at
+/// `handle.config.token` — the only place it ever exists.
 async fn start_share_with(upstream: &str, targets: Vec<String>, all: bool) -> ShareHandle {
     let cfg = ShareConfig {
         enabled: false,
         bind: None,
-        token: TOKEN.to_string(),
         upstream: Some(format!("tcp:{upstream}")),
         targets,
         all,
-        // Loopback binds are open by default; these exercise the authenticated path.
-        require_token: Some(true),
+        expire_after: 3600,
     };
     // Port 0: the listener reports the port it was assigned, so parallel tests never race
     // over a "free" port that something else grabbed in between.
-    let mut resolved = cfg.resolve(Profile::Adb).unwrap();
+    let mut resolved = cfg.resolve(Profile::Adb, true).unwrap();
     resolved.bind = "127.0.0.1:0".parse().unwrap();
     server::start(resolved).await.unwrap()
 }
 
 async fn start_share(upstream: &str) -> ShareHandle {
     start_share_with(upstream, Vec::new(), true).await
+}
+
+/// The token a share issued.
+fn token_of(share: &ShareHandle) -> String {
+    share.config.token.clone().expect("share should have issued a token")
 }
 
 /// Start the real shim and return the local address to point clients at.
@@ -119,7 +123,7 @@ async fn open_via_shim(shim: SocketAddr, request: &str) -> TcpStream {
 async fn shim_and_listener_move_bytes_end_to_end() {
     let up = fake_adb("").await;
     let share = start_share(&up.addr.to_string()).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let mut c = open_via_shim(shim, "host:transport-any").await;
     c.write_all(b"round-trip through shim and share").await.unwrap();
@@ -137,7 +141,7 @@ async fn a_payload_larger_than_one_buffer_survives_intact() {
     // writes would pass the other tests and still corrupt a real file transfer.
     let up = fake_adb("").await;
     let share = start_share(&up.addr.to_string()).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let payload: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
     let mut c = open_via_shim(shim, "host:transport-any").await;
@@ -167,7 +171,7 @@ async fn many_concurrent_connections_are_served() {
     // here is the normal case rather than a stress test.
     let up = fake_adb("").await;
     let share = start_share(&up.addr.to_string()).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let mut joins = Vec::new();
     for i in 0..20u32 {
@@ -212,7 +216,7 @@ async fn an_unshared_device_cannot_be_reached_through_the_share() {
     // never shared, and the attempt must not even open an upstream connection.
     let up = fake_adb("").await;
     let share = start_share_with(&up.addr.to_string(), vec![DEV_A.to_string()], false).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let mut c = TcpStream::connect(shim).await.unwrap();
     adb::write_message(&mut c, &format!("host:transport:{DEV_B}")).await.unwrap();
@@ -239,7 +243,7 @@ async fn the_device_list_shows_only_shared_devices() {
     // Otherwise a remote sees an inventory of everything plugged into the host.
     let up = fake_adb("AAAA1111\tdevice\nBBBB2222\tdevice\n").await;
     let share = start_share_with(&up.addr.to_string(), vec![DEV_A.to_string()], false).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let mut c = TcpStream::connect(shim).await.unwrap();
     adb::write_message(&mut c, "host:devices").await.unwrap();
@@ -261,7 +265,7 @@ async fn killing_the_hosts_adb_server_is_blocked() {
     // on the host.
     let up = fake_adb("").await;
     let share = start_share(&up.addr.to_string()).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
 
     let mut c = TcpStream::connect(shim).await.unwrap();
     adb::write_message(&mut c, "host:kill").await.unwrap();
@@ -291,7 +295,7 @@ async fn a_dead_upstream_fails_fast_instead_of_hanging() {
     };
     let share = start_share(&dead.to_string()).await;
 
-    let mut c = client::connect(&share.config.bind.to_string(), Profile::Adb, TOKEN)
+    let mut c = client::connect(&share.config.bind.to_string(), Profile::Adb, &token_of(&share))
         .await
         .expect("handshake still succeeds — the share itself is healthy");
     adb::write_message(&mut c, "host:transport-any").await.unwrap();
@@ -317,13 +321,12 @@ async fn a_restarted_share_is_reachable_again() {
     let cfg = ShareConfig {
         enabled: false,
         bind: Some("127.0.0.1:45871".to_string()),
-        token: TOKEN.to_string(),
         upstream: Some(format!("tcp:{}", up.addr)),
         targets: Vec::new(),
         all: true,
-        require_token: Some(true),
+        expire_after: 3600,
     };
-    let share = server::start(cfg.resolve(Profile::Adb).unwrap()).await.unwrap();
+    let share = server::start(cfg.resolve(Profile::Adb, true).unwrap()).await.unwrap();
     let addr = share.config.bind;
     share.stop().await;
 
@@ -347,7 +350,7 @@ async fn a_restarted_share_is_reachable_again() {
 
     // And a fresh share serves normally afterwards.
     let again = start_share(&up.addr.to_string()).await;
-    let mut c = client::connect(&again.config.bind.to_string(), Profile::Adb, TOKEN)
+    let mut c = client::connect(&again.config.bind.to_string(), Profile::Adb, &token_of(&again))
         .await
         .unwrap();
     adb::write_message(&mut c, "host:transport-any").await.unwrap();
@@ -394,7 +397,7 @@ async fn real_adb_works_through_the_share() {
     };
 
     let share = start_share_with("127.0.0.1:5037", vec![serial.clone()], false).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
     let port = shim.port().to_string();
 
     let out = tokio::process::Command::new(&adb_bin)
@@ -438,7 +441,7 @@ async fn real_adb_cannot_see_an_unshared_device() {
 
     let share =
         start_share_with("127.0.0.1:5037", vec!["NOTATTACHED0000".to_string()], false).await;
-    let (shim, task) = start_shim(share.config.bind, TOKEN).await;
+    let (shim, task) = start_shim(share.config.bind, &token_of(&share)).await;
     let port = shim.port().to_string();
 
     let out = tokio::process::Command::new(&adb_bin)
@@ -467,14 +470,13 @@ async fn start_open_share(upstream: &str) -> ShareHandle {
     let cfg = ShareConfig {
         enabled: false,
         bind: Some("127.0.0.1:0".to_string()),
-        token: String::new(),
         upstream: Some(format!("tcp:{upstream}")),
         targets: Vec::new(),
         all: true,
-        require_token: None, // the default rule: loopback => open
+        expire_after: 3600,
     };
-    let resolved = cfg.resolve(Profile::Adb).unwrap();
-    assert!(!resolved.require_auth, "a loopback share should default to open");
+    let resolved = cfg.resolve(Profile::Adb, false).unwrap();
+    assert!(!resolved.require_auth(), "no token asked for => open share");
     server::start(resolved).await.unwrap()
 }
 
@@ -504,13 +506,12 @@ async fn an_open_share_still_enforces_device_scope_and_blocks_kill() {
     let cfg = ShareConfig {
         enabled: false,
         bind: Some("127.0.0.1:0".to_string()),
-        token: String::new(),
         upstream: Some(format!("tcp:{}", up.addr)),
         targets: vec![DEV_A.to_string()],
         all: false,
-        require_token: None,
+        expire_after: 3600,
     };
-    let share = server::start(cfg.resolve(Profile::Adb).unwrap()).await.unwrap();
+    let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 
     let mut c = TcpStream::connect(share.config.bind).await.unwrap();
     adb::write_message(&mut c, &format!("host:transport:{DEV_B}")).await.unwrap();
@@ -567,5 +568,190 @@ async fn real_adb_connects_to_an_open_share_without_a_shim() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    share.stop().await;
+}
+
+
+// ---- expiry ----------------------------------------------------------------------------
+//
+// A share is a door held open. It closes itself so one forgotten at the end of a session
+// does not stay open overnight.
+
+#[tokio::test]
+async fn a_share_closes_itself_when_it_expires() {
+    let up = fake_adb("").await;
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some("127.0.0.1:0".to_string()),
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 1,
+    };
+    let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+    let addr = share.config.bind;
+
+    // Usable right away...
+    assert!(share.is_live());
+    let mut c = TcpStream::connect(addr).await.unwrap();
+    adb::write_message(&mut c, "host:transport-any").await.unwrap();
+    let mut status = [0u8; 4];
+    c.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"OKAY");
+
+    // ...and gone shortly after the deadline, without anyone stopping it.
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert!(!share.is_live(), "share should have expired on its own");
+    for _ in 0..40 {
+        if TcpStream::connect(addr).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("expired share is still accepting connections on {addr}");
+}
+
+#[tokio::test]
+async fn expiry_is_reported_and_can_be_disabled() {
+    let up = fake_adb("").await;
+    let base = ShareConfig {
+        enabled: false,
+        bind: Some("127.0.0.1:0".to_string()),
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 3600,
+    };
+
+    let timed = server::start(base.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+    let left = timed.seconds_remaining().expect("a timed share reports its remaining time");
+    assert!((3500..=3600).contains(&left), "got {left}s");
+    timed.stop().await;
+
+    // Zero means never — no deadline to report, and the loop has nothing to wake it.
+    let forever = ShareConfig { expire_after: 0, ..base };
+    let never = server::start(forever.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+    assert!(never.expires_at.is_none());
+    assert!(never.seconds_remaining().is_none());
+    assert!(never.is_live());
+    never.stop().await;
+}
+
+#[tokio::test]
+async fn expiry_also_drops_a_connection_that_was_already_open() {
+    // Closing the listener alone would leave a held `adb shell` alive past the deadline —
+    // the one case where an expired share still reaches the phone.
+    let up = fake_adb("").await;
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some("127.0.0.1:0".to_string()),
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 1,
+    };
+    let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+
+    let mut c = TcpStream::connect(share.config.bind).await.unwrap();
+    adb::write_message(&mut c, "host:transport-any").await.unwrap();
+    let mut status = [0u8; 4];
+    c.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"OKAY");
+    c.write_all(b"still using it").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = c.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"still using it");
+
+    // Past the deadline the live connection must end, not linger.
+    let mut tail = [0u8; 32];
+    let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut tail))
+        .await
+        .expect("an expired share must close its in-flight connections")
+        .unwrap_or(0);
+    assert_eq!(n, 0, "expected the connection to close at expiry");
+}
+
+/// The shipped default — `0.0.0.0:5939`, no token — driven by a real adb from "another
+/// machine's" point of view (a real interface address, not loopback).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_adb_reaches_the_default_network_bind() {
+    let Some((adb_bin, serial)) = attached_serial().await else {
+        eprintln!("no adb device attached; skipping default-bind test");
+        return;
+    };
+    // Not the overlay address: Netbird/Tailscale (100.64/10) route it off-box and do not
+    // hairpin, so a machine cannot reach its own overlay IP — only a *peer* can. `adb` would
+    // sit there until its connect timeout.
+    let Some(host) = dialf::share::local_addresses()
+        .iter()
+        .find(|ip| ip.octets()[0] != 100)
+        .map(|ip| ip.to_string())
+    else {
+        eprintln!("no self-reachable LAN address on this host; skipping default-bind test");
+        return;
+    };
+
+    // Everything default except the port, which is randomised so the test can't collide with
+    // a real share on 5939.
+    let cfg = ShareConfig {
+        targets: vec![serial.clone()],
+        bind: Some("0.0.0.0:0".to_string()),
+        ..Default::default()
+    };
+    let resolved = cfg.resolve(Profile::Adb, false).unwrap();
+    assert!(!resolved.require_auth(), "the default is an open share");
+    assert!(resolved.is_public(), "the default bind is network-reachable");
+    let share = server::start(resolved).await.unwrap();
+    let port = share.config.bind.port().to_string();
+
+    // Dial the LAN/overlay address, as a second machine would — not 127.0.0.1.
+    let out = tokio::process::Command::new(&adb_bin)
+        .args(["-H", &host, "-P", &port, "devices"])
+        .output()
+        .await
+        .expect("run adb against the default bind");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&serial),
+        "adb could not reach the share at {host}:{port}:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    share.stop().await;
+}
+
+/// A token share, driven by real adb through the real shim, using the token the share issued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_adb_works_through_a_token_share_and_fails_without_it() {
+    let Some((adb_bin, serial)) = attached_serial().await else {
+        eprintln!("no adb device attached; skipping token-share test");
+        return;
+    };
+    let share = start_share_with("127.0.0.1:5037", vec![serial.clone()], false).await;
+    let token = token_of(&share);
+    assert!(token.starts_with("dvs_"), "unexpected token shape: {token}");
+
+    // Wrong token: refused before adb ever sees a device.
+    assert!(
+        client::connect(&share.config.bind.to_string(), Profile::Adb, "dvs_totallywrong")
+            .await
+            .is_err(),
+        "a wrong token must not open the share"
+    );
+
+    let (shim, task) = start_shim(share.config.bind, &token).await;
+    let out = tokio::process::Command::new(&adb_bin)
+        .args(["-H", "127.0.0.1", "-P", &shim.port().to_string(), "devices"])
+        .output()
+        .await
+        .expect("run adb through the token share");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&serial),
+        "adb saw no device through the token share:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    task.abort();
     share.stop().await;
 }

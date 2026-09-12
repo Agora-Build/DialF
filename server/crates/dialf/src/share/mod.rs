@@ -31,6 +31,7 @@ pub use adb::Targets;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 
@@ -56,10 +57,18 @@ impl Profile {
         }
     }
 
-    /// Default port for the listener that exposes it, and for the client shim.
+    /// Default port the share listens on.
     pub fn default_port(self) -> u16 {
         match self {
-            // One above adb's own 5037, so both can run on one host.
+            Profile::Adb => 5939,
+        }
+    }
+
+    /// Default port the client shim exposes locally. Distinct from [`Self::default_port`] so
+    /// running both ends on one machine doesn't collide.
+    pub fn default_client_port(self) -> u16 {
+        match self {
+            // One above adb's own 5037, so a shim and a local adb server coexist.
             Profile::Adb => 5038,
         }
     }
@@ -126,26 +135,61 @@ impl std::str::FromStr for Upstream {
     }
 }
 
+/// Non-loopback IPv4 addresses of this host, for telling the user where to connect.
+///
+/// A share bound to `0.0.0.0` is reachable at any of these; printing them beats printing
+/// `0.0.0.0`, which nobody can type into `adb -H`.
+pub fn local_addresses() -> Vec<std::net::Ipv4Addr> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return out;
+        }
+        let mut cur = head;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || (ifa.ifa_flags & libc::IFF_UP as u32) == 0 {
+                continue;
+            }
+            if (*ifa.ifa_addr).sa_family as i32 != libc::AF_INET {
+                continue;
+            }
+            let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !ip.is_loopback() && !ip.is_link_local() && !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+        libc::freeifaddrs(head);
+    }
+    // Overlay addresses (Netbird/Tailscale use 100.64/10) first: on a mesh they are the ones
+    // that reach the other machine, and they are encrypted where the LAN is not.
+    out.sort_by_key(|ip| if ip.octets()[0] == 100 { 0 } else { 1 });
+    out
+}
+
 /// A resolved, validated share configuration — the shape the listener actually runs from.
 ///
-/// Built by [`ShareConfig::resolve`], which is where a bad token or address stops the share
-/// from ever binding.
+/// Built by [`ShareConfig::resolve`], which is where a bad address stops the share from ever
+/// binding and where a requested token is minted.
 #[derive(Debug, Clone)]
 pub struct ResolvedShare {
     pub profile: Profile,
     pub bind: std::net::SocketAddr,
-    pub token: String,
     pub upstream: Upstream,
     /// Which devices this share exposes. Enforced per connection by [`adb::gate`], not merely
     /// advertised — see that module for why a byte splice can't do it.
     pub targets: Targets,
-    /// Whether connections must pass the token handshake.
+    /// The secret this share hands out, when one was asked for.
     ///
-    /// False only on a loopback bind, where the token would guard a door that is already
-    /// open: anything that can reach this port can reach the adb server on 127.0.0.1:5037
-    /// directly. Skipping it lets stock `adb -H … -P …` (over an SSH tunnel, say) connect with
-    /// no client-side shim, since the adb client has no way to perform a handshake.
-    pub require_auth: bool,
+    /// Generated per share and held only here — never written to config, never logged. It is
+    /// printed once when the share starts, and a share restarted later has a different one.
+    /// `None` means the share is open: anyone who can reach the port can drive the phone.
+    pub token: Option<String>,
+    /// How long the share runs before stopping itself. `None` never expires.
+    pub expires_after: Option<Duration>,
 }
 
 impl ResolvedShare {
@@ -153,6 +197,11 @@ impl ResolvedShare {
     /// the difference between "a token guards my loopback" and "a token guards my phone".
     pub fn is_public(&self) -> bool {
         !self.bind.ip().is_loopback()
+    }
+
+    /// Whether connections must pass the handshake — i.e. whether a token was issued.
+    pub fn require_auth(&self) -> bool {
+        self.token.is_some()
     }
 }
 
@@ -164,11 +213,9 @@ pub struct ShareConfig {
     /// only decides whether it comes back on its own, so leaving it false keeps an exposed
     /// port from outliving the session that wanted it.
     pub enabled: bool,
-    /// `host:port` to listen on. Defaults to loopback: opting into a LAN bind should be a
-    /// deliberate edit, not something inherited from a default.
+    /// `host:port` to listen on. Defaults to `0.0.0.0:5939`, i.e. reachable from the network —
+    /// pair it with `--token`, or with a trusted network, or bind loopback and tunnel in.
     pub bind: Option<String>,
-    /// Shared secret a client must prove it holds. No default — see [`handshake::check_token`].
-    pub token: String,
     /// Override the endpoint being shared (`tcp:host:port` / `unix:/path`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream: Option<String>,
@@ -179,14 +226,22 @@ pub struct ShareConfig {
     /// Expose every attached device, including ones plugged in later.
     #[serde(default)]
     pub all: bool,
-    /// Force (or waive) the token handshake instead of deciding from the bind.
+    /// Seconds before the share stops itself. Zero or negative never expires.
     ///
-    /// Unset is the sensible rule: a loopback share is open, an off-box one is authenticated.
-    /// Set `true` to authenticate a loopback share anyway — worth it on a multi-user host,
-    /// where "a local user could reach adb directly" is a weaker argument. `false` is only
-    /// honoured on a loopback bind; an off-box share always authenticates.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub require_token: Option<bool>,
+    /// A share is a door held open; the default closes it after an hour so a forgotten one
+    /// does not stay open overnight.
+    #[serde(default = "default_expire_after")]
+    pub expire_after: i64,
+}
+
+/// One hour: long enough for a work session, short enough that forgetting is survivable.
+pub const DEFAULT_EXPIRE_AFTER: i64 = 3600;
+
+/// Beyond this, an expiry is long enough to be worth a second look.
+pub const LONG_EXPIRY_WARN: i64 = 24 * 3600;
+
+fn default_expire_after() -> i64 {
+    DEFAULT_EXPIRE_AFTER
 }
 
 impl Default for ShareConfig {
@@ -194,40 +249,31 @@ impl Default for ShareConfig {
         Self {
             enabled: false,
             bind: None,
-            token: String::new(),
             upstream: None,
             targets: Vec::new(),
             all: false,
-            require_token: None,
+            expire_after: DEFAULT_EXPIRE_AFTER,
         }
     }
 }
 
 impl ShareConfig {
     /// Validate and fill in defaults, or explain why this share must not listen.
-    pub fn resolve(&self, profile: Profile) -> anyhow::Result<ResolvedShare> {
+    ///
+    /// `with_token` issues a fresh secret for this share; it lives only in the returned value,
+    /// so it cannot leak through the config file and every restart mints a new one.
+    pub fn resolve(&self, profile: Profile, with_token: bool) -> anyhow::Result<ResolvedShare> {
         let bind_str = self
             .bind
             .clone()
-            .unwrap_or_else(|| format!("127.0.0.1:{}", profile.default_port()));
+            .unwrap_or_else(|| format!("0.0.0.0:{}", profile.default_port()));
         let bind: std::net::SocketAddr = bind_str
             .parse()
             .with_context(|| format!("parse share bind `{bind_str}` (want host:port)"))?;
-        let public = !bind.ip().is_loopback();
 
-        // Off-box shares always authenticate — `require_token: false` cannot waive that, or a
-        // single edit to `bind` would quietly expose the phone to the network.
-        let require_auth = match self.require_token {
-            Some(false) if public => bail!(
-                "`require_token: false` is not allowed with an off-box bind ({bind}) — \
-                 a network-reachable share must authenticate"
-            ),
-            Some(explicit) => explicit,
-            None => public,
-        };
-        if require_auth {
-            handshake::check_token(&self.token)?;
-        }
+        let token = with_token.then(handshake::new_token);
+        let expires_after = (self.expire_after > 0)
+            .then(|| Duration::from_secs(self.expire_after as u64));
 
         let upstream = match &self.upstream {
             Some(s) => s.parse()?,
@@ -239,10 +285,10 @@ impl ShareConfig {
         Ok(ResolvedShare {
             profile,
             bind,
-            token: self.token.trim().to_string(),
             upstream,
             targets,
-            require_auth,
+            token,
+            expires_after,
         })
     }
 
@@ -304,131 +350,122 @@ mod tests {
         assert_eq!("ADB".parse::<Profile>().unwrap(), Profile::Adb);
         assert!("ios".parse::<Profile>().is_err()); // not shipped yet; must not silently pass
         assert_eq!(Profile::Adb.to_string(), "adb");
+        // The share port and the shim's local port must differ, or running both ends on one
+        // machine collides.
+        assert_ne!(Profile::Adb.default_port(), Profile::Adb.default_client_port());
     }
 
     #[test]
-    fn resolve_defaults_to_loopback_and_the_adb_server() {
-        let cfg = ShareConfig {
-            token: "a-perfectly-fine-token".to_string(),
-            all: true,
-            ..Default::default()
-        };
-        let r = cfg.resolve(Profile::Adb).unwrap();
-        assert_eq!(r.bind.to_string(), "127.0.0.1:5038");
+    fn defaults_bind_to_the_network_and_expire_in_an_hour() {
+        let cfg = ShareConfig { all: true, ..Default::default() };
+        let r = cfg.resolve(Profile::Adb, false).unwrap();
+        assert_eq!(r.bind.to_string(), "0.0.0.0:5939");
+        assert!(r.is_public(), "the default bind is reachable from the network");
         assert_eq!(r.upstream, Upstream::Tcp("127.0.0.1:5037".to_string()));
-        assert!(!r.is_public()); // the default must never be off-box
+        assert_eq!(r.expires_after, Some(Duration::from_secs(3600)));
     }
 
     #[test]
-    fn auth_follows_the_bind() {
-        // A loopback share guards a door that is already open — anything that reaches it can
-        // reach adb on 127.0.0.1:5037 directly — so no token is demanded, and stock adb can
-        // connect without a shim.
-        let open = ShareConfig {
-            all: true,
-            ..Default::default()
-        };
-        let r = open.resolve(Profile::Adb).unwrap();
-        assert!(!r.require_auth, "a loopback share should not need a token");
-        assert!(!r.is_public());
+    fn a_token_is_issued_only_when_asked_for() {
+        // No token means an open share — allowed, and the reason the CLI warns loudly.
+        let cfg = ShareConfig { all: true, ..Default::default() };
+        let open = cfg.resolve(Profile::Adb, false).unwrap();
+        assert!(open.token.is_none());
+        assert!(!open.require_auth());
 
-        // Off-box, the token is the only thing standing in front of the phone.
-        let public = ShareConfig {
-            bind: Some("0.0.0.0:5038".to_string()),
-            token: "a-perfectly-fine-token".to_string(),
-            all: true,
-            ..Default::default()
-        };
-        assert!(public.resolve(Profile::Adb).unwrap().require_auth);
+        let guarded = cfg.resolve(Profile::Adb, true).unwrap();
+        assert!(guarded.require_auth());
+        let token = guarded.token.unwrap();
+        assert!(token.starts_with(handshake::TOKEN_PREFIX), "got: {token}");
+        assert_eq!(token.len(), 16);
     }
 
     #[test]
-    fn an_off_box_share_cannot_waive_the_token() {
-        // Otherwise one edit to `bind` silently exposes the phone to the network.
+    fn each_resolve_mints_a_fresh_token() {
+        // Tokens live only in the resolved share, so a second share must not reuse the first
+        // one — there is no stored value for it to match against anyway.
+        let cfg = ShareConfig { all: true, ..Default::default() };
+        let a = cfg.resolve(Profile::Adb, true).unwrap().token.unwrap();
+        let b = cfg.resolve(Profile::Adb, true).unwrap().token.unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_non_positive_expiry_means_never() {
+        for secs in [0, -1, -3600] {
+            let cfg = ShareConfig { all: true, expire_after: secs, ..Default::default() };
+            assert_eq!(cfg.resolve(Profile::Adb, false).unwrap().expires_after, None);
+        }
+        let cfg = ShareConfig { all: true, expire_after: 90, ..Default::default() };
+        assert_eq!(
+            cfg.resolve(Profile::Adb, false).unwrap().expires_after,
+            Some(Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn a_loopback_bind_is_not_public() {
         let cfg = ShareConfig {
-            bind: Some("0.0.0.0:5038".to_string()),
-            token: "a-perfectly-fine-token".to_string(),
-            all: true,
-            require_token: Some(false),
-            ..Default::default()
-        };
-        let err = cfg.resolve(Profile::Adb).unwrap_err().to_string();
-        assert!(err.contains("require_token"), "got: {err}");
-    }
-
-    #[test]
-    fn a_loopback_share_can_demand_a_token_anyway() {
-        // Defence in depth on a multi-user host, where other local users are not trusted.
-        let cfg = ShareConfig {
-            token: "a-perfectly-fine-token".to_string(),
-            all: true,
-            require_token: Some(true),
-            ..Default::default()
-        };
-        assert!(cfg.resolve(Profile::Adb).unwrap().require_auth);
-
-        // ...and that opt-in still needs a real token.
-        let weak = ShareConfig {
-            all: true,
-            require_token: Some(true),
-            ..Default::default()
-        };
-        assert!(weak.resolve(Profile::Adb).is_err());
-    }
-
-    #[test]
-    fn resolve_refuses_a_weak_token() {
-        // Where the gate is the whole feature — an off-box bind — a bad token must stop the
-        // share from listening, not merely warn.
-        let weak = ShareConfig {
-            bind: Some("0.0.0.0:5038".to_string()),
+            bind: Some("127.0.0.1:5939".to_string()),
             all: true,
             ..Default::default()
         };
-        assert!(weak.resolve(Profile::Adb).is_err());
-        let placeholder = ShareConfig {
-            bind: Some("0.0.0.0:5038".to_string()),
-            token: "change-me".to_string(),
-            all: true,
-            ..Default::default()
-        };
-        assert!(placeholder.resolve(Profile::Adb).is_err());
-    }
-
-    #[test]
-    fn resolve_reports_a_public_bind() {
-        let cfg = ShareConfig {
-            token: "a-perfectly-fine-token".to_string(),
-            bind: Some("0.0.0.0:5038".to_string()),
-            all: true,
-            ..Default::default()
-        };
-        assert!(cfg.resolve(Profile::Adb).unwrap().is_public());
+        assert!(!cfg.resolve(Profile::Adb, false).unwrap().is_public());
     }
 
     #[test]
     fn resolve_rejects_a_bad_bind() {
         let cfg = ShareConfig {
-            token: "a-perfectly-fine-token".to_string(),
             bind: Some("not-an-address".to_string()),
             all: true,
             ..Default::default()
         };
-        assert!(cfg.resolve(Profile::Adb).is_err());
+        assert!(cfg.resolve(Profile::Adb, false).is_err());
+    }
+
+    #[test]
+    fn sharing_nothing_is_an_error_not_everything() {
+        // Silence must never be read as "share the whole host".
+        let cfg = ShareConfig::default();
+        assert!(cfg.resolve(Profile::Adb, false).is_err());
+        let both = ShareConfig {
+            all: true,
+            targets: vec!["A1".to_string()],
+            ..Default::default()
+        };
+        assert!(both.resolve(Profile::Adb, false).is_err(), "all + targets is ambiguous");
     }
 
     #[test]
     fn config_parses_from_yaml_with_defaults() {
-        let cfg: ShareConfig = serde_yaml::from_str("token: a-perfectly-fine-token\n").unwrap();
+        let cfg: ShareConfig = serde_yaml::from_str("all: true\n").unwrap();
         assert!(!cfg.enabled); // never on by default
         assert!(cfg.bind.is_none());
-        assert!(cfg.upstream.is_none());
+        assert_eq!(cfg.expire_after, DEFAULT_EXPIRE_AFTER);
 
         let full: ShareConfig = serde_yaml::from_str(
-            "enabled: true\nbind: 0.0.0.0:5038\ntoken: a-perfectly-fine-token\nupstream: tcp:127.0.0.1:5037\nall: true\n",
+            "enabled: true\nbind: 0.0.0.0:5939\nupstream: tcp:127.0.0.1:5037\nall: true\nexpire_after: 120\n",
         )
         .unwrap();
         assert!(full.enabled);
-        assert_eq!(full.resolve(Profile::Adb).unwrap().bind.to_string(), "0.0.0.0:5038");
+        let r = full.resolve(Profile::Adb, false).unwrap();
+        assert_eq!(r.bind.to_string(), "0.0.0.0:5939");
+        assert_eq!(r.expires_after, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn a_token_never_round_trips_through_config() {
+        // Serialising a config must not be able to carry a share secret to disk.
+        let yaml = serde_yaml::to_string(&ShareConfig::default()).unwrap();
+        assert!(!yaml.contains("token"), "config grew a token field: {yaml}");
+    }
+
+    #[test]
+    fn local_addresses_are_usable_targets() {
+        // Whatever this host has, none of it should be something a peer cannot dial.
+        for ip in local_addresses() {
+            assert!(!ip.is_loopback(), "{ip} is loopback");
+            assert!(!ip.is_link_local(), "{ip} is link-local (needs a zone id)");
+        }
     }
 }
