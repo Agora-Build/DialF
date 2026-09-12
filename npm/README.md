@@ -75,7 +75,37 @@ dialf sms list <device>
 dialf run  <job.yaml> [--device <id>]                  # run a job once
 dialf run  <job.yaml> --autoanswer <numbers>           # serve a job for inbound calls (Ctrl-C reverts)
 dialf play <file>
+
+dialf devices share --list                             # adb devices attached to this host
+dialf devices share --target <serial> [--token]        # share one with other machines
+dialf devices share --status | --stop
+dialf devices connect <host> --token <dvs_...>         # reach a token-protected share
 ```
+
+## Sharing a phone with another machine
+
+The phone is plugged into machine **A**; you want `adb` on machine **B**. `dialf devices share`
+exposes A's adb server, so B can run `adb shell`, `install`, `logcat`, `push`/`pull` as if the
+phone were plugged in locally. Handy over a LAN or a Netbird/Tailscale/VPN overlay.
+
+```sh
+# on A
+dialf devices share --list            # find the serial
+dialf devices share --target 4B2B1C   # share it
+
+# on B
+export ADB_SERVER_SOCKET=tcp:<A-address>:5939
+adb devices
+```
+
+The default share binds `0.0.0.0:5939` and is **open** — anyone who can reach that port can
+install apps, read `/sdcard` and open a shell on the phone. That is fine on a network you
+trust and not on one you don't; add `--token` for a one-time secret (B then uses
+`dialf devices connect`), or bind loopback and tunnel in with `ssh -L`. Shares expire after
+an hour by default.
+
+See [`docs/DEVICE_SHARING.md`](https://github.com/Agora-Build/DialF/blob/main/docs/DEVICE_SHARING.md)
+for the full guide.
 
 Full documentation, protocol, and the phone app live in the
 [main repository](https://github.com/Agora-Build/DialF).
