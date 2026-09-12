@@ -99,7 +99,7 @@ pub struct DaemonState {
     pub mmi_results: Arc<Mutex<HashMap<String, MmiResult>>>,
     /// Most recent voicemail enable/disable result, per device id.
     pub voicemail_results: Arc<Mutex<HashMap<String, VoicemailResult>>>,
-    /// The running device share, if any (`dialf adb share start`). Runtime-controlled rather
+    /// The running device share, if any (`dialf devices share`). Runtime-controlled rather
     /// than config-only so an exposed port can be closed without restarting the daemon.
     pub share: Arc<tokio::sync::Mutex<Option<crate::share::server::ShareHandle>>>,
 }
@@ -840,6 +840,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                     "bind": resolved.bind.to_string(),
                     "upstream": resolved.upstream.to_string(),
                     "public": resolved.is_public(),
+                    "auth": resolved.require_auth,
                     "targets": share_targets_json(&resolved.targets),
                 }),
             ))
@@ -897,6 +898,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                         "upstream": upstream.to_string(),
                         "upstream_reachable": crate::share::server::upstream_reachable(&upstream).await,
                         "public": handle.config.is_public(),
+                        "auth": handle.config.require_auth,
                         "targets": share_targets_json(&handle.config.targets),
                         "active_connections": handle.active_connections(),
                         "served_connections": handle.served_connections(),

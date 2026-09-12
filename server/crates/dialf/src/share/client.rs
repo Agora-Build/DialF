@@ -1,11 +1,16 @@
 //! Remote side: present a shared endpoint back as a plain local port.
 //!
-//! `dialf adb connect <host>` listens on `127.0.0.1:5038` and, for each local connection,
+//! `dialf devices connect <host>` listens on `127.0.0.1:5038` and, for each local connection,
 //! opens one to the host, performs the handshake, and splices. Stock tooling then works
 //! unchanged — `adb -H 127.0.0.1 -P 5038 shell`, or `ADB_SERVER_SOCKET=tcp:127.0.0.1:5038`.
 //!
 //! The handshake runs per connection because adb opens a fresh one per command. That costs a
 //! round trip per invocation and keeps the shim stateless.
+//!
+//! This exists only because the adb client has no way to authenticate, so *something* must
+//! perform the handshake for it. An open (loopback) share needs no handshake and therefore no
+//! shim — point adb at it directly, through an SSH tunnel if it is on another host. Connecting
+//! the shim to an open share is refused with that advice rather than silently half-working.
 
 use std::net::SocketAddr;
 

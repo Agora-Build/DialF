@@ -80,6 +80,8 @@ async fn start_share_with(upstream: &str, targets: Vec<String>, all: bool) -> Sh
         upstream: Some(format!("tcp:{upstream}")),
         targets,
         all,
+        // Loopback binds are open by default; these exercise the authenticated path.
+        require_token: Some(true),
     };
     // Port 0: the listener reports the port it was assigned, so parallel tests never race
     // over a "free" port that something else grabbed in between.
@@ -319,6 +321,7 @@ async fn a_restarted_share_is_reachable_again() {
         upstream: Some(format!("tcp:{}", up.addr)),
         targets: Vec::new(),
         all: true,
+        require_token: Some(true),
     };
     let share = server::start(cfg.resolve(Profile::Adb).unwrap()).await.unwrap();
     let addr = share.config.bind;
@@ -450,5 +453,119 @@ async fn real_adb_cannot_see_an_unshared_device() {
     );
 
     task.abort();
+    share.stop().await;
+}
+
+// ---- open (loopback) shares -----------------------------------------------------------
+//
+// A loopback share needs no token, because the token would guard a door already ajar: whoever
+// can reach this port can reach `127.0.0.1:5037` directly. That is what lets stock adb — which
+// cannot perform a handshake — connect through an SSH tunnel with no shim.
+
+/// An open share: loopback bind, no token, no handshake.
+async fn start_open_share(upstream: &str) -> ShareHandle {
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some("127.0.0.1:0".to_string()),
+        token: String::new(),
+        upstream: Some(format!("tcp:{upstream}")),
+        targets: Vec::new(),
+        all: true,
+        require_token: None, // the default rule: loopback => open
+    };
+    let resolved = cfg.resolve(Profile::Adb).unwrap();
+    assert!(!resolved.require_auth, "a loopback share should default to open");
+    server::start(resolved).await.unwrap()
+}
+
+#[tokio::test]
+async fn an_open_share_takes_plain_adb_with_no_handshake() {
+    let up = fake_adb("").await;
+    let share = start_open_share(&up.addr.to_string()).await;
+
+    // Straight to the share — no shim, no token, exactly what `adb -H` does.
+    let mut c = TcpStream::connect(share.config.bind).await.unwrap();
+    adb::write_message(&mut c, "host:transport-any").await.unwrap();
+    let mut status = [0u8; 4];
+    c.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"OKAY");
+    c.write_all(b"no handshake needed").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = c.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"no handshake needed");
+
+    share.stop().await;
+}
+
+#[tokio::test]
+async fn an_open_share_still_enforces_device_scope_and_blocks_kill() {
+    // Open means "no token", not "no policy" — the adb gate is independent of the token gate.
+    let up = fake_adb("AAAA1111\tdevice\nBBBB2222\tdevice\n").await;
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some("127.0.0.1:0".to_string()),
+        token: String::new(),
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: vec![DEV_A.to_string()],
+        all: false,
+        require_token: None,
+    };
+    let share = server::start(cfg.resolve(Profile::Adb).unwrap()).await.unwrap();
+
+    let mut c = TcpStream::connect(share.config.bind).await.unwrap();
+    adb::write_message(&mut c, &format!("host:transport:{DEV_B}")).await.unwrap();
+    let mut status = [0u8; 4];
+    c.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"FAIL", "scope must hold on an open share too");
+
+    let mut k = TcpStream::connect(share.config.bind).await.unwrap();
+    adb::write_message(&mut k, "host:kill").await.unwrap();
+    k.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"FAIL", "host:kill must stay blocked on an open share");
+
+    share.stop().await;
+}
+
+#[tokio::test]
+async fn a_shim_pointed_at_an_open_share_is_told_what_to_do() {
+    // Otherwise the shim's preamble is parsed as an adb request and the user gets a bare
+    // disconnect with nothing to act on.
+    let up = fake_adb("").await;
+    let share = start_open_share(&up.addr.to_string()).await;
+
+    let err = client::connect(&share.config.bind.to_string(), Profile::Adb, "any-token-at-all")
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("needs no token") && msg.contains("adb -H"),
+        "message should say to use adb directly: {msg}"
+    );
+
+    share.stop().await;
+}
+
+/// Real `adb` straight at an open loopback share — the no-shim workflow, end to end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_adb_connects_to_an_open_share_without_a_shim() {
+    let Some((adb_bin, serial)) = attached_serial().await else {
+        eprintln!("no adb device attached; skipping open-share real-adb test");
+        return;
+    };
+    let share = start_open_share("127.0.0.1:5037").await;
+    let port = share.config.bind.port().to_string();
+
+    let out = tokio::process::Command::new(&adb_bin)
+        .args(["-H", "127.0.0.1", "-P", &port, "devices"])
+        .output()
+        .await
+        .expect("run adb against the open share");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&serial),
+        "stock adb could not use the open share:\n{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     share.stop().await;
 }

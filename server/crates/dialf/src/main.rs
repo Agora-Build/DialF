@@ -125,9 +125,12 @@ enum Command {
 enum DevicesAction {
     /// Share attached devices with remote machines.
     ///
-    /// Name what to expose with `--target <serial>` (repeatable) or `--all`. The token
-    /// authenticates connections but does NOT encrypt them — outside a trusted LAN, tunnel
-    /// this over a VPN or SSH.
+    /// Name what to expose with `--target <serial>` (repeatable) or `--all`.
+    ///
+    /// A loopback share is open — stock `adb -H 127.0.0.1 -P <port>` connects directly, so an
+    /// SSH tunnel is all a remote machine needs. Binding off-box requires a token, which
+    /// authenticates connections but does NOT encrypt them: outside a trusted LAN, tunnel it
+    /// over a VPN or SSH.
     Share {
         /// Share over adb (Android). The default, and currently the only protocol.
         #[arg(long)]
@@ -635,7 +638,7 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
     }
 }
 
-/// Token for `dialf adb connect`: explicit flag, then env, then this machine's own config
+/// Token for `dialf devices connect`: explicit flag, then env, then this machine's own config
 /// (handy when the same config is shared between host and client).
 fn resolve_share_token(flag: Option<String>) -> anyhow::Result<String> {
     if let Some(t) = flag.filter(|t| !t.trim().is_empty()) {
@@ -762,7 +765,17 @@ fn print_share_result(data: Option<&serde_json::Value>) {
         println!("  connections: {n} active, {} served", get("served_connections").as_u64().unwrap_or(0));
     }
     let port = bind.rsplit(':').next().unwrap_or("5038");
-    println!("  remote: dialf devices connect <this-host>:{port}   then  adb -H 127.0.0.1 -P 5038 …");
+    if get("auth") == serde_json::Value::Bool(false) {
+        // Loopback share: no handshake, so adb connects straight to it and the shim is not
+        // just unnecessary but unsupported.
+        println!("  open (loopback only — no token needed)");
+        println!("  local:  adb -H 127.0.0.1 -P {port} …");
+        println!("  remote: ssh -L {port}:127.0.0.1:{port} <this-host>   then the same command");
+    } else {
+        println!(
+            "  remote: dialf devices connect <this-host>:{port}   then  adb -H 127.0.0.1 -P 5038 …"
+        );
+    }
     if get("public") == serde_json::Value::Bool(true) {
         println!(
             "  NOTE: reachable off-box. Connections are authenticated but NOT encrypted — \

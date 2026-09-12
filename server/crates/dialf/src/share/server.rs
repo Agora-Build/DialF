@@ -1,9 +1,15 @@
-//! Host side: the authenticated listener that fronts the local device endpoint.
+//! Host side: the listener that fronts the local device endpoint.
 //!
-//! Every accepted connection must pass [`handshake`] before any byte reaches the upstream.
-//! A rejected peer never opens an upstream socket at all — that ordering is the security
-//! property this module exists to provide, and it is what the `rejects_a_wrong_token` test
-//! pins down.
+//! Whether a connection must pass [`handshake`] follows the bind. An off-box share always
+//! authenticates, and a rejected peer never opens an upstream socket at all — that ordering
+//! is the security property this module exists to provide, and it is what the
+//! `rejects_a_wrong_token` test pins down.
+//!
+//! A loopback share is open by default, because a token there would guard a door that is
+//! already ajar: anything that can reach this port can reach `127.0.0.1:5037` directly. Being
+//! open is what lets stock `adb -H … -P …` connect over an SSH tunnel with no client shim,
+//! since the adb client cannot perform a handshake. `require_token: true` overrides this for
+//! a multi-user host.
 
 use std::io;
 use std::net::SocketAddr;
@@ -71,7 +77,12 @@ impl ShareHandle {
 pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
     // Re-check even though `resolve` did: `start` is public, and a share must never listen on
     // a token that wouldn't survive validation.
-    handshake::check_token(&config.token)?;
+    if config.require_auth {
+        handshake::check_token(&config.token)?;
+    } else if !config.bind.ip().is_loopback() {
+        // Belt and braces: the only way here is a hand-built ResolvedShare.
+        anyhow::bail!("refusing to serve an unauthenticated share on {}", config.bind);
+    }
 
     let listener = TcpListener::bind(config.bind)
         .await
@@ -91,8 +102,15 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
         bind = %config.bind,
         upstream = %config.upstream,
         profile = %config.profile,
+        auth = config.require_auth,
         "device share listening"
     );
+    if !config.require_auth && !config.token.trim().is_empty() {
+        tracing::info!(
+            "a token is configured but unused: this share is loopback-only, so adb connects \
+             directly (set `require_token: true` to demand it anyway)"
+        );
+    }
 
     let cancel = Arc::new(Notify::new());
     let active = Arc::new(AtomicU64::new(0));
@@ -155,19 +173,34 @@ async fn serve_conn(
     served: &Arc<AtomicU64>,
     cancel: Arc<Notify>,
 ) -> anyhow::Result<()> {
-    let mut stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, authenticate(stream, config))
-        .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            // Rejections are logged at warn with the peer, so a brute-force attempt is
-            // visible in the daemon log rather than silent.
-            tracing::warn!(%peer, reason = %e, "share connection rejected");
-            return Ok(());
+    let mut stream = if config.require_auth {
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, authenticate(stream, config)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                // Rejections are logged at warn with the peer, so a brute-force attempt is
+                // visible in the daemon log rather than silent.
+                tracing::warn!(%peer, reason = %e, "share connection rejected");
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::warn!(%peer, "share handshake timed out");
+                return Ok(());
+            }
         }
-        Err(_) => {
-            tracing::warn!(%peer, "share handshake timed out");
-            return Ok(());
+    } else {
+        // Open (loopback) share: the peer should be plain adb. A shim that tries to handshake
+        // would otherwise have its preamble parsed as an adb request and get a bare
+        // disconnect, so tell it what to do instead.
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, decline_handshake(stream)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                tracing::debug!(%peer, reason = %e, "share connection ended before use");
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::warn!(%peer, "share peer sent nothing");
+                return Ok(());
+            }
         }
     };
 
@@ -178,6 +211,24 @@ async fn serve_conn(
     let result = splice(&mut stream, config, cancel).await;
     active.fetch_sub(1, Ordering::Relaxed);
     result
+}
+
+/// On an open share, turn away a peer that opened with a handshake.
+///
+/// `DIAL` is not valid hex, so it can never be an adb length prefix — peeking four bytes
+/// distinguishes a shim from an adb client without consuming anything.
+async fn decline_handshake(stream: TcpStream) -> anyhow::Result<TcpStream> {
+    let mut head = [0u8; 4];
+    let n = stream.peek(&mut head).await?;
+    if n == 4 && &head == MAGIC.as_bytes()[..4].as_ref() {
+        let mut stream = stream;
+        stream
+            .write_all(b"ERR this share needs no token; point adb straight at it \
+                        (adb -H <host> -P <port>)\n")
+            .await?;
+        anyhow::bail!("shim connected to an open share");
+    }
+    Ok(stream)
 }
 
 /// Run the challenge-response. Returns the stream only when the peer proved it holds the
@@ -376,6 +427,9 @@ mod tests {
             upstream: Some(format!("tcp:{}", upstream.addr)),
             targets: Vec::new(),
             all: true,
+            // These tests are about the token gate, and they bind loopback — which is open by
+            // default — so demand auth explicitly.
+            require_token: Some(true),
         };
         // Bind on port 0, then recover the real port for clients to dial.
         let mut resolved = cfg.resolve(Profile::Adb).unwrap();
@@ -514,6 +568,7 @@ mod tests {
             token: "short".to_string(),
             bind: Some("127.0.0.1:0".to_string()),
             all: true,
+            require_token: Some(true),
             ..Default::default()
         };
         assert!(cfg.resolve(Profile::Adb).is_err());

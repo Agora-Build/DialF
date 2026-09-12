@@ -41,18 +41,18 @@ impl std::fmt::Display for TokenError {
         match self {
             TokenError::Missing => write!(
                 f,
-                "no share token set — generate one with `dialf adb share new-token` \
+                "no share token set — generate one with `dialf devices share --new-token` \
                  and put it in `adb_share.token`"
             ),
             TokenError::TooShort(n) => write!(
                 f,
                 "share token is {n} chars; {MIN_TOKEN_LEN}+ required \
-                 (`dialf adb share new-token` prints a good one)"
+                 (`dialf devices share --new-token` prints a good one)"
             ),
             TokenError::Placeholder => write!(
                 f,
                 "share token is a placeholder — replace it with a real secret \
-                 (`dialf adb share new-token`)"
+                 (`dialf devices share --new-token`)"
             ),
         }
     }

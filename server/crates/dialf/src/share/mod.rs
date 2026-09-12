@@ -42,7 +42,7 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// The token used on the wire, and in `dialf adb …`.
+    /// The token used on the wire, and in `dialf devices share --adb`.
     pub fn as_str(self) -> &'static str {
         match self {
             Profile::Adb => "adb",
@@ -139,6 +139,13 @@ pub struct ResolvedShare {
     /// Which devices this share exposes. Enforced per connection by [`adb::gate`], not merely
     /// advertised — see that module for why a byte splice can't do it.
     pub targets: Targets,
+    /// Whether connections must pass the token handshake.
+    ///
+    /// False only on a loopback bind, where the token would guard a door that is already
+    /// open: anything that can reach this port can reach the adb server on 127.0.0.1:5037
+    /// directly. Skipping it lets stock `adb -H … -P …` (over an SSH tunnel, say) connect with
+    /// no client-side shim, since the adb client has no way to perform a handshake.
+    pub require_auth: bool,
 }
 
 impl ResolvedShare {
@@ -172,6 +179,14 @@ pub struct ShareConfig {
     /// Expose every attached device, including ones plugged in later.
     #[serde(default)]
     pub all: bool,
+    /// Force (or waive) the token handshake instead of deciding from the bind.
+    ///
+    /// Unset is the sensible rule: a loopback share is open, an off-box one is authenticated.
+    /// Set `true` to authenticate a loopback share anyway — worth it on a multi-user host,
+    /// where "a local user could reach adb directly" is a weaker argument. `false` is only
+    /// honoured on a loopback bind; an off-box share always authenticates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_token: Option<bool>,
 }
 
 impl Default for ShareConfig {
@@ -183,6 +198,7 @@ impl Default for ShareConfig {
             upstream: None,
             targets: Vec::new(),
             all: false,
+            require_token: None,
         }
     }
 }
@@ -190,8 +206,6 @@ impl Default for ShareConfig {
 impl ShareConfig {
     /// Validate and fill in defaults, or explain why this share must not listen.
     pub fn resolve(&self, profile: Profile) -> anyhow::Result<ResolvedShare> {
-        handshake::check_token(&self.token)?;
-
         let bind_str = self
             .bind
             .clone()
@@ -199,6 +213,21 @@ impl ShareConfig {
         let bind: std::net::SocketAddr = bind_str
             .parse()
             .with_context(|| format!("parse share bind `{bind_str}` (want host:port)"))?;
+        let public = !bind.ip().is_loopback();
+
+        // Off-box shares always authenticate — `require_token: false` cannot waive that, or a
+        // single edit to `bind` would quietly expose the phone to the network.
+        let require_auth = match self.require_token {
+            Some(false) if public => bail!(
+                "`require_token: false` is not allowed with an off-box bind ({bind}) — \
+                 a network-reachable share must authenticate"
+            ),
+            Some(explicit) => explicit,
+            None => public,
+        };
+        if require_auth {
+            handshake::check_token(&self.token)?;
+        }
 
         let upstream = match &self.upstream {
             Some(s) => s.parse()?,
@@ -213,6 +242,7 @@ impl ShareConfig {
             token: self.token.trim().to_string(),
             upstream,
             targets,
+            require_auth,
         })
     }
 
@@ -290,12 +320,76 @@ mod tests {
     }
 
     #[test]
+    fn auth_follows_the_bind() {
+        // A loopback share guards a door that is already open — anything that reaches it can
+        // reach adb on 127.0.0.1:5037 directly — so no token is demanded, and stock adb can
+        // connect without a shim.
+        let open = ShareConfig {
+            all: true,
+            ..Default::default()
+        };
+        let r = open.resolve(Profile::Adb).unwrap();
+        assert!(!r.require_auth, "a loopback share should not need a token");
+        assert!(!r.is_public());
+
+        // Off-box, the token is the only thing standing in front of the phone.
+        let public = ShareConfig {
+            bind: Some("0.0.0.0:5038".to_string()),
+            token: "a-perfectly-fine-token".to_string(),
+            all: true,
+            ..Default::default()
+        };
+        assert!(public.resolve(Profile::Adb).unwrap().require_auth);
+    }
+
+    #[test]
+    fn an_off_box_share_cannot_waive_the_token() {
+        // Otherwise one edit to `bind` silently exposes the phone to the network.
+        let cfg = ShareConfig {
+            bind: Some("0.0.0.0:5038".to_string()),
+            token: "a-perfectly-fine-token".to_string(),
+            all: true,
+            require_token: Some(false),
+            ..Default::default()
+        };
+        let err = cfg.resolve(Profile::Adb).unwrap_err().to_string();
+        assert!(err.contains("require_token"), "got: {err}");
+    }
+
+    #[test]
+    fn a_loopback_share_can_demand_a_token_anyway() {
+        // Defence in depth on a multi-user host, where other local users are not trusted.
+        let cfg = ShareConfig {
+            token: "a-perfectly-fine-token".to_string(),
+            all: true,
+            require_token: Some(true),
+            ..Default::default()
+        };
+        assert!(cfg.resolve(Profile::Adb).unwrap().require_auth);
+
+        // ...and that opt-in still needs a real token.
+        let weak = ShareConfig {
+            all: true,
+            require_token: Some(true),
+            ..Default::default()
+        };
+        assert!(weak.resolve(Profile::Adb).is_err());
+    }
+
+    #[test]
     fn resolve_refuses_a_weak_token() {
-        // The gate is the whole feature; a bad token must stop the bind, not warn about it.
-        let weak = ShareConfig::default();
+        // Where the gate is the whole feature — an off-box bind — a bad token must stop the
+        // share from listening, not merely warn.
+        let weak = ShareConfig {
+            bind: Some("0.0.0.0:5038".to_string()),
+            all: true,
+            ..Default::default()
+        };
         assert!(weak.resolve(Profile::Adb).is_err());
         let placeholder = ShareConfig {
+            bind: Some("0.0.0.0:5038".to_string()),
             token: "change-me".to_string(),
+            all: true,
             ..Default::default()
         };
         assert!(placeholder.resolve(Profile::Adb).is_err());

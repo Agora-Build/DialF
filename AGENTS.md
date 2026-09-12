@@ -129,8 +129,16 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 ### Device sharing (`dialf devices share`)
 - **The ADB server protocol has no authentication** — its loopback bind *is* its security
   model. Reaching the port means `shell`, APK install, `/sdcard` read/write, screen capture,
-  and port-forwarding *into* the device. So the share gates every connection on an
-  HMAC-SHA256 challenge-response (`share/handshake.rs`) before forwarding a byte.
+  and port-forwarding *into* the device.
+- **Auth follows the bind.** An off-box share gates every connection on an HMAC-SHA256
+  challenge-response (`share/handshake.rs`) before forwarding a byte; `require_token: false`
+  cannot waive that. A loopback share is **open**, because a token there would guard a door
+  already ajar — anything that reaches it can reach `127.0.0.1:5037` directly. Set
+  `require_token: true` to authenticate a loopback share anyway (multi-user hosts).
+- **The shim exists only because adb cannot authenticate.** `adb -H` opens a socket and starts
+  speaking adb; it has no handshake hook, so `dialf devices connect` performs one on its
+  behalf. Against an *open* share no shim is needed — point adb straight at it (over `ssh -L`
+  from another host), and the shim refuses with that advice if pointed there.
 - **The token authenticates; it does not encrypt.** The proxied session after the handshake is
   plaintext, so an on-path attacker can read or hijack it. Off-LAN use belongs inside a VPN or
   SSH tunnel. TLS is deliberately not implemented.
