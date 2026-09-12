@@ -157,9 +157,14 @@ enum DevicesAction {
         #[arg(long, conflicts_with_all = ["targets", "all", "bind", "status", "stop", "list"])]
         new_token: bool,
     },
-    /// Connect to a host sharing its devices, exposing them as a local port.
+    /// Connect to a host whose share requires a token, exposing it as a local port.
     ///
-    /// Then use stock tooling: `adb -H 127.0.0.1 -P 5038 …`. Runs until Ctrl+C.
+    /// Needed only for a share bound off-box (`--bind 0.0.0.0:…`), because those require a
+    /// token handshake and `adb` cannot perform one — this does it per connection. Then use
+    /// stock tooling: `adb -H 127.0.0.1 -P 5038 …`. Runs until Ctrl+C.
+    ///
+    /// If the share is on loopback it needs no token: skip this entirely and reach it with
+    /// `ssh -L 5038:127.0.0.1:5038 <host>`, then point adb at 127.0.0.1:5038.
     Connect {
         /// Host running the share: `hostname`, `host:port`, or `[::1]:port`.
         host: String,
