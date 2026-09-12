@@ -148,6 +148,7 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
             config.require_auth(),
             authed.clone(),
             cancel.clone(),
+            config.expires_after,
         )));
     }
 
@@ -190,10 +191,25 @@ async fn forward_loop(
     require_auth: bool,
     authed: Authed,
     cancel: Arc<Notify>,
+    expires_after: Option<Duration>,
 ) {
+    // Its own deadline, rather than relying on the cancel signal alone: `notify_waiters` only
+    // wakes tasks that are parked at that instant, and a forward port left listening past the
+    // expiry would be a second door into the phone standing open.
+    let deadline = expires_after.map(|d| tokio::time::Instant::now() + d);
+
     loop {
         let accepted = tokio::select! {
             _ = cancel.notified() => return,
+            _ = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::info!(port, "forward port expired");
+                return;
+            }
             r = listener.accept() => r,
         };
         let Ok((mut down, peer)) = accepted else {

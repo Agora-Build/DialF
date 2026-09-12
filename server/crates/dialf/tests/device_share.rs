@@ -930,3 +930,37 @@ async fn a_forward_port_is_refused_where_it_could_not_work() {
     let err = loopback.resolve(Profile::Adb, false).unwrap_err().to_string();
     assert!(err.contains("ssh -L"), "message should point at the alternative: {err}");
 }
+
+#[tokio::test]
+async fn expiry_closes_forward_ports_too() {
+    // The forward port is a second door into the same phone; an expiry that closed only the
+    // adb port would leave it standing.
+    let Some(host) = lan_addr() else {
+        eprintln!("no LAN address; skipping forward-port expiry test");
+        return;
+    };
+    let up = fake_adb("").await;
+    let port = fixed_port(4);
+    let _tunnel = local_tunnel(port).await;
+
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some(format!("{host}:0")),
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 1,
+        forward_ports: vec![port],
+    };
+    let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+    assert!(TcpStream::connect(format!("{host}:{port}")).await.is_ok());
+
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if TcpStream::connect(format!("{host}:{port}")).await.is_err() {
+            assert!(!share.is_live(), "share should be expired");
+            return;
+        }
+    }
+    panic!("forward port still open after the share expired");
+}

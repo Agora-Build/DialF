@@ -566,13 +566,46 @@ async fn start_share(
         }
     }
 
-    let handle = crate::share::server::start(resolved.clone()).await?;
+    // Replace any running share *before* binding. Sharing again means "use these settings
+    // now", so the old listener has to let go of the port first — binding first made a
+    // re-share collide with itself ("address already in use").
     let mut slot = state.share.lock().await;
-    if let Some(old) = slot.take() {
+    let replacing = slot.take();
+    let had_previous = replacing.is_some();
+    if let Some(old) = replacing {
         old.stop().await;
     }
-    *slot = Some(handle);
+    *slot = Some(bind_share(resolved.clone(), had_previous).await?);
     Ok(resolved)
+}
+
+/// Bind a share, retrying briefly when we just closed a listener on that port ourselves.
+///
+/// `stop` waits for the accept loop to exit, but the last of the socket teardown belongs to
+/// the kernel and can take a few tens of milliseconds — long enough for an immediate re-share
+/// to fail against its own predecessor.
+async fn bind_share(
+    config: crate::share::ResolvedShare,
+    retry: bool,
+) -> anyhow::Result<crate::share::server::ShareHandle> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match crate::share::server::start(config.clone()).await {
+            Ok(handle) => return Ok(handle),
+            Err(e) if retry && is_addr_in_use(&e) && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Whether an error chain bottoms out in `EADDRINUSE`.
+fn is_addr_in_use(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+    })
 }
 
 /// Best-effort `adb start-server`. Silent when adb isn't installed — `share status` reports
@@ -1343,6 +1376,70 @@ mod tests {
         assert!(!files[0].contains("/./"), "interior /./ not normalized: {}", files[0]);
         assert_eq!(files[1], "/abs/there.wav");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A daemon whose share settings point at `bind`, with no device filtering.
+    fn share_state(bind: &str) -> DaemonState {
+        let mut state = test_state(BTreeMap::new());
+        let mut config = (*state.config).clone();
+        config.adb_share = crate::share::ShareConfig {
+            bind: Some(bind.to_string()),
+            all: true,
+            // Nothing listens here; the share still binds, since the upstream only matters
+            // once a connection arrives.
+            upstream: Some("tcp:127.0.0.1:1".to_string()),
+            ..Default::default()
+        };
+        state.config = Arc::new(config);
+        state
+    }
+
+    #[tokio::test]
+    async fn sharing_again_replaces_the_running_share() {
+        // "Share again" means "use these settings now". Binding the new listener before
+        // releasing the old one made a re-share collide with itself (EADDRINUSE).
+        let state = share_state("127.0.0.1:45931");
+        let profile = crate::share::Profile::Adb;
+
+        let first = start_share(&state, profile, None, Vec::new(), true, false, None, Vec::new())
+            .await
+            .expect("first share");
+        assert!(first.token.is_none());
+
+        // Same port, now asking for a token — must succeed without an explicit stop.
+        let second = start_share(&state, profile, None, Vec::new(), true, true, None, Vec::new())
+            .await
+            .expect("re-share on the same port should replace, not fail");
+        assert!(second.token.is_some(), "the new settings should take effect");
+
+        // Exactly one share is tracked, and it is the new one.
+        let slot = state.share.lock().await;
+        let live = slot.as_ref().expect("a share should be running");
+        assert!(live.is_live());
+        assert!(live.config.token.is_some());
+        assert_eq!(live.config.bind.to_string(), "127.0.0.1:45931");
+    }
+
+    #[tokio::test]
+    async fn a_genuine_port_conflict_is_still_reported() {
+        // The retry only covers releasing our own listener; someone else's must still error
+        // rather than spin for three seconds and then succeed confusingly.
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:45932").await.unwrap();
+        let state = share_state("127.0.0.1:45932");
+        let err = start_share(
+            &state,
+            crate::share::Profile::Adb,
+            None,
+            Vec::new(),
+            true,
+            false,
+            None,
+            Vec::new(),
+        )
+        .await
+        .expect_err("a port held by something else must fail");
+        assert!(is_addr_in_use(&err), "got: {err:#}");
+        drop(squatter);
     }
 
     fn test_state(autoanswer: BTreeMap<String, Option<String>>) -> DaemonState {
