@@ -183,7 +183,7 @@ dialf play <file>                              # inject audio out the sound card
 dialf --version                                # CLI + running daemon (dialfd) versions
 
 dialf devices share --list                     # adb devices attached to this host
-dialf devices share --target <serial> [--token] [--expire-after N]
+dialf devices share --target <serial> [--token] [--expire-after N] [--forward-port P]
 dialf devices share --status | --stop          # what's shared / close it
 dialf devices connect <host> --token <dvs_…>   # reach a token-protected share (runs until Ctrl-C)
 ```
@@ -231,6 +231,11 @@ closes in-flight connections too, not just the port.
 attached, so a host that gains a second phone won't start sharing it silently. Scope is
 enforced per connection, not advertised: a device you didn't share can't be reached even with
 a valid token, and `adb kill-server` from B can't stop A's adb server.
+
+**scrcpy, `flutter run` and Android Studio need one extra flag.** They tunnel through
+`adb forward`, which opens its socket on the *sharing* host, so the tool on the other machine
+finds nothing to connect to. Share with `--forward-port 27183` and run
+`scrcpy --tunnel-host=<A> --tunnel-port=27183`. Plain `adb` needs none of this.
 
 Full walkthrough, including the Netbird setup and the security trade-offs:
 [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md).

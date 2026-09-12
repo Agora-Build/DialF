@@ -472,8 +472,17 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     // misconfigured share must not stop the daemon from driving calls.
     if state.config.adb_share.enabled {
         if let Err(e) =
-            start_share(&state, crate::share::Profile::Adb, None, Vec::new(), false, false, None)
-                .await
+            start_share(
+                &state,
+                crate::share::Profile::Adb,
+                None,
+                Vec::new(),
+                false,
+                false,
+                None,
+                Vec::new(),
+            )
+            .await
         {
             tracing::warn!(error = %format!("{e:#}"), "adb share autostart failed");
         }
@@ -507,6 +516,7 @@ async fn start_share(
     all: bool,
     with_token: bool,
     expire_after: Option<i64>,
+    forward_ports: Vec<u16>,
 ) -> anyhow::Result<crate::share::ResolvedShare> {
     let mut cfg = share_config(state, profile).clone();
     if let Some(bind) = bind_override {
@@ -514,6 +524,9 @@ async fn start_share(
     }
     if let Some(secs) = expire_after {
         cfg.expire_after = secs;
+    }
+    if !forward_ports.is_empty() {
+        cfg.forward_ports = forward_ports;
     }
     // A request that names devices replaces config's list outright, rather than adding to it —
     // "share exactly these" must not be widened by a stale config entry.
@@ -839,10 +852,20 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             all,
             token,
             expire_after,
+            forward_ports,
         } => {
             let profile = parse_profile(profile.as_deref())?;
-            let resolved =
-                start_share(state, profile, bind, targets, all, token, expire_after).await?;
+            let resolved = start_share(
+                state,
+                profile,
+                bind,
+                targets,
+                all,
+                token,
+                expire_after,
+                forward_ports,
+            )
+            .await?;
             let remaining = state
                 .share
                 .lock()
@@ -860,6 +883,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                     // The only time this secret is ever readable. Not stored, not logged.
                     "token": resolved.token,
                     "expires_in": remaining,
+                    "forward_ports": resolved.forward_ports,
                     "addresses": crate::share::local_addresses()
                         .iter()
                         .map(|ip| ip.to_string())
@@ -923,6 +947,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                         "public": handle.config.is_public(),
                         "auth": handle.config.require_auth(),
                         "expires_in": handle.seconds_remaining(),
+                        "forward_ports": handle.config.forward_ports,
                         "addresses": crate::share::local_addresses()
                             .iter()
                             .map(|ip| ip.to_string())

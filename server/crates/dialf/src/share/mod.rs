@@ -190,6 +190,13 @@ pub struct ResolvedShare {
     pub token: Option<String>,
     /// How long the share runs before stopping itself. `None` never expires.
     pub expires_after: Option<Duration>,
+    /// Extra ports to proxy straight through to `127.0.0.1:<port>` on this host.
+    ///
+    /// For tools whose tunnel `adb forward` opens on the *adb server's* host — scrcpy,
+    /// `flutter run`, Android Studio. Those sockets are plain streams, not adb protocol, and
+    /// the tool cannot perform our handshake, so a forwarded port is gated by source IP
+    /// instead (see `server::forward_loop`).
+    pub forward_ports: Vec<u16>,
 }
 
 impl ResolvedShare {
@@ -232,6 +239,9 @@ pub struct ShareConfig {
     /// does not stay open overnight.
     #[serde(default = "default_expire_after")]
     pub expire_after: i64,
+    /// Extra ports to proxy to `127.0.0.1:<port>`, for tunnel-using tools (scrcpy et al).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_ports: Vec<u16>,
 }
 
 /// One hour: long enough for a work session, short enough that forgetting is survivable.
@@ -253,6 +263,7 @@ impl Default for ShareConfig {
             targets: Vec::new(),
             all: false,
             expire_after: DEFAULT_EXPIRE_AFTER,
+            forward_ports: Vec::new(),
         }
     }
 }
@@ -282,6 +293,28 @@ impl ShareConfig {
 
         let targets = self.resolve_targets()?;
 
+        let mut forward_ports = self.forward_ports.clone();
+        forward_ports.sort_unstable();
+        forward_ports.dedup();
+        if forward_ports.contains(&bind.port()) {
+            bail!(
+                "forward port {} is the share's own port — pick another",
+                bind.port()
+            );
+        }
+        if forward_ports.contains(&0) {
+            bail!("0 is not a forward port");
+        }
+        // `adb forward` already owns 127.0.0.1:<port> here, so a loopback share would be
+        // fighting it for the same socket — and it would be pointless anyway: on loopback the
+        // tunnel is already reachable, which is exactly what the `ssh -L` route relies on.
+        if !forward_ports.is_empty() && bind.ip().is_loopback() {
+            bail!(
+                "--forward-port needs a network bind ({bind} is loopback) — the tunnel port \
+                 is already on 127.0.0.1 there; reach it with `ssh -L <port>:127.0.0.1:<port>`"
+            );
+        }
+
         Ok(ResolvedShare {
             profile,
             bind,
@@ -289,6 +322,7 @@ impl ShareConfig {
             targets,
             token,
             expires_after,
+            forward_ports,
         })
     }
 

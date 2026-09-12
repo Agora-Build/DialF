@@ -78,6 +78,7 @@ dialf play <file>
 
 dialf devices share --list                             # adb devices attached to this host
 dialf devices share --target <serial> [--token]        # share one with other machines
+dialf devices share --target <serial> --forward-port 27183   # + a tunnel port (scrcpy etc)
 dialf devices share --status | --stop
 dialf devices connect <host> --token <dvs_...>         # reach a token-protected share
 ```
@@ -103,6 +104,10 @@ install apps, read `/sdcard` and open a shell on the phone. That is fine on a ne
 trust and not on one you don't; add `--token` for a one-time secret (B then uses
 `dialf devices connect`), or bind loopback and tunnel in with `ssh -L`. Shares expire after
 an hour by default.
+
+scrcpy, `flutter run` and Android Studio tunnel through `adb forward`, which opens its socket
+on the sharing host — share with `--forward-port 27183` and run
+`scrcpy --tunnel-host=<host> --tunnel-port=27183`. Plain `adb` needs nothing extra.
 
 See [`docs/DEVICE_SHARING.md`](https://github.com/Agora-Build/DialF/blob/main/docs/DEVICE_SHARING.md)
 for the full guide.

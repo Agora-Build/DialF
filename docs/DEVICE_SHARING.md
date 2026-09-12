@@ -195,6 +195,91 @@ which is the thing expiry exists to prevent.
 
 ---
 
+## Tools that use an adb tunnel (scrcpy, flutter run, Android Studio)
+
+Plain `adb` — `shell`, `install`, `logcat`, `push`, `pull` — works over a share with nothing
+extra. Tools that open a **tunnel** need one more step, and it is worth knowing why before you
+hit it.
+
+scrcpy, `flutter run` (the VM service) and Android Studio's debugger all create a socket with
+`adb forward` or `adb reverse`. Those run *on the adb server's host* — machine A — so the
+socket lands there, on A's loopback:
+
+```sh
+# on A, after `adb forward tcp:7799 …`
+$ lsof -nP -iTCP:7799 -sTCP:LISTEN
+adb    127.0.0.1:7799          ← loopback on A, not reachable from B
+```
+
+The tool on B then waits on *B's* localhost and nothing ever connects. scrcpy reports it as:
+
+```
+/…/scrcpy-server: 1 file pushed, 0 skipped.
+[server] INFO: Device: [samsung] samsung SM-G977U (Android 12)
+ERROR: Server connection failed
+```
+
+Note that the push succeeded — the share is fine; only the tunnel is in the wrong place.
+
+### Fix 1 — `--forward-port` (no SSH needed)
+
+Have the share proxy the tunnel port alongside the adb port:
+
+```sh
+# on A
+dialf devices share --target R3CM40KGDVY --forward-port 27183
+
+# on B
+export ADB_SERVER_SOCKET=tcp:<A-address>:5939
+scrcpy --tunnel-host=<A-address> --tunnel-port=27183
+```
+
+`--tunnel-port` pins the port scrcpy asks `adb forward` to open (27183 is its default) and
+implies `--force-adb-forward`; `--tunnel-host` points scrcpy at A instead of its own
+localhost. Repeat `--forward-port` for several.
+
+On a **token** share, a forwarded port can't ask for the token — the tool opens it with a
+plain socket. It is gated on the peer's address instead: only a machine that already
+authenticated on the adb port may use it. That is weaker than the handshake (addresses can be
+spoofed, and a NAT makes several machines look like one), so treat a forward port as the
+looser half of a token share.
+
+`--forward-port` needs a network bind; it is refused on a loopback share, where `adb forward`
+already owns `127.0.0.1:<port>` and Fix 2 applies instead.
+
+### Fix 2 — SSH tunnel the port
+
+If you would rather not open another port, tunnel it:
+
+```sh
+# on B, leave running
+ssh -L 27183:127.0.0.1:27183 user@A
+
+# on B, another shell
+export ADB_SERVER_SOCKET=tcp:<A-address>:5939
+scrcpy --tunnel-port=27183
+```
+
+Here `--tunnel-host` stays at its default (B's localhost), which SSH maps to A's loopback.
+
+### Fix 3 — skip the share for that tool
+
+Put the phone on adb-over-WiFi and let B own it directly:
+
+```sh
+# on A
+adb -s R3CM40KGDVY tcpip 5555
+
+# on B
+unset ADB_SERVER_SOCKET
+adb connect <phone-ip>:5555
+scrcpy                       # no flags: the tunnel is local again
+```
+
+Needs B to reach the phone's own address. This takes dialf out of the picture for that tool.
+
+---
+
 ## Why `dialf devices connect` exists
 
 `adb` cannot authenticate. `adb -H host -P port` opens a socket and immediately starts speaking
@@ -217,6 +302,9 @@ handshake, so pointing the shim at one is refused with advice to use `adb` direc
 | `--target` | Reaching a phone you did not share, even with a valid token |
 | adb gate | `adb kill-server` from B stopping A's adb server |
 | Expiry | A share you forgot to stop |
+
+A `--forward-port` is the one component gated by address rather than by the token — see
+[Tools that use an adb tunnel](#tools-that-use-an-adb-tunnel-scrcpy-flutter-run-android-studio).
 
 Three properties worth stating plainly, because they are easy to assume wrongly:
 
@@ -244,6 +332,7 @@ adb_share:
   bind: 100.117.207.150:5939
   targets: ["192.168.100.179:33415"]     # or: all: true
   expire_after: 3600                     # seconds; <= 0 never expires
+  forward_ports: [27183]                 # tunnel ports for scrcpy etc (optional)
 ```
 
 There is no `token:` field, by design — a token is minted per share and printed once, so a

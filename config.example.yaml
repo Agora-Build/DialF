@@ -96,3 +96,5 @@ audio:
 #   bind: 0.0.0.0:5939
 #   targets: ["4B2B1C"]       # or `all: true`
 #   expire_after: 3600        # seconds; <= 0 never expires
+#   forward_ports: [27183]    # extra ports proxied to 127.0.0.1 here, for tools that tunnel
+#                             # through `adb forward` (scrcpy, flutter run, Android Studio)

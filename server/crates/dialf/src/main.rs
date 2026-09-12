@@ -150,17 +150,22 @@ enum DevicesAction {
         /// Seconds before the share stops itself; 0 or less never expires (default 3600).
         #[arg(long, value_name = "SECONDS")]
         expire_after: Option<i64>,
+        /// Also proxy this port to 127.0.0.1:<port> on this host, for tools whose tunnel
+        /// `adb forward` opens here rather than on the remote machine — scrcpy
+        /// (`--tunnel-port`), `flutter run`, Android Studio. Repeat for several.
+        #[arg(long = "forward-port", value_name = "PORT")]
+        forward_ports: Vec<u16>,
         /// Listen address; overrides `adb_share.bind` for this run only.
         #[arg(long)]
         bind: Option<String>,
         /// Show what is being shared, and whether adb answers behind it.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "forward_ports"])]
         status: bool,
         /// Stop sharing and drop in-flight connections.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "status"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "forward_ports", "status"])]
         stop: bool,
         /// List the attached devices that `--target` can name.
-        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "status", "stop"])]
+        #[arg(long, conflicts_with_all = ["targets", "all", "bind", "token", "forward_ports", "status", "stop"])]
         list: bool,
     },
     /// Connect to a token-protected share, exposing it as a local port.
@@ -596,6 +601,7 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
             all,
             token,
             expire_after,
+            forward_ports,
             bind,
             status,
             stop,
@@ -621,6 +627,7 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
                     all,
                     token,
                     expire_after,
+                    forward_ports,
                 }
             };
             let resp = call(&socket, op).await?;
@@ -799,6 +806,21 @@ fn print_share_result(data: Option<&serde_json::Value>) {
     }
     if hosts.len() > 1 {
         println!("  (also reachable at {})", hosts[1..].join(", "));
+    }
+
+    // Tunnel-using tools (scrcpy, flutter run) need the port adb opened *here*, not on the
+    // remote machine — this is what --forward-port exposes.
+    if let Some(ports) = get("forward_ports").as_array() {
+        let list: Vec<String> = ports.iter().filter_map(|v| v.as_u64()).map(|p| p.to_string()).collect();
+        if !list.is_empty() {
+            println!("\n  forwarding {} -> 127.0.0.1 on this host", list.join(", "));
+            if let Some(first) = list.first() {
+                println!("    e.g.  scrcpy --tunnel-host={host} --tunnel-port={first}");
+            }
+            if authed {
+                println!("  (only addresses that authenticated on {port} may use these)");
+            }
+        }
     }
 
     if public && !authed {

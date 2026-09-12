@@ -9,10 +9,11 @@
 //! Either way the share **expires**: the accept loop stops itself at a deadline, so a door
 //! left open at the end of a session closes on its own.
 
+use std::collections::HashSet;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -39,6 +40,8 @@ pub struct ShareHandle {
     pub expires_at: Option<std::time::SystemTime>,
     /// Cleared when the accept loop exits — by `stop`, or by the share expiring on its own.
     live: Arc<AtomicBool>,
+    /// Forward-port listeners, stopped with the share.
+    forwards: Vec<tokio::task::JoinHandle<()>>,
     cancel: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -79,6 +82,9 @@ impl ShareHandle {
         // a permit for one that is mid-iteration, so the signal can't be missed either way.
         self.cancel.notify_waiters();
         self.cancel.notify_one();
+        for f in &self.forwards {
+            f.abort();
+        }
         let abort = self.task.abort_handle();
         if tokio::time::timeout(SHUTDOWN_GRACE, self.task).await.is_err() {
             tracing::warn!("share did not stop within {SHUTDOWN_GRACE:?}; aborting it");
@@ -125,6 +131,25 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
     let served = Arc::new(AtomicU64::new(0));
     let live = Arc::new(AtomicBool::new(true));
     let expires_at = config.expires_after.map(|d| std::time::SystemTime::now() + d);
+    let authed: Authed = Arc::new(Mutex::new(HashSet::new()));
+
+    // Forward ports bind before we report success, so "address in use" surfaces to the caller
+    // rather than disappearing into a spawned task.
+    let mut forwards = Vec::new();
+    for port in config.forward_ports.clone() {
+        let addr = SocketAddr::new(config.bind.ip(), port);
+        let fwd = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind forward port {addr}"))?;
+        tracing::info!(%addr, "forwarding to 127.0.0.1:{port}");
+        forwards.push(tokio::spawn(forward_loop(
+            fwd,
+            port,
+            config.require_auth(),
+            authed.clone(),
+            cancel.clone(),
+        )));
+    }
 
     let task = tokio::spawn(accept_loop(
         listener,
@@ -133,6 +158,7 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
         active.clone(),
         served.clone(),
         live.clone(),
+        authed,
     ));
 
     Ok(ShareHandle {
@@ -141,9 +167,55 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
         served,
         expires_at,
         live,
+        forwards,
         cancel,
         task,
     })
+}
+
+/// Peers that have completed the token handshake on this share.
+type Authed = Arc<Mutex<HashSet<IpAddr>>>;
+
+/// Proxy one extra port straight through to `127.0.0.1:<port>` on this host.
+///
+/// This carries a tool's tunnel (scrcpy video, a Flutter VM service), not adb protocol, and
+/// the tool opens it with a plain socket — it cannot perform our handshake. So on a
+/// token-protected share the gate is the peer's address: only somebody who already
+/// authenticated on the adb port gets through here. That is weaker than the handshake
+/// (addresses can be spoofed, and a NAT makes several machines look like one), but it keeps a
+/// forward port from being a hole straight past the token.
+async fn forward_loop(
+    listener: TcpListener,
+    port: u16,
+    require_auth: bool,
+    authed: Authed,
+    cancel: Arc<Notify>,
+) {
+    loop {
+        let accepted = tokio::select! {
+            _ = cancel.notified() => return,
+            r = listener.accept() => r,
+        };
+        let Ok((mut down, peer)) = accepted else {
+            continue;
+        };
+        if require_auth && !authed.lock().unwrap().contains(&peer.ip()) {
+            tracing::warn!(%peer, port, "forward port refused: that address has not authenticated");
+            continue;
+        }
+        tokio::spawn(async move {
+            match TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                Ok(mut up) => {
+                    let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+                }
+                Err(e) => tracing::debug!(
+                    port,
+                    error = %e,
+                    "forward port has nothing behind it yet (is the tunnel set up?)"
+                ),
+            }
+        });
+    }
 }
 
 async fn accept_loop(
@@ -153,6 +225,7 @@ async fn accept_loop(
     active: Arc<AtomicU64>,
     served: Arc<AtomicU64>,
     live: Arc<AtomicBool>,
+    authed: Authed,
 ) {
     // A share is a door held open. Unless told otherwise it closes itself, so one forgotten
     // at the end of a session doesn't stay open overnight.
@@ -191,8 +264,9 @@ async fn accept_loop(
         let active = active.clone();
         let served = served.clone();
         let cancel = cancel.clone();
+        let authed = authed.clone();
         tokio::spawn(async move {
-            match serve_conn(stream, peer, &config, &active, &served, cancel).await {
+            match serve_conn(stream, peer, &config, &active, &served, cancel, authed).await {
                 Ok(()) => {}
                 Err(e) => tracing::debug!(%peer, error = %e, "share connection ended"),
             }
@@ -208,6 +282,7 @@ async fn serve_conn(
     active: &Arc<AtomicU64>,
     served: &Arc<AtomicU64>,
     cancel: Arc<Notify>,
+    authed: Authed,
 ) -> anyhow::Result<()> {
     let mut stream = if config.require_auth() {
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, authenticate(stream, config)).await {
@@ -240,6 +315,8 @@ async fn serve_conn(
         }
     };
 
+    // Remember the address so this peer's tunnel traffic can reach a forward port.
+    authed.lock().unwrap().insert(peer.ip());
     served.fetch_add(1, Ordering::Relaxed);
     active.fetch_add(1, Ordering::Relaxed);
     tracing::info!(%peer, upstream = %config.upstream, "share connection authenticated");
@@ -467,6 +544,7 @@ mod tests {
             targets: Vec::new(),
             all: true,
             expire_after: 3600,
+            forward_ports: Vec::new(),
         };
         // Bind on port 0, then recover the real port for clients to dial.
         let mut resolved = cfg.resolve(Profile::Adb, true).unwrap();

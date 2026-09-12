@@ -157,6 +157,13 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   server), filters `host:devices` to shared serials only, and refuses `transport-any` when
   several devices are shared. This holds on an open share too — no token does not mean no
   policy.
+- **Tunnel-using tools break over a remote adb server.** scrcpy, `flutter run` and Android
+  Studio open their socket with `adb forward`/`adb reverse`, which runs on the *adb server's*
+  host and binds `127.0.0.1` there — so the tool on the other machine waits on its own
+  localhost forever (scrcpy: "Server connection failed", *after* a successful server push).
+  `--forward-port` proxies that port alongside the adb port; it needs a network bind and is
+  refused on loopback, where `adb forward` already owns the socket and `ssh -L` is the answer.
+  A forward port is gated by peer address, not the token — the tool cannot handshake.
 - **adb-over-WiFi serials contain colons** (`192.168.1.5:5555`), so never parse
   `host-serial:<serial>:<cmd>` by splitting on the first colon — match against known serials.
 - **A host cannot reach its own overlay IP.** Netbird/Tailscale (100.64/10) route it off-box

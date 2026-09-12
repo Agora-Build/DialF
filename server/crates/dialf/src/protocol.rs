@@ -351,6 +351,10 @@ pub enum ControlOp {
         /// Seconds before the share stops itself; <= 0 never expires. Overrides config.
         #[serde(default)]
         expire_after: Option<i64>,
+        /// Extra ports to proxy to `127.0.0.1:<port>`, for tools whose tunnel lives on the
+        /// sharing host (scrcpy, `flutter run`).
+        #[serde(default)]
+        forward_ports: Vec<u16>,
     },
     /// List the devices attached to the host (what `--target` can name).
     #[serde(rename = "share.devices")]

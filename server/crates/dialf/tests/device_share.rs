@@ -81,6 +81,7 @@ async fn start_share_with(upstream: &str, targets: Vec<String>, all: bool) -> Sh
         targets,
         all,
         expire_after: 3600,
+        forward_ports: Vec::new(),
     };
     // Port 0: the listener reports the port it was assigned, so parallel tests never race
     // over a "free" port that something else grabbed in between.
@@ -325,6 +326,7 @@ async fn a_restarted_share_is_reachable_again() {
         targets: Vec::new(),
         all: true,
         expire_after: 3600,
+        forward_ports: Vec::new(),
     };
     let share = server::start(cfg.resolve(Profile::Adb, true).unwrap()).await.unwrap();
     let addr = share.config.bind;
@@ -474,6 +476,7 @@ async fn start_open_share(upstream: &str) -> ShareHandle {
         targets: Vec::new(),
         all: true,
         expire_after: 3600,
+        forward_ports: Vec::new(),
     };
     let resolved = cfg.resolve(Profile::Adb, false).unwrap();
     assert!(!resolved.require_auth(), "no token asked for => open share");
@@ -510,6 +513,7 @@ async fn an_open_share_still_enforces_device_scope_and_blocks_kill() {
         targets: vec![DEV_A.to_string()],
         all: false,
         expire_after: 3600,
+        forward_ports: Vec::new(),
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 
@@ -587,6 +591,7 @@ async fn a_share_closes_itself_when_it_expires() {
         targets: Vec::new(),
         all: true,
         expire_after: 1,
+        forward_ports: Vec::new(),
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
     let addr = share.config.bind;
@@ -621,6 +626,7 @@ async fn expiry_is_reported_and_can_be_disabled() {
         targets: Vec::new(),
         all: true,
         expire_after: 3600,
+        forward_ports: Vec::new(),
     };
 
     let timed = server::start(base.resolve(Profile::Adb, false).unwrap()).await.unwrap();
@@ -649,6 +655,7 @@ async fn expiry_also_drops_a_connection_that_was_already_open() {
         targets: Vec::new(),
         all: true,
         expire_after: 1,
+        forward_ports: Vec::new(),
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 
@@ -754,4 +761,172 @@ async fn real_adb_works_through_a_token_share_and_fails_without_it() {
 
     task.abort();
     share.stop().await;
+}
+
+
+// ---- forward ports -----------------------------------------------------------------------
+//
+// scrcpy, `flutter run` and Android Studio open their tunnel with `adb forward`, which binds
+// 127.0.0.1 on the *sharing* host — unreachable from the machine running the tool.
+// `--forward-port` proxies that port alongside the adb port.
+
+/// Stand-in for whatever `adb forward` put on 127.0.0.1:<port> — echoes, counts connections.
+async fn local_tunnel(port: u16) -> Arc<AtomicU64> {
+    let hits = Arc::new(AtomicU64::new(0));
+    let h = hits.clone();
+    let l = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await.unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else { return };
+            h.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            if s.write_all(&buf[..n]).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    hits
+}
+
+/// A port below the ephemeral range, so nothing else can claim it mid-test.
+fn fixed_port(n: u16) -> u16 {
+    45900 + n
+}
+
+/// This host's LAN address — a forward port needs a network bind, because `adb forward`
+/// already owns 127.0.0.1:<port>. Skips the test when there isn't one.
+fn lan_addr() -> Option<String> {
+    dialf::share::local_addresses()
+        .iter()
+        .find(|ip| ip.octets()[0] != 100) // not the overlay: it doesn't hairpin
+        .map(|ip| ip.to_string())
+}
+
+async fn share_with_forward(upstream: &str, host: &str, port: u16, token: bool) -> ShareHandle {
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some(format!("{host}:0")),
+        upstream: Some(format!("tcp:{upstream}")),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 3600,
+        forward_ports: vec![port],
+    };
+    server::start(cfg.resolve(Profile::Adb, token).unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_forward_port_carries_a_tunnel_straight_through() {
+    let Some(host) = lan_addr() else {
+        eprintln!("no LAN address; skipping forward-port test");
+        return;
+    };
+    let up = fake_adb("").await;
+    let port = fixed_port(1);
+    let tunnel = local_tunnel(port).await;
+    let share = share_with_forward(&up.addr.to_string(), &host, port, false).await;
+
+    // Plain TCP — no adb framing, no handshake, just the tool's bytes.
+    let mut c = TcpStream::connect(format!("{host}:{port}")).await.unwrap();
+    c.write_all(b"scrcpy video stream").await.unwrap();
+    let mut buf = [0u8; 32];
+    let n = c.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"scrcpy video stream");
+    assert_eq!(tunnel.load(Ordering::SeqCst), 1, "should have reached the local tunnel");
+
+    share.stop().await;
+}
+
+#[tokio::test]
+async fn a_forward_port_on_a_token_share_only_serves_authenticated_addresses() {
+    // The tool cannot perform the handshake, so the forward port would otherwise be a hole
+    // straight past the token. It is gated on having authenticated on the adb port first.
+    let Some(host) = lan_addr() else {
+        eprintln!("no LAN address; skipping forward-port auth test");
+        return;
+    };
+    let up = fake_adb("").await;
+    let port = fixed_port(2);
+    let tunnel = local_tunnel(port).await;
+    let share = share_with_forward(&up.addr.to_string(), &host, port, true).await;
+
+    // Nobody has authenticated yet.
+    let mut cold = TcpStream::connect(format!("{host}:{port}")).await.unwrap();
+    let _ = cold.write_all(b"before auth").await;
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(Duration::from_secs(3), cold.read(&mut buf))
+        .await
+        .expect("a refused connection should close, not hang")
+        .unwrap_or(0);
+    assert_eq!(n, 0, "unauthenticated peer got data back");
+    assert_eq!(tunnel.load(Ordering::SeqCst), 0, "tunnel must not have been reached");
+
+    // Authenticate on the adb port; the same address is then allowed through.
+    let _authed = client::connect(&share.config.bind.to_string(), Profile::Adb, &token_of(&share))
+        .await
+        .unwrap();
+    let mut warm = TcpStream::connect(format!("{host}:{port}")).await.unwrap();
+    warm.write_all(b"after auth").await.unwrap();
+    let n = warm.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"after auth");
+    assert_eq!(tunnel.load(Ordering::SeqCst), 1);
+
+    share.stop().await;
+}
+
+#[tokio::test]
+async fn stopping_a_share_closes_its_forward_ports() {
+    let Some(host) = lan_addr() else {
+        eprintln!("no LAN address; skipping forward-port shutdown test");
+        return;
+    };
+    let up = fake_adb("").await;
+    let port = fixed_port(3);
+    let _tunnel = local_tunnel(port).await;
+    let share = share_with_forward(&up.addr.to_string(), &host, port, false).await;
+
+    assert!(TcpStream::connect(format!("{host}:{port}")).await.is_ok());
+    share.stop().await;
+
+    // The forward listener goes with the share — the tunnel behind it is someone else's and
+    // stays on loopback, so this must fail on the *network* address specifically.
+    for _ in 0..40 {
+        if TcpStream::connect(format!("{host}:{port}")).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("forward port still accepting after the share stopped");
+}
+
+#[tokio::test]
+async fn a_forward_port_is_refused_where_it_could_not_work() {
+    // Its own port: a straight collision.
+    let clash = ShareConfig {
+        bind: Some("0.0.0.0:5939".to_string()),
+        all: true,
+        forward_ports: vec![5939],
+        ..Default::default()
+    };
+    let err = clash.resolve(Profile::Adb, false).unwrap_err().to_string();
+    assert!(err.contains("own port"), "got: {err}");
+
+    // Loopback bind: `adb forward` already owns 127.0.0.1:<port>, and ssh -L is the answer.
+    let loopback = ShareConfig {
+        bind: Some("127.0.0.1:5939".to_string()),
+        all: true,
+        forward_ports: vec![27183],
+        ..Default::default()
+    };
+    let err = loopback.resolve(Profile::Adb, false).unwrap_err().to_string();
+    assert!(err.contains("ssh -L"), "message should point at the alternative: {err}");
 }
