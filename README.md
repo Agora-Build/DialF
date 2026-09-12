@@ -21,7 +21,9 @@ dialf (CLI) ──▶ dialfd (host daemon) ──WiFi──▶ mobile app  ─�
 
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol + control API,
 [`docs/HARDWARE.md`](docs/HARDWARE.md) for the sound-card bridge wiring + macOS
-microphone/LaunchAgent setup, and [`app/README.md`](app/README.md) for the phone app.
+microphone/LaunchAgent setup, [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md) for using a
+phone attached to another machine over adb, and [`app/README.md`](app/README.md) for the
+phone app.
 
 ## Install
 
@@ -380,7 +382,8 @@ Layout:
   - `jobs/` — sample jobs
 - `app/` — Flutter + Kotlin phone app ([`app/README.md`](app/README.md))
 - `samples/` — ready-to-use voice prompts for the sample jobs
-- `docs/` — [`PROTOCOL.md`](docs/PROTOCOL.md), [`HARDWARE.md`](docs/HARDWARE.md)
+- `docs/` — [`PROTOCOL.md`](docs/PROTOCOL.md), [`HARDWARE.md`](docs/HARDWARE.md),
+  [`DEVICE_SHARING.md`](docs/DEVICE_SHARING.md)
 - `config.example.yaml` — sample daemon config (sound card + recording)
 
 ### Release
