@@ -139,6 +139,12 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   speaking adb; it has no handshake hook, so `dialf devices connect` performs one on its
   behalf. Against an *open* share no shim is needed — point adb straight at it (over `ssh -L`
   from another host), and the shim refuses with that advice if pointed there.
+- **Don't delete the shim as "redundant with SSH".** It has been questioned twice and kept
+  twice. It serves the off-box bind, which *is* the original feature request ("expose an adb
+  server URL"); loopback + `ssh -L` is a tunnel you could build without dialf. The considered
+  alternatives were dropping off-box access entirely (walks back the feature) and swapping the
+  token for an IP allowlist so stock adb works remotely (spoofable, DHCP-fragile, still
+  unencrypted — rejected as too weak for a phone holding a live SIM).
 - **The token authenticates; it does not encrypt.** The proxied session after the handshake is
   plaintext, so an on-path attacker can read or hijack it. Off-LAN use belongs inside a VPN or
   SSH tunnel. TLS is deliberately not implemented.
