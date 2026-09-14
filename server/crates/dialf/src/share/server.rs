@@ -137,19 +137,25 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
     // rather than disappearing into a spawned task.
     let mut forwards = Vec::new();
     for port in config.forward_ports.clone() {
-        let addr = SocketAddr::new(config.bind.ip(), port);
-        let fwd = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("bind forward port {addr}"))?;
-        tracing::info!(%addr, "forwarding to 127.0.0.1:{port}");
-        forwards.push(tokio::spawn(forward_loop(
-            fwd,
-            port,
-            config.require_auth(),
-            authed.clone(),
-            cancel.clone(),
-            config.expires_after,
-        )));
+        // Never the wildcard. `0.0.0.0:<port>` would cover 127.0.0.1 too, and the proxy dials
+        // `127.0.0.1:<port>` looking for the tunnel `adb forward` opens — so it would answer
+        // its own call and recurse, one spawned connection per hop, from a single external
+        // connect. Binding the concrete addresses leaves loopback free for adb.
+        for ip in forward_bind_addrs(config.bind.ip()) {
+            let addr = SocketAddr::new(ip, port);
+            let fwd = TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind forward port {addr}"))?;
+            tracing::info!(%addr, "forwarding to 127.0.0.1:{port}");
+            forwards.push(tokio::spawn(forward_loop(
+                fwd,
+                port,
+                config.require_auth(),
+                authed.clone(),
+                cancel.clone(),
+                config.expires_after,
+            )));
+        }
     }
 
     let task = tokio::spawn(accept_loop(
@@ -176,6 +182,20 @@ pub async fn start(mut config: ResolvedShare) -> anyhow::Result<ShareHandle> {
 
 /// Peers that have completed the token handshake on this share.
 type Authed = Arc<Mutex<HashSet<IpAddr>>>;
+
+/// Concrete addresses to expose a forward port on, given the share's bind address.
+///
+/// A wildcard bind is expanded to this host's real addresses rather than used as-is, so the
+/// forward listener never shadows `127.0.0.1:<port>` — see the caller for why that matters.
+fn forward_bind_addrs(bind: IpAddr) -> Vec<IpAddr> {
+    if !bind.is_unspecified() {
+        return vec![bind];
+    }
+    crate::share::local_addresses()
+        .into_iter()
+        .map(IpAddr::V4)
+        .collect()
+}
 
 /// Proxy one extra port straight through to `127.0.0.1:<port>` on this host.
 ///

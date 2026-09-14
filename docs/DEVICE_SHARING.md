@@ -231,12 +231,29 @@ dialf devices share --target R3CM40KGDVY --forward-port 27183
 
 # on B
 export ADB_SERVER_SOCKET=tcp:<A-address>:5939
-scrcpy --tunnel-host=<A-address> --tunnel-port=27183
+scrcpy --port=27183 --tunnel-host=<A-address> --tunnel-port=27183
 ```
 
-`--tunnel-port` pins the port scrcpy asks `adb forward` to open (27183 is its default) and
-implies `--force-adb-forward`; `--tunnel-host` points scrcpy at A instead of its own
-localhost. Repeat `--forward-port` for several.
+**All three numbers must match**, and this is the easiest thing to get wrong:
+
+| flag | what it sets |
+|---|---|
+| `--forward-port` (dialf) | the port A proxies to `127.0.0.1:<port>` |
+| `--port` (scrcpy) | the port `adb forward` opens **on A** — default 27183 |
+| `--tunnel-port` (scrcpy) | the port scrcpy **dials** on `--tunnel-host` |
+
+`--tunnel-port` alone is not enough. It only redirects where scrcpy connects; `adb forward`
+keeps using `--port`, so with `--forward-port 28183 --tunnel-port 28183` and no `--port`, the
+tunnel sits on A's 27183 while dialf proxies 28183 — and scrcpy fails with
+`ERROR: Server connection failed` after successfully pushing its server. Check with
+`adb forward --list`, which shows the port `adb` actually opened.
+
+`--tunnel-host` points scrcpy at A instead of its own localhost, and implies
+`--force-adb-forward`. Repeat `--forward-port` for several ports.
+
+`ADB_SERVER_SOCKET` is required: scrcpy has no `-H`/`-P` flags, so without it scrcpy talks to
+the *local* adb server and reports `Could not find any ADB device` even though
+`adb -H <A> -P 5939 devices` works.
 
 On a **token** share, a forwarded port can't ask for the token — the tool opens it with a
 plain socket. It is gated on the peer's address instead: only a machine that already

@@ -964,3 +964,51 @@ async fn expiry_closes_forward_ports_too() {
     }
     panic!("forward port still open after the share expired");
 }
+
+#[tokio::test]
+async fn a_forward_port_never_shadows_loopback() {
+    // The proxy dials 127.0.0.1:<port> to find the tunnel `adb forward` opens there. A
+    // wildcard listener would answer that call itself and recurse — one spawned connection
+    // per hop, from a single external connect — so loopback must stay free for adb.
+    let Some(host) = lan_addr() else {
+        eprintln!("no LAN address; skipping forward-port loopback test");
+        return;
+    };
+    let up = fake_adb("").await;
+    let port = fixed_port(5);
+
+    let cfg = ShareConfig {
+        enabled: false,
+        bind: Some("0.0.0.0:0".to_string()), // the shipped default shape
+        upstream: Some(format!("tcp:{}", up.addr)),
+        targets: Vec::new(),
+        all: true,
+        expire_after: 3600,
+        forward_ports: vec![port],
+    };
+    let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
+
+    // Reachable where a remote machine would look...
+    assert!(
+        TcpStream::connect(format!("{host}:{port}")).await.is_ok(),
+        "forward port should be reachable on the network address"
+    );
+    // ...and absent on loopback, which belongs to `adb forward`.
+    assert!(
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await.is_err(),
+        "forward port must not bind loopback — adb forward needs it, and the proxy would \
+         otherwise connect to itself"
+    );
+
+    // Proof it cannot recurse: the tunnel is genuinely absent, so a connection is closed
+    // rather than answered by the proxy itself.
+    let mut c = TcpStream::connect(format!("{host}:{port}")).await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(3), c.read(&mut buf))
+        .await
+        .expect("must close promptly, not loop")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+
+    share.stop().await;
+}

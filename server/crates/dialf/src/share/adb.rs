@@ -148,8 +148,37 @@ pub fn decide(request: &str, targets: &Targets) -> Decision {
         };
     }
 
-    // Everything else (host:version, host:features, …) is metadata about the server itself.
+    // A bare `host:<cmd>` that needs a device is resolved by the server against "any
+    // transport" — which fails outright when the host has several attached, even though our
+    // filtered device list showed the peer only one. Scope it to the shared device, the same
+    // way `transport-any` is: otherwise plain `adb shell` works on a one-device host and
+    // mysteriously reports "more than one device/emulator" on a busy one.
+    if let Some(rest) = req.strip_prefix("host:") {
+        if !is_server_scoped(rest) {
+            if let Some(serial) = targets.only_one() {
+                return Decision::Rewrite(format!("host-serial:{serial}:{rest}"));
+            }
+        }
+    }
+
     Decision::Forward
+}
+
+/// Whether a bare `host:<cmd>` asks about the *server* rather than a device.
+///
+/// An allowlist, not a denylist: a request we have not seen before is far more likely to need
+/// a device than not, and scoping one unnecessarily is harmless next to letting an ambiguous
+/// one through.
+fn is_server_scoped(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "version" | "kill" | "devices" | "devices-l" | "track-devices" | "track-devices-l"
+            | "host-features" | "server-status" | "reconnect" | "reconnect-offline"
+    ) || cmd.starts_with("emulator:")
+        || cmd.starts_with("connect:")
+        || cmd.starts_with("disconnect")
+        || cmd.starts_with("transport")
+        || cmd.starts_with("tport")
 }
 
 fn not_shared(serial: &str, targets: &Targets) -> String {
@@ -505,8 +534,51 @@ mod tests {
 
     #[test]
     fn server_metadata_requests_pass_through() {
-        assert_eq!(decide("host:version", &only(&["A"])), Decision::Forward);
-        assert_eq!(decide("host:features", &only(&["A"])), Decision::Forward);
+        // About the server, not a device — no scoping needed.
+        // (track-devices is a device *list*, handled above — see the filtering tests.)
+        for req in ["host:version", "host:host-features", "host:reconnect"] {
+            assert_eq!(decide(req, &only(&["A"])), Decision::Forward, "{req}");
+        }
+    }
+
+    #[test]
+    fn device_scoped_host_requests_are_pinned_to_the_shared_device() {
+        // `host:features` and friends resolve against "any transport" on the server. With the
+        // host holding several devices that fails outright — even though our filtered list
+        // showed the peer exactly one — so plain `adb shell` breaks unless it is scoped.
+        let t = only(&["R3CM40KGDVY"]);
+        assert_eq!(
+            decide("host:features", &t),
+            Decision::Rewrite("host-serial:R3CM40KGDVY:features".to_string())
+        );
+        assert_eq!(
+            decide("host:get-state", &t),
+            Decision::Rewrite("host-serial:R3CM40KGDVY:get-state".to_string())
+        );
+        assert_eq!(
+            decide("host:forward:tcp:28183;localabstract:scrcpy", &t),
+            Decision::Rewrite(
+                "host-serial:R3CM40KGDVY:forward:tcp:28183;localabstract:scrcpy".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_unknown_host_request_is_scoped_rather_than_passed_through() {
+        // Defaulting to "needs a device" is the safe way round: scoping a server-wide request
+        // is harmless, letting an ambiguous device one through is the bug above.
+        assert_eq!(
+            decide("host:some-future-command", &only(&["A1"])),
+            Decision::Rewrite("host-serial:A1:some-future-command".to_string())
+        );
+    }
+
+    #[test]
+    fn host_requests_are_left_alone_when_scoping_would_be_a_guess() {
+        // Several devices shared, or all of them: there is no single serial to pin to, so the
+        // server decides — and says so if it is ambiguous.
+        assert_eq!(decide("host:features", &Targets::All), Decision::Forward);
+        assert_eq!(decide("host:features", &only(&["A1", "B2"])), Decision::Forward);
     }
 
     #[tokio::test]

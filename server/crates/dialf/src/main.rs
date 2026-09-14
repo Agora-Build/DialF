@@ -794,15 +794,20 @@ fn print_share_result(data: Option<&serde_json::Value>) {
         println!("  (shown once, not saved — a restarted share issues a new one)");
     }
 
+    // Lead with ADB_SERVER_SOCKET: it points *every* adb-based tool at the share, where -H/-P
+    // only redirects the one command — and tools like scrcpy have no -H flag at all, so
+    // without the variable they quietly talk to the local adb server and report no devices.
     println!("\n  From the other machine:");
     if authed {
         println!("    dialf devices connect {host}:{port} --token <token above>");
-        println!("    adb -H 127.0.0.1 -P 5038 devices");
+        println!("    export ADB_SERVER_SOCKET=tcp:127.0.0.1:5038");
+        println!("    adb devices");
     } else {
-        println!("    adb -H {host} -P {port} devices");
+        println!("    export ADB_SERVER_SOCKET=tcp:{host}:{port}");
+        println!("    adb devices");
         println!("  or, if you have SSH to this host, tunnel first:");
         println!("    ssh -L {port}:127.0.0.1:{port} {host}");
-        println!("    adb -H 127.0.0.1 -P {port} devices");
+        println!("    export ADB_SERVER_SOCKET=tcp:127.0.0.1:{port}");
     }
     if hosts.len() > 1 {
         println!("  (also reachable at {})", hosts[1..].join(", "));
@@ -815,7 +820,12 @@ fn print_share_result(data: Option<&serde_json::Value>) {
         if !list.is_empty() {
             println!("\n  forwarding {} -> 127.0.0.1 on this host", list.join(", "));
             if let Some(first) = list.first() {
-                println!("    e.g.  scrcpy --tunnel-host={host} --tunnel-port={first}");
+                // `--port` matters as much as `--tunnel-port`: the first is the port
+                // `adb forward` opens on *this* host (what we proxy), the second is the port
+                // scrcpy dials on the far side. Leave --port out and adb keeps its default
+                // 27183 while scrcpy dials the forwarded one, and nothing meets in the middle.
+                println!("    scrcpy --port={first} --tunnel-host={host} --tunnel-port={first}");
+                println!("    (needs ADB_SERVER_SOCKET set as above — scrcpy has no -H flag)");
             }
             if authed {
                 println!("  (only addresses that authenticated on {port} may use these)");

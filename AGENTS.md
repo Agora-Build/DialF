@@ -164,6 +164,19 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   `--forward-port` proxies that port alongside the adb port; it needs a network bind and is
   refused on loopback, where `adb forward` already owns the socket and `ssh -L` is the answer.
   A forward port is gated by peer address, not the token — the tool cannot handshake.
+- **A forward port must never bind the wildcard.** `0.0.0.0:<port>` covers 127.0.0.1, so the
+  proxy — which dials `127.0.0.1:<port>` to find the tunnel — answers its own call and
+  recurses, spawning a connection per hop from a single external connect. Wildcard binds are
+  expanded to this host's concrete addresses (`forward_bind_addrs`).
+- **scrcpy needs `--port` as well as `--tunnel-port`.** `--tunnel-port` only changes where
+  scrcpy *connects*; `adb forward` still uses `--port` (default 27183). Mismatched, the tunnel
+  sits on one port while dialf proxies another and scrcpy fails with "Server connection
+  failed" *after* a successful server push. `adb forward --list` shows the truth.
+- **Unqualified `host:<cmd>` requests need scoping.** `host:features`, `host:get-state` and
+  friends resolve against "any transport" on the real server, which fails outright when the
+  host has several devices attached — even though our filtered list showed the peer one. They
+  are rewritten to `host-serial:<serial>:<cmd>` when exactly one device is shared. A
+  one-device dev box never reproduces this; a device lab does.
 - **adb-over-WiFi serials contain colons** (`192.168.1.5:5555`), so never parse
   `host-serial:<serial>:<cmd>` by splitting on the first colon — match against known serials.
 - **A host cannot reach its own overlay IP.** Netbird/Tailscale (100.64/10) route it off-box
