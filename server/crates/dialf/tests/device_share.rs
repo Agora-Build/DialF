@@ -819,7 +819,7 @@ async fn share_with_forward(upstream: &str, host: &str, port: u16, token: bool) 
         targets: Vec::new(),
         all: true,
         expire_after: 3600,
-        forward_ports: vec![port],
+        forward_ports: vec![port.into()],
     };
     server::start(cfg.resolve(Profile::Adb, token).unwrap()).await.unwrap()
 }
@@ -914,7 +914,7 @@ async fn a_forward_port_is_refused_where_it_could_not_work() {
     let clash = ShareConfig {
         bind: Some("0.0.0.0:5939".to_string()),
         all: true,
-        forward_ports: vec![5939],
+        forward_ports: vec![5939.into()],
         ..Default::default()
     };
     let err = clash.resolve(Profile::Adb, false).unwrap_err().to_string();
@@ -924,7 +924,7 @@ async fn a_forward_port_is_refused_where_it_could_not_work() {
     let loopback = ShareConfig {
         bind: Some("127.0.0.1:5939".to_string()),
         all: true,
-        forward_ports: vec![27183],
+        forward_ports: vec![27183.into()],
         ..Default::default()
     };
     let err = loopback.resolve(Profile::Adb, false).unwrap_err().to_string();
@@ -950,7 +950,7 @@ async fn expiry_closes_forward_ports_too() {
         targets: Vec::new(),
         all: true,
         expire_after: 1,
-        forward_ports: vec![port],
+        forward_ports: vec![port.into()],
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
     assert!(TcpStream::connect(format!("{host}:{port}")).await.is_ok());
@@ -984,7 +984,7 @@ async fn a_forward_port_never_shadows_loopback() {
         targets: Vec::new(),
         all: true,
         expire_after: 3600,
-        forward_ports: vec![port],
+        forward_ports: vec![port.into()],
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 

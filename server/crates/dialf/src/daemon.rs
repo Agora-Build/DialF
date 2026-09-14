@@ -526,7 +526,8 @@ async fn start_share(
         cfg.expire_after = secs;
     }
     if !forward_ports.is_empty() {
-        cfg.forward_ports = forward_ports;
+        // Already expanded by the caller; wrap so config and request share one representation.
+        cfg.forward_ports = forward_ports.into_iter().map(Into::into).collect();
     }
     // A request that names devices replaces config's list outright, rather than adding to it —
     // "share exactly these" must not be widened by a stale config entry.

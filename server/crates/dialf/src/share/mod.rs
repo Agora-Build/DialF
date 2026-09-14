@@ -135,6 +135,66 @@ impl std::str::FromStr for Upstream {
     }
 }
 
+/// Most ports one `--forward-port` may open. scrcpy's own range is 17 wide; well past that
+/// and it is likelier a typo than an intention.
+pub const MAX_FORWARD_SPAN: usize = 64;
+
+/// A `--forward-port` value: one port, or an inclusive `start-end` range.
+///
+/// Ranges exist because scrcpy picks the first free port in `--port` (default 27183:27199).
+/// Pinning a single number bets that 27183 is free, and loses silently when it is not — the
+/// tunnel opens on 27184 while the share proxies 27183.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum PortSpec {
+    /// `27183`
+    Port(u16),
+    /// `"27183-27199"` (also accepts a bare `"27183"`)
+    Range(String),
+}
+
+impl From<u16> for PortSpec {
+    fn from(p: u16) -> Self {
+        PortSpec::Port(p)
+    }
+}
+
+impl PortSpec {
+    /// The ports this spec covers.
+    pub fn expand(&self) -> anyhow::Result<Vec<u16>> {
+        match self {
+            PortSpec::Port(p) => parse_port_spec(&p.to_string()),
+            PortSpec::Range(s) => parse_port_spec(s),
+        }
+    }
+}
+
+/// Parse `27183` or `27183-27199` into the ports it covers.
+pub fn parse_port_spec(spec: &str) -> anyhow::Result<Vec<u16>> {
+    let spec = spec.trim();
+    let (lo, hi) = match spec.split_once('-') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (spec, spec),
+    };
+    let lo: u16 = lo
+        .parse()
+        .with_context(|| format!("port `{lo}` in `{spec}`"))?;
+    let hi: u16 = hi
+        .parse()
+        .with_context(|| format!("port `{hi}` in `{spec}`"))?;
+    if lo == 0 || hi == 0 {
+        bail!("0 is not a port (`{spec}`)");
+    }
+    if hi < lo {
+        bail!("port range `{spec}` runs backwards");
+    }
+    let span = hi as usize - lo as usize + 1;
+    if span > MAX_FORWARD_SPAN {
+        bail!("port range `{spec}` covers {span} ports; {MAX_FORWARD_SPAN} is the most");
+    }
+    Ok((lo..=hi).collect())
+}
+
 /// Non-loopback IPv4 addresses of this host, for telling the user where to connect.
 ///
 /// A share bound to `0.0.0.0` is reachable at any of these; printing them beats printing
@@ -240,8 +300,9 @@ pub struct ShareConfig {
     #[serde(default = "default_expire_after")]
     pub expire_after: i64,
     /// Extra ports to proxy to `127.0.0.1:<port>`, for tunnel-using tools (scrcpy et al).
+    /// Each entry is a port (`27183`) or an inclusive range (`"27183-27199"`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub forward_ports: Vec<u16>,
+    pub forward_ports: Vec<PortSpec>,
 }
 
 /// One hour: long enough for a work session, short enough that forgetting is survivable.
@@ -293,7 +354,10 @@ impl ShareConfig {
 
         let targets = self.resolve_targets()?;
 
-        let mut forward_ports = self.forward_ports.clone();
+        let mut forward_ports = Vec::new();
+        for spec in &self.forward_ports {
+            forward_ports.extend(spec.expand()?);
+        }
         forward_ports.sort_unstable();
         forward_ports.dedup();
         if forward_ports.contains(&bind.port()) {
@@ -468,6 +532,72 @@ mod tests {
             ..Default::default()
         };
         assert!(both.resolve(Profile::Adb, false).is_err(), "all + targets is ambiguous");
+    }
+
+    #[test]
+    fn port_specs_accept_a_port_or_a_range() {
+        assert_eq!(parse_port_spec("27183").unwrap(), vec![27183]);
+        assert_eq!(parse_port_spec("27183-27185").unwrap(), vec![27183, 27184, 27185]);
+        assert_eq!(parse_port_spec(" 27183 - 27184 ").unwrap(), vec![27183, 27184]);
+        assert_eq!(parse_port_spec("5000-5000").unwrap(), vec![5000]);
+        // scrcpy's own default range fits.
+        assert_eq!(parse_port_spec("27183-27199").unwrap().len(), 17);
+    }
+
+    #[test]
+    fn port_specs_reject_nonsense() {
+        assert!(parse_port_spec("").is_err());
+        assert!(parse_port_spec("abc").is_err());
+        assert!(parse_port_spec("0").is_err());
+        assert!(parse_port_spec("27199-27183").is_err(), "backwards range");
+        // A whole-internet range is a typo, not a request.
+        assert!(parse_port_spec("1-65535").is_err());
+        let top = 100 + MAX_FORWARD_SPAN - 1;
+        assert_eq!(parse_port_spec(&format!("100-{top}")).unwrap().len(), MAX_FORWARD_SPAN);
+        assert!(parse_port_spec(&format!("100-{}", top + 1)).is_err());
+    }
+
+    #[test]
+    fn a_range_covers_the_port_scrcpy_actually_lands_on() {
+        // scrcpy takes the first free port in 27183:27199. Pinning one number loses silently
+        // when 27183 is busy — the tunnel opens on 27184 while the share proxies 27183.
+        let cfg = ShareConfig {
+            bind: Some("0.0.0.0:5939".to_string()),
+            all: true,
+            forward_ports: vec![PortSpec::Range("27183-27199".to_string())],
+            ..Default::default()
+        };
+        let ports = cfg.resolve(Profile::Adb, false).unwrap().forward_ports;
+        assert_eq!(ports.len(), 17);
+        assert!(ports.contains(&27183) && ports.contains(&27184) && ports.contains(&27199));
+    }
+
+    #[test]
+    fn overlapping_port_specs_collapse() {
+        // Two flags that overlap must not try to bind the same port twice.
+        let cfg = ShareConfig {
+            bind: Some("0.0.0.0:5939".to_string()),
+            all: true,
+            forward_ports: vec![
+                PortSpec::Range("27183-27185".to_string()),
+                PortSpec::Port(27184),
+                PortSpec::Port(27190),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve(Profile::Adb, false).unwrap().forward_ports,
+            vec![27183, 27184, 27185, 27190]
+        );
+    }
+
+    #[test]
+    fn config_accepts_both_port_forms() {
+        // A number and a quoted range must both parse, so existing config keeps working.
+        let cfg: ShareConfig =
+            serde_yaml::from_str("all: true\nforward_ports: [27183, \"28000-28002\"]\n").unwrap();
+        let ports = cfg.resolve(Profile::Adb, false).unwrap().forward_ports;
+        assert_eq!(ports, vec![27183, 28000, 28001, 28002]);
     }
 
     #[test]

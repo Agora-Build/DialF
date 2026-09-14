@@ -232,17 +232,21 @@ attached, so a host that gains a second phone won't start sharing it silently. S
 enforced per connection, not advertised: a device you didn't share can't be reached even with
 a valid token, and `adb kill-server` from B can't stop A's adb server.
 
-**scrcpy, `flutter run` and Android Studio need extra flags.** They tunnel through
+**scrcpy, `flutter run` and Android Studio need one extra flag.** They tunnel through
 `adb forward`, which opens its socket on the *sharing* host, so the tool on the other machine
-finds nothing to connect to. Share with `--forward-port 27183`, then on B:
+finds nothing to connect to. Share the range scrcpy picks from, then on B:
 
 ```sh
+# on A
+dialf devices share --target <serial> --forward-port 27183-27199
+
+# on B
 export ADB_SERVER_SOCKET=tcp:<A-address>:5939     # scrcpy has no -H flag
-scrcpy --port=27183 --tunnel-host=<A-address> --tunnel-port=27183
+scrcpy --tunnel-host=<A-address>
 ```
 
-All three port numbers must match — `--tunnel-port` alone only changes where scrcpy *connects*,
-not the port `adb forward` opens. Plain `adb` needs none of this.
+`ADB_SERVER_SOCKET` points adb-based tools at the share; without it they talk to B's own adb
+server and report no devices. Plain `adb` needs neither.
 
 Full walkthrough, including the Netbird setup and the security trade-offs:
 [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md).

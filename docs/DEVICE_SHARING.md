@@ -223,46 +223,93 @@ Note that the push succeeded — the share is fine; only the tunnel is in the wr
 
 ### Fix 1 — `--forward-port` (no SSH needed)
 
-Have the share proxy the tunnel port alongside the adb port:
-
 ```sh
 # on A
-dialf devices share --target R3CM40KGDVY --forward-port 27183
+dialf devices share --target R3CM40KGDVY --forward-port 27183-27199
 
 # on B
 export ADB_SERVER_SOCKET=tcp:<A-address>:5939
-scrcpy --port=27183 --tunnel-host=<A-address> --tunnel-port=27183
+scrcpy --tunnel-host=<A-address>
 ```
 
-**All three numbers must match**, and this is the easiest thing to get wrong:
+That is the whole thing. Give the range and scrcpy needs no port flags at all — the two
+sections below explain why, and what to do if you insist on a single port.
 
-| flag | what it sets |
-|---|---|
-| `--forward-port` (dialf) | the port A proxies to `127.0.0.1:<port>` |
-| `--port` (scrcpy) | the port `adb forward` opens **on A** — default 27183 |
-| `--tunnel-port` (scrcpy) | the port scrcpy **dials** on `--tunnel-host` |
+#### The flow, end to end
 
-`--tunnel-port` alone is not enough. It only redirects where scrcpy connects; `adb forward`
-keeps using `--port`, so with `--forward-port 28183 --tunnel-port 28183` and no `--port`, the
-tunnel sits on A's 27183 while dialf proxies 28183 — and scrcpy fails with
-`ERROR: Server connection failed` after successfully pushing its server. Check with
-`adb forward --list`, which shows the port `adb` actually opened.
+Two separate conversations, both started by B. A listens for both; B is the client in both.
 
-`--tunnel-host` points scrcpy at A instead of its own localhost, and implies
-`--force-adb-forward`. Repeat `--forward-port` for several ports.
+```
+   B  (scrcpy)                                  A  (phone attached)
+   ──────────                                   ───────────────────
 
-`ADB_SERVER_SOCKET` is required: scrcpy has no `-H`/`-P` flags, so without it scrcpy talks to
-the *local* adb server and reports `Could not find any ADB device` even though
-`adb -H <A> -P 5939 devices` works.
+ ① control — adb protocol
+   ADB_SERVER_SOCKET=tcp:A:5939
+        B:random ──────────────────────────►  A:5939        dialf   (listening)
+                                                 │ connects to
+                                                 ▼
+                                              127.0.0.1:5037  adb server (listening)
+                                                 │
+   "forward tcp:27183 → localabstract:scrcpy"    │  adb opens the tunnel entrance:
+                                                 ▼
+                                              127.0.0.1:27183  adb  (listening)
 
-On a **token** share, a forwarded port can't ask for the token — the tool opens it with a
-plain socket. It is gated on the peer's address instead: only a machine that already
-authenticated on the adb port may use it. That is weaker than the handshake (addresses can be
-spoofed, and a NAT makes several machines look like one), so treat a forward port as the
-looser half of a token share.
+ ② tunnel — raw bytes, no adb protocol
+   --tunnel-host=A  --tunnel-port=27183
+        B:random ──────────────────────────►  A:27183       dialf   (listening)
+                                                 │ connects to
+                                                 ▼
+                                              127.0.0.1:27183  adb ──► phone
+```
 
-`--forward-port` needs a network bind; it is refused on a loopback share, where `adb forward`
-already owns `127.0.0.1:<port>` and Fix 2 applies instead.
+Who does what:
+
+| | listens on | connects to | speaks |
+|---|---|---|---|
+| dialf (share) | `0.0.0.0:5939` | `127.0.0.1:5037` | adb protocol (gated, filtered) |
+| dialf (forward) | `<A's addresses>:27183` | `127.0.0.1:27183` | raw bytes, copied blind |
+| adb server | `127.0.0.1:5037` | the phone | adb protocol |
+| adb forward | `127.0.0.1:27183` | phone's `localabstract:scrcpy` | raw bytes |
+| scrcpy | nothing | ① `A:5939`, ② `A:27183` | both |
+
+**dialf never runs `adb forward`.** scrcpy asks the adb server to create it, over connection ①.
+dialf only carries the bytes. It cannot see which port adb chose, which is why a mismatch is
+invisible to it and shows up as a connection that goes nowhere.
+
+`ADB_SERVER_SOCKET` is what makes ① point at A. scrcpy has no `-H`/`-P` flags, so without it
+scrcpy talks to B's *own* adb server and reports `Could not find any ADB device` — even though
+`adb -H <A> -P 5939 devices` works, because that flag only redirects that one command.
+
+#### Why a range, and why it removes the port flags
+
+scrcpy takes the first free port in `--port` (default `27183:27199`). So the port `adb forward`
+opens is not fixed — if 27183 is busy on A, scrcpy moves to 27184.
+
+- **`--forward-port 27183-27199`** proxies every port in the range to its own loopback twin.
+  Wherever scrcpy lands is covered, and since `--tunnel-port` defaults to "the port I used",
+  scrcpy dials the same one. No port flags needed on either side.
+- **`--forward-port 27183`** is a bet that 27183 is free. If it isn't, the tunnel opens on
+  27184 while dialf proxies 27183 and scrcpy fails with `Server connection failed` *after*
+  successfully pushing its server. Pinning a single port means pinning it in all three places:
+
+  ```sh
+  dialf devices share --target X --forward-port 28183
+  scrcpy --port=28183 --tunnel-host=<A> --tunnel-port=28183
+  ```
+
+| flag | belongs to | what it sets |
+|---|---|---|
+| `--forward-port` | dialf | which port(s) A proxies to `127.0.0.1:<same>` |
+| `--port` | scrcpy | which port `adb forward` opens **on A** |
+| `--tunnel-port` | scrcpy | which port scrcpy **dials** on `--tunnel-host` |
+
+`adb forward --list` shows the port adb actually opened — the quickest way to see a mismatch.
+
+Ranges are capped at 64 ports. On a **token** share a forwarded port can't ask for the token
+(the tool opens it with a plain socket), so it is gated on the peer's address instead: only a
+machine that already authenticated on the adb port may use it. `--forward-port` needs a network
+bind and is refused on a loopback share, where `adb forward` already owns `127.0.0.1:<port>`
+and Fix 2 applies instead.
 
 ### Fix 2 — SSH tunnel the port
 

@@ -168,10 +168,15 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   proxy — which dials `127.0.0.1:<port>` to find the tunnel — answers its own call and
   recurses, spawning a connection per hop from a single external connect. Wildcard binds are
   expanded to this host's concrete addresses (`forward_bind_addrs`).
-- **scrcpy needs `--port` as well as `--tunnel-port`.** `--tunnel-port` only changes where
-  scrcpy *connects*; `adb forward` still uses `--port` (default 27183). Mismatched, the tunnel
-  sits on one port while dialf proxies another and scrcpy fails with "Server connection
-  failed" *after* a successful server push. `adb forward --list` shows the truth.
+- **scrcpy picks its tunnel port from a range** (`--port`, default 27183:27199), so a single
+  `--forward-port` is a bet that 27183 is free — lose it and the tunnel opens on 27184 while
+  dialf proxies 27183, failing with "Server connection failed" *after* a successful server
+  push. Share the range (`--forward-port 27183-27199`) and scrcpy needs no port flags at all,
+  since `--tunnel-port` defaults to the port it used. Pin a single port and it must be set in
+  all three places (dialf `--forward-port`, scrcpy `--port` *and* `--tunnel-port`) —
+  `--tunnel-port` alone only moves where scrcpy connects. `adb forward --list` shows the truth.
+- **dialf never runs `adb forward`** — scrcpy asks the adb server to, over the proxied control
+  connection. The forward port is a blind byte copy, so a port mismatch is invisible to dialf.
 - **Unqualified `host:<cmd>` requests need scoping.** `host:features`, `host:get-state` and
   friends resolve against "any transport" on the real server, which fails outright when the
   host has several devices attached — even though our filtered list showed the peer one. They

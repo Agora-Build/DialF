@@ -151,10 +151,14 @@ enum DevicesAction {
         #[arg(long, value_name = "SECONDS")]
         expire_after: Option<i64>,
         /// Also proxy this port to 127.0.0.1:<port> on this host, for tools whose tunnel
-        /// `adb forward` opens here rather than on the remote machine — scrcpy
-        /// (`--tunnel-port`), `flutter run`, Android Studio. Repeat for several.
-        #[arg(long = "forward-port", value_name = "PORT")]
-        forward_ports: Vec<u16>,
+        /// `adb forward` opens here rather than on the remote machine — scrcpy,
+        /// `flutter run`, Android Studio.
+        ///
+        /// Takes a port or an inclusive range: `--forward-port 27183-27199` covers scrcpy's
+        /// whole default range, so it still works when 27183 is busy and scrcpy moves up.
+        /// Repeat the flag for several.
+        #[arg(long = "forward-port", value_name = "PORT|START-END")]
+        forward_ports: Vec<String>,
         /// Listen address; overrides `adb_share.bind` for this run only.
         #[arg(long)]
         bind: Option<String>,
@@ -627,7 +631,14 @@ async fn run_devices_action(action: DevicesAction) -> anyhow::Result<()> {
                     all,
                     token,
                     expire_after,
-                    forward_ports,
+                    // Expanded here so a bad range is reported before the daemon is involved.
+                    forward_ports: {
+                        let mut ports = Vec::new();
+                        for spec in &forward_ports {
+                            ports.extend(dialf::share::parse_port_spec(spec)?);
+                        }
+                        ports
+                    },
                 }
             };
             let resp = call(&socket, op).await?;
@@ -816,17 +827,34 @@ fn print_share_result(data: Option<&serde_json::Value>) {
     // Tunnel-using tools (scrcpy, flutter run) need the port adb opened *here*, not on the
     // remote machine — this is what --forward-port exposes.
     if let Some(ports) = get("forward_ports").as_array() {
-        let list: Vec<String> = ports.iter().filter_map(|v| v.as_u64()).map(|p| p.to_string()).collect();
+        let nums: Vec<u64> = ports.iter().filter_map(|v| v.as_u64()).collect();
+        let list: Vec<String> = nums.iter().map(|p| p.to_string()).collect();
         if !list.is_empty() {
-            println!("\n  forwarding {} -> 127.0.0.1 on this host", list.join(", "));
-            if let Some(first) = list.first() {
-                // `--port` matters as much as `--tunnel-port`: the first is the port
-                // `adb forward` opens on *this* host (what we proxy), the second is the port
-                // scrcpy dials on the far side. Leave --port out and adb keeps its default
-                // 27183 while scrcpy dials the forwarded one, and nothing meets in the middle.
-                println!("    scrcpy --port={first} --tunnel-host={host} --tunnel-port={first}");
-                println!("    (needs ADB_SERVER_SOCKET set as above — scrcpy has no -H flag)");
+            // Contiguous runs print as a range; listing 17 numbers helps nobody.
+            let shown = if nums.len() > 2 && nums.last().unwrap() - nums[0] + 1 == nums.len() as u64
+            {
+                format!("{}-{}", nums[0], nums.last().unwrap())
+            } else {
+                list.join(", ")
+            };
+            println!("\n  forwarding {shown} -> 127.0.0.1 on this host");
+            match (nums.len(), nums.first()) {
+                // A range covers wherever scrcpy lands, so it needs neither port flag: it
+                // picks a free port for `adb forward` and dials that same one by default.
+                (n, Some(_)) if n > 1 => {
+                    println!("    scrcpy --tunnel-host={host}");
+                }
+                // A single port is a bet that scrcpy lands exactly there, so both flags have
+                // to be pinned: `--port` is the port `adb forward` opens on *this* host,
+                // `--tunnel-port` is the one scrcpy dials. Leave --port out and adb keeps its
+                // default while scrcpy dials the forwarded one, and they never meet.
+                (_, Some(p)) => {
+                    println!("    scrcpy --port={p} --tunnel-host={host} --tunnel-port={p}");
+                    println!("    (a range like --forward-port 27183-27199 needs neither flag)");
+                }
+                _ => {}
             }
+            println!("    (needs ADB_SERVER_SOCKET set as above — scrcpy has no -H flag)");
             if authed {
                 println!("  (only addresses that authenticated on {port} may use these)");
             }
