@@ -305,7 +305,9 @@ opens is not fixed — if 27183 is busy on A, scrcpy moves to 27184.
 
 `adb forward --list` shows the port adb actually opened — the quickest way to see a mismatch.
 
-Ranges are capped at 64 ports. On a **token** share a forwarded port can't ask for the token
+`--forward-port` takes either separator, so scrcpy's own `--port` value can be pasted across
+unchanged: `27183-27199` and `27183:27199` mean the same thing. Neither is a `public:local`
+remap — there is no such feature. Ranges are capped at 64 ports. On a **token** share a forwarded port can't ask for the token
 (the tool opens it with a plain socket), so it is gated on the peer's address instead: only a
 machine that already authenticated on the adb port may use it. `--forward-port` needs a network
 bind and is refused on a loopback share, where `adb forward` already owns `127.0.0.1:<port>`

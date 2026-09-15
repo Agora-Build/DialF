@@ -139,11 +139,14 @@ impl std::str::FromStr for Upstream {
 /// and it is likelier a typo than an intention.
 pub const MAX_FORWARD_SPAN: usize = 64;
 
-/// A `--forward-port` value: one port, or an inclusive `start-end` range.
+/// A `--forward-port` value: one port, or an inclusive range.
 ///
 /// Ranges exist because scrcpy picks the first free port in `--port` (default 27183:27199).
 /// Pinning a single number bets that 27183 is free, and loses silently when it is not — the
 /// tunnel opens on 27184 while the share proxies 27183.
+///
+/// Both `27183-27199` and `27183:27199` are accepted, so scrcpy's own `--port` value can be
+/// pasted across without translating the separator.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
@@ -169,10 +172,14 @@ impl PortSpec {
     }
 }
 
-/// Parse `27183` or `27183-27199` into the ports it covers.
+/// Parse `27183`, `27183-27199` or `27183:27199` into the ports it covers.
+///
+/// The colon form is scrcpy's own (`--port=27183:27199`); accepting it means a value can move
+/// between the two tools unchanged. It does *not* mean `public:local` remapping — there is no
+/// such feature, and a range that silently became a remap would be worse than an error.
 pub fn parse_port_spec(spec: &str) -> anyhow::Result<Vec<u16>> {
     let spec = spec.trim();
-    let (lo, hi) = match spec.split_once('-') {
+    let (lo, hi) = match spec.split_once(['-', ':']) {
         Some((a, b)) => (a.trim(), b.trim()),
         None => (spec, spec),
     };
@@ -542,6 +549,19 @@ mod tests {
         assert_eq!(parse_port_spec("5000-5000").unwrap(), vec![5000]);
         // scrcpy's own default range fits.
         assert_eq!(parse_port_spec("27183-27199").unwrap().len(), 17);
+    }
+
+    #[test]
+    fn scrcpy_s_own_colon_range_is_accepted_verbatim() {
+        // `--port=27183:27199` can be pasted straight across from scrcpy's docs.
+        assert_eq!(
+            parse_port_spec("27183:27199").unwrap(),
+            parse_port_spec("27183-27199").unwrap()
+        );
+        assert_eq!(parse_port_spec("27183:27184").unwrap(), vec![27183, 27184]);
+        assert_eq!(parse_port_spec(" 5000 : 5001 ").unwrap(), vec![5000, 5001]);
+        // Both separators are ranges; neither means "public:local" remapping.
+        assert!(parse_port_spec("28183:27183").is_err(), "backwards, not a remap");
     }
 
     #[test]

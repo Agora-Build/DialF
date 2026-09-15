@@ -175,6 +175,8 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   since `--tunnel-port` defaults to the port it used. Pin a single port and it must be set in
   all three places (dialf `--forward-port`, scrcpy `--port` *and* `--tunnel-port`) —
   `--tunnel-port` alone only moves where scrcpy connects. `adb forward --list` shows the truth.
+  `--forward-port` accepts both `a-b` and scrcpy's own `a:b`, so a range can be pasted between
+  the two tools; the colon is *not* a `public:local` remap, and adding one later would collide.
 - **dialf never runs `adb forward`** — scrcpy asks the adb server to, over the proxied control
   connection. The forward port is a blind byte copy, so a port mismatch is invisible to dialf.
 - **Unqualified `host:<cmd>` requests need scoping.** `host:features`, `host:get-state` and
