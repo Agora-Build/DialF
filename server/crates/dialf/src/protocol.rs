@@ -304,6 +304,10 @@ pub enum ControlOp {
         steps: Option<Vec<crate::jobs::schema::Step>>,
         #[serde(default)]
         device: Option<String>,
+        /// Label for this run's recordings: `dialf-job-<name>-<timestamp>-tx.wav`. Sanitised
+        /// daemon-side, since it becomes part of a filename.
+        #[serde(default)]
+        name: Option<String>,
     },
     /// Register a foreground auto-answer override: answer `numbers` with the job at `path`
     /// (absolute), taking precedence over `config.autoanswer`. The override lives only as

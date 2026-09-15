@@ -822,6 +822,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             path,
             steps,
             device,
+            name,
         } => {
             let job = match (path, steps) {
                 (Some(p), _) => load_job_file(&p)?,
@@ -855,6 +856,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 state.job_cancel.clone(),
                 state.job_force.clone(),
                 state.job_abort.clone(),
+                name,
             )
             .await?;
             let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
@@ -1128,6 +1130,45 @@ fn job_needs_phone(job: &[schema::Step]) -> bool {
     })
 }
 
+/// Longest label we keep in a recording filename. Long enough to be descriptive, short
+/// enough that the name stays readable next to the job prefix and timestamp.
+pub const MAX_LABEL_LEN: usize = 40;
+
+/// Recording session name: `dialf-job[-<label>]-<timestamp>`.
+///
+/// The label is whatever the caller passed to `dialf run --name`, so recordings from a run can
+/// be found by what it was for rather than by reading timestamps. Omitted when absent or when
+/// nothing survives sanitising, which keeps the old `dialf-job-<timestamp>` shape.
+pub fn session_name(label: Option<&str>, ts: i64) -> String {
+    match label.and_then(sanitize_label) {
+        Some(l) => format!("dialf-job-{l}-{ts}"),
+        None => format!("dialf-job-{ts}"),
+    }
+}
+
+/// Reduce a user-supplied label to something safe to put in a filename.
+///
+/// This arrives over the control socket and becomes part of a path, so anything that could
+/// steer it out of `record_dir` — separators, `..` — has to go. Only `[A-Za-z0-9._-]` is
+/// kept; every other run of characters collapses to a single `-`.
+///
+/// Enforced here rather than only in the CLI: the control socket has no auth beyond file
+/// permissions, so the daemon cannot assume its caller already checked.
+pub fn sanitize_label(label: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    // Leading/trailing dots would make a hidden file or a bare extension; dashes just read badly.
+    let cleaned: String = out.trim_matches(['-', '.']).chars().take(MAX_LABEL_LEN).collect();
+    let cleaned = cleaned.trim_matches(['-', '.']).to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 /// Run a parsed job against a device, recording when configured. The duplex session is started
 /// inside the blocking task so the capture thread records rx before the first step runs; the
 /// recording is always finalized (even on job error) so mix.wav is written and both legs padded.
@@ -1139,6 +1180,7 @@ pub async fn run_job_on_device(
     cancel: Arc<AtomicBool>,
     force: Arc<AtomicBool>,
     abort: Arc<AtomicBool>,
+    label: Option<String>,
 ) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
     let engine = state.engine.clone();
     // A relative `record_dir` resolves against the config file's dir (like autoanswer job paths),
@@ -1161,7 +1203,7 @@ pub async fn run_job_on_device(
             Some(dir) => {
                 Some(engine.start_duplex(
                     dir,
-                    format!("dialf-job-{}", now_ms()),
+                    session_name(label.as_deref(), now_ms()),
                     mix_recording,
                     mix_tx_left,
                 )?)
@@ -1471,6 +1513,50 @@ mod tests {
             voicemail_results: Arc::new(Mutex::new(HashMap::new())),
             share: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn a_label_goes_between_the_job_prefix_and_the_timestamp() {
+        assert_eq!(session_name(Some("smoke"), 1700), "dialf-job-smoke-1700");
+        assert_eq!(session_name(None, 1700), "dialf-job-1700");
+        // Nothing usable in the label -> the plain shape, not a stray dash.
+        assert_eq!(session_name(Some("   "), 1700), "dialf-job-1700");
+        assert_eq!(session_name(Some("///"), 1700), "dialf-job-1700");
+    }
+
+    #[test]
+    fn a_label_cannot_escape_the_recording_directory() {
+        // The label arrives over the control socket and becomes part of a path, so separators
+        // and parent hops must not survive.
+        for evil in ["../../etc/passwd", "/abs/path", "a/b", "..", "....//"] {
+            let name = session_name(Some(evil), 1700);
+            assert!(!name.contains('/'), "{evil} kept a separator: {name}");
+            assert!(!name.contains(".."), "{evil} kept a parent hop: {name}");
+            assert!(std::path::Path::new(&name).components().count() == 1, "{evil} -> {name}");
+        }
+    }
+
+    #[test]
+    fn labels_are_reduced_to_filename_safe_text() {
+        assert_eq!(sanitize_label("call test 1").as_deref(), Some("call-test-1"));
+        assert_eq!(sanitize_label("a  b").as_deref(), Some("a-b"), "runs collapse");
+        assert_eq!(sanitize_label("keep.me_and-these").as_deref(), Some("keep.me_and-these"));
+        // A leading dot would make the recording a hidden file.
+        assert_eq!(sanitize_label(".hidden").as_deref(), Some("hidden"));
+        assert_eq!(sanitize_label("-x-").as_deref(), Some("x"));
+        assert_eq!(sanitize_label(""), None);
+        assert_eq!(sanitize_label("🙂"), None, "nothing usable survives");
+    }
+
+    #[test]
+    fn a_long_label_is_truncated_but_still_tidy() {
+        let long = "x".repeat(200);
+        let cut = sanitize_label(&long).unwrap();
+        assert_eq!(cut.len(), MAX_LABEL_LEN);
+        // Truncation must not leave the name ending in a separator.
+        let messy = format!("{}-tail", "y".repeat(MAX_LABEL_LEN - 1));
+        let cut = sanitize_label(&messy).unwrap();
+        assert!(!cut.ends_with('-'), "got: {cut}");
     }
 
     #[test]

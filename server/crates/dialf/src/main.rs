@@ -81,6 +81,11 @@ enum Command {
         /// job (overriding config.yaml) and reverts on exit. Otherwise the job runs once.
         #[arg(long, value_delimiter = ',')]
         autoanswer: Vec<String>,
+        /// Label this run's recordings: `dialf-job-<name>-<timestamp>-tx.wav`. Without it the
+        /// name is just `dialf-job-<timestamp>-…`. Characters outside [A-Za-z0-9._-] become
+        /// `-`, so the label is always a safe filename.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
@@ -495,6 +500,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             device,
             autoanswer,
+            name,
         } => {
             // dialfd reads the job file from *its* working directory (often a service with
             // cwd=/), so resolve the path against the CLI's cwd before sending it.
@@ -502,8 +508,23 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("job file not found: {}", path.display()))?
                 .to_string_lossy()
                 .to_string();
+            // Say so when the label had to be rewritten — the recordings are named after the
+            // result, and silently getting a different name than you asked for is worse than
+            // a one-line note.
+            if let Some(asked) = name.as_deref() {
+                match dialf::daemon::sanitize_label(asked) {
+                    Some(clean) if clean != asked => {
+                        eprintln!("note: --name \"{asked}\" -> \"{clean}\" (allowed: A-Z a-z 0-9 . _ -)");
+                    }
+                    None => anyhow::bail!(
+                        "--name \"{asked}\" has nothing usable in it (allowed: A-Z a-z 0-9 . _ -)"
+                    ),
+                    _ => {}
+                }
+            }
             if autoanswer.is_empty() {
                 let op = ControlOp::JobRun {
+                    name,
                     path: Some(abs),
                     steps: None,
                     device,

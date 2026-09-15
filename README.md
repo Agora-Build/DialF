@@ -177,7 +177,7 @@ dialf voicemail off <device> [--sim N]                  # disable carrier voicem
 dialf voicemail on  <device> [--number <vm#>] [--sim N] # re-enable
 dialf mmi <device> <code> [--sim N]            # (advanced) raw MMI/USSD code, returns the reply
 
-dialf run  <job.yaml> [--device <id>]          # run a scripted job once
+dialf run  <job.yaml> [--device <id>] [--name <label>]   # run a scripted job once
 dialf run  <job.yaml> --autoanswer <numbers>   # serve: answer those numbers with this job (Ctrl-C reverts)
 dialf play <file>                              # inject audio out the sound card
 dialf --version                                # CLI + running daemon (dialfd) versions

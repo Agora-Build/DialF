@@ -114,6 +114,10 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **The npm launcher must stay transparent**: async `spawn`, survive SIGINT, forward
   SIGTERM/SIGHUP, mirror the child's exit code. `spawnSync` broke Ctrl+C cancel for every npm
   user (the wrapper died, orphaning the binary so the second Ctrl+C could never reach it).
+- Recordings are named `dialf-job[-<label>]-<timestamp>-{rx,tx,mix}.wav`; the label comes from
+  `dialf run --name`. It is sanitised **in the daemon** (`sanitize_label`, `[A-Za-z0-9._-]`
+  only) because it becomes a path component and the control socket has no auth beyond file
+  permissions — the CLI's warning is a courtesy, not the boundary.
 - **Ctrl+C on `dialf run`**: 1st = graceful (current `audio.play`/`wait` finishes), 2nd =
   force-stop the current step (recordings still saved), 3rd = quit the client (the job keeps
   running in the daemon). The job runs **in the daemon**, not the client.

@@ -430,7 +430,17 @@ async fn trigger_autoanswer(
         let force = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         state.job_abort.store(false, std::sync::atomic::Ordering::SeqCst);
         let abort = state.job_abort.clone();
-        match daemon::run_job_on_device(&state, device_id.clone(), job, true, cancel, force, abort)
+        // Inbound auto-answer has no operator to name the run; the timestamp stands alone.
+        match daemon::run_job_on_device(
+            &state,
+            device_id.clone(),
+            job,
+            true,
+            cancel,
+            force,
+            abort,
+            None,
+        )
             .await
         {
             Ok((outcomes, _)) => {

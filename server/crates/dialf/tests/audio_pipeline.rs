@@ -312,3 +312,35 @@ fn vad_gets_16k_mono_from_a_48k_stereo_capture() {
     assert_eq!((rxr.spec().sample_rate, rxr.spec().channels), (48_000, 2), "rx stays native");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The recording filenames a `dialf run --name` produces, end to end through the recorder.
+#[test]
+fn a_named_run_writes_recognisable_recordings() {
+    use dialf::audio::record::DuplexRecorder;
+    use dialf::daemon::session_name;
+
+    let dir = std::env::temp_dir().join(format!("dialf-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // `dialf run --name "call test #2!"` at that timestamp.
+    let session = session_name(Some("call test #2!"), 1_700_000_000_000);
+    assert_eq!(session, "dialf-job-call-test-2-1700000000000");
+
+    let mut rec = DuplexRecorder::new(&dir, session, true, true).unwrap();
+    rec.push_rx(&[0i16; 160]).unwrap();
+    rec.push_tx_at(0, &[0i16; 160]).unwrap();
+    let out = rec.finish().unwrap();
+
+    for path in [&out.rx, &out.tx, out.mix.as_ref().unwrap()] {
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("dialf-job-call-test-2-1700000000000-"), "got {name}");
+        assert!(path.exists(), "missing {}", path.display());
+    }
+    assert!(out.rx.to_string_lossy().ends_with("-rx.wav"), "got {}", out.rx.display());
+    assert!(out.tx.to_string_lossy().ends_with("-tx.wav"), "got {}", out.tx.display());
+
+    // Unnamed runs keep the old shape, so existing tooling that globs them still matches.
+    assert_eq!(session_name(None, 1_700_000_000_000), "dialf-job-1700000000000");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
