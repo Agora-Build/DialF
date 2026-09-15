@@ -64,6 +64,27 @@ audio:
   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "MiniFuse 2", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1", "gain", "20"]
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
 
+  # --- Example: the phone feeds the RIGHT channel, and you want only that -----------------
+  # A plain stereo bridge (phone -> line-in) usually lands on one channel. `remix 2` takes
+  # input channel 2 (sox counts from 1, so 2 = right) and emits a single channel, so set
+  # `channels: 1` to match — the recorder writes exactly what the capture tool gives it, so
+  # rx.wav comes out mono with nothing from the left channel in it.
+  #
+  # Confirm which channel your phone is actually on before trusting it (talk into the phone):
+  #   sox -t coreaudio "Your Card" -c 2 -t wav /tmp/probe.wav trim 0 4
+  #   for ch in 1 2; do printf "ch$ch: "; sox /tmp/probe.wav -n remix $ch stat 2>&1 | grep RMS; done
+  # The loud one is the phone. Then after a run: `soxi recordings/*-rx.wav` should say
+  # "Channels 1".
+  #
+  #   channels: 1
+  #   mix_recording: false     # two files only: -rx.wav and -tx.wav, no -mix.wav
+  #   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "Your Card", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "2"]
+  #
+  # `remix 2` errors on a card that only presents one input channel — that failure shows up
+  # as the capture tool's stderr in the daemon log, not as a silent empty recording.
+  # tx.wav is still written either way (same length, silent if the job never plays audio);
+  # there is no switch to suppress a leg.
+
   # --- Alternative: BlackHole eval — test an agent over virtual audio (no phone, no card) ---
   # Test a local AI agent entirely in software: DialF plays prompts into BlackHole 2ch (the
   # agent's input) and captures the agent's replies from BlackHole 16ch (its output), recording
