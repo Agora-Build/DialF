@@ -86,6 +86,11 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **NixOS has none of apt/dnf/pacman/zypper**, so the install offer finds nothing. It gets a
   hint naming configuration.nix / home.packages / `nix-shell -p` instead of a message about a
   "distro package manager" it does not have.
+- **The service does not inherit your PATH.** The unit sets it explicitly, and it must list
+  `/run/current-system/sw/bin` (+ `%h/.nix-profile/bin` for a user unit) or NixOS finds none
+  of its tools — a bare-name `argv[0]` or an auto-detected tool then works in the shell and
+  fails in the daemon. An absolute `argv[0]` sidesteps PATH entirely, which is why import
+  prefers whatever `which` resolved over the bare name.
 - After an npm upgrade the LaunchAgent points at a **deleted** versioned binary → launchd
   crash-loops it (`EX_CONFIG`). `dialf import` self-heals this by re-running `service install`.
 

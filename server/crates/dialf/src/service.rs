@@ -179,7 +179,25 @@ fn launchd_plist(exe: &str, config: Option<&str>, scope: Scope) -> String {
     )
 }
 
+/// PATH for the service, which does **not** inherit the user's.
+///
+/// The FHS directories cover mainstream distros. NixOS has none of its packages there —
+/// system packages live in `/run/current-system/sw/bin` and profiles in
+/// `~/.nix-profile/bin` — so a tool that works in the shell would be unfindable in the
+/// daemon, whether pinned by bare name or auto-detected. Harmless to list on a distro that
+/// has no such directories.
+fn service_path(scope: Scope) -> String {
+    let mut dirs = vec!["/run/current-system/sw/bin"];
+    if scope == Scope::User {
+        // %h is expanded by systemd in user units.
+        dirs.push("%h/.nix-profile/bin");
+    }
+    dirs.extend(["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
+    dirs.join(":")
+}
+
 fn systemd_unit(exe: &str, config: Option<&str>, scope: Scope) -> String {
+    let path = service_path(scope);
     let mut exec = format!("{exe} daemon");
     if let Some(c) = config {
         exec.push_str(&format!(" --config {c}"));
@@ -201,7 +219,7 @@ Wants=network-online.target
 ExecStart={exec}
 Restart=always
 RestartSec=2
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Environment=PATH={path}
 
 [Install]
 WantedBy={install_target}
@@ -458,6 +476,31 @@ fn libc_getuid() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_service_path_covers_nixos_as_well_as_fhs() {
+        // The unit does not inherit the user's PATH. On NixOS nothing lives in the FHS
+        // directories, so a tool that works in the shell would be unfindable in the daemon.
+        let user = service_path(Scope::User);
+        assert!(user.starts_with("/run/current-system/sw/bin"), "{user}");
+        assert!(user.contains("%h/.nix-profile/bin"), "{user}");
+        assert!(user.contains("/usr/bin"), "FHS must still be covered: {user}");
+
+        // A system unit has no %h to expand, so it must not claim one.
+        let system = service_path(Scope::System);
+        assert!(!system.contains("%h"), "{system}");
+        assert!(system.contains("/run/current-system/sw/bin"), "{system}");
+        assert!(system.contains("/usr/bin"), "{system}");
+    }
+
+    #[test]
+    fn the_systemd_unit_embeds_that_path() {
+        let unit = systemd_unit("/usr/bin/dialf", None, Scope::User);
+        assert!(
+            unit.contains(&format!("Environment=PATH={}", service_path(Scope::User))),
+            "{unit}"
+        );
+    }
+
     use super::*;
 
     #[test]
