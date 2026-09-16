@@ -31,6 +31,10 @@ pub struct ExportReport {
     pub zip_path: PathBuf,
     pub entries: Vec<(String, u64)>,
     pub warnings: Vec<String>,
+    /// The config file that went into the bundle, canonicalized. Reported so a caller can
+    /// check it against the one the daemon actually loaded — a folder's own `config.yaml`
+    /// wins over the default path, and it may be a stale leftover.
+    pub config_path: PathBuf,
 }
 
 /// Bundle `dir` (scripts + samples) and the config into a zip at `out`.
@@ -225,6 +229,7 @@ pub fn export(dir: &Path, out: Option<PathBuf>, config: Option<PathBuf>) -> Resu
         zip_path,
         entries: listing,
         warnings,
+        config_path,
     })
 }
 

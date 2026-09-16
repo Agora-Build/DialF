@@ -124,6 +124,10 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **mDNS**: a loopback-bound daemon must not advertise, and every daemon start reaps
   *orphaned* advertisers (`ppid == 1`) of any instance name — killed scratch daemons used to
   leave ghost endpoints luring phones for weeks.
+- `dialf export` picks its config as `--config` > `<dir>/config.yaml` > `~/.config/dialf/`.
+  A folder's own copy therefore wins over the one the daemon is actually running, and can be
+  a stale leftover — export asks `server.info` and prints a note when the two differ rather
+  than changing the precedence, which would break anyone relying on it.
 - Paths in config/job files may be absolute or relative; relative resolves against **that
   file's own directory** (`resolve_path_under`), never the daemon's CWD (services run `cwd=/`).
 - Install scope decides socket sharing: `--user` = private per-user socket; system install =

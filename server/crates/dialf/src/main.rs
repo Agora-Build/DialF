@@ -568,6 +568,7 @@ async fn main() -> anyhow::Result<()> {
                 "  {} file(s), import on another machine with: dialf import <folder>",
                 report.entries.len()
             );
+            warn_if_not_the_live_config(&report.config_path).await;
             Ok(())
         }
         Command::Import {
@@ -703,6 +704,36 @@ fn resolve_share_token(flag: Option<String>) -> anyhow::Result<String> {
         "no share token — pass --token <dvs_…> or set $DIALF_SHARE_TOKEN. The host prints \
          the token once, when it runs `dialf devices share --token`."
     )
+}
+
+/// Say so when the bundled config is not the one the running daemon loaded.
+///
+/// A folder's own `config.yaml` takes precedence over the default path, so a stale leftover
+/// there is bundled in preference to the config actually in use — producing a zip that looks
+/// right and reproduces a setup nobody is running. Best-effort: no daemon, nothing to compare.
+async fn warn_if_not_the_live_config(bundled: &Path) {
+    let socket = Config::resolve_client_socket();
+    let Ok(resp) = call(&socket, ControlOp::ServerInfo).await else {
+        return;
+    };
+    let Some(live) = resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("config_path"))
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    let live_canon = std::fs::canonicalize(live).unwrap_or_else(|_| PathBuf::from(live));
+    if live_canon == bundled {
+        return;
+    }
+    eprintln!(
+        "\nnote: the running dialfd uses {}, but this bundle has {}",
+        live_canon.display(),
+        bundled.display()
+    );
+    eprintln!("      to bundle the running one: dialf export <dir> --config {live}");
 }
 
 /// Show what `--target` could name, for the error path when nothing was named.
