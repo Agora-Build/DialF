@@ -350,6 +350,47 @@ pub(crate) fn rewrite_linux_sox_commands(
     changed
 }
 
+/// Drop `argv[0]` paths that cannot work on this machine down to the bare tool name.
+///
+/// An imported bundle carries the tool path from the machine that built it, so a macOS
+/// config landing on Linux keeps `/opt/homebrew/bin/sox` — which fails with "No such file or
+/// directory" forever, even after the user installs sox. A bare name resolves through PATH
+/// as soon as the tool exists. Only absolute paths that are missing *here* are touched.
+///
+/// Returns `(key, old argv[0], new argv[0])` for each command changed.
+pub(crate) fn rewrite_unusable_tool_paths(
+    doc: &mut serde_yaml::Value,
+    edits: &mut Vec<(String, String)>,
+) -> Vec<(&'static str, String, String)> {
+    let mut changed = Vec::new();
+    for key in ["capture_cmd", "playback_cmd"] {
+        let Some(mut argv) = audio_argv(doc, key) else {
+            continue;
+        };
+        let Some(argv0) = argv.first().cloned() else {
+            continue;
+        };
+        let path = Path::new(&argv0);
+        if !path.is_absolute() || path.exists() {
+            continue;
+        }
+        let Some(base) = path.file_name().map(|b| b.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        // A tool present under a different prefix is better named outright.
+        let replacement = which::which(&base)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(base);
+        if replacement == argv0 {
+            continue;
+        }
+        argv[0] = replacement.clone();
+        set_audio_argv(doc, edits, key, &argv);
+        changed.push((key, argv0, replacement));
+    }
+    changed
+}
+
 fn check_shared_key(
     doc: &mut serde_yaml::Value,
     edits: &mut Vec<(String, String)>,
@@ -401,7 +442,7 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
     writeln!(p.out, "{key} tool {argv0} not found on this machine")?;
     let Some(pkg) = base.as_deref().and_then(package_for) else {
         writeln!(p.out, "no known package provides `{argv0}` — install it manually")?;
-        return Ok(None);
+        return fallback_to_basename(argv0, base, key, p);
     };
     if offer_install(p, pkg)? {
         // Re-verify after the install and say so: the pinned path itself may now exist
@@ -418,7 +459,30 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
         }
         writeln!(p.out, "{key} tool still not found after the install — fix the config manually")?;
     }
-    Ok(None)
+    fallback_to_basename(argv0, base, key, p)
+}
+
+/// Drop an unusable absolute path down to the bare tool name.
+///
+/// A path from the machine that built the bundle (`/opt/homebrew/bin/sox` imported onto
+/// Linux) cannot work here however the tool is later installed — the run fails with "No such
+/// file or directory" even once sox is present. The bare name resolves through PATH the
+/// moment it is. Only worth doing for an absolute path: a name is already a PATH lookup, and
+/// rewriting it to itself would just print a confusing no-op.
+fn fallback_to_basename(
+    argv0: &str,
+    base: Option<String>,
+    key: &str,
+    p: &mut Prompter<'_>,
+) -> Result<Option<String>> {
+    let Some(base) = base.filter(|b| Path::new(argv0).is_absolute() && b != argv0) else {
+        return Ok(None);
+    };
+    writeln!(
+        p.out,
+        "{key} tool: using `{base}` instead of {argv0}, so it resolves via PATH once installed"
+    )?;
+    Ok(Some(base))
 }
 
 /// Which package provides `tool` on this platform, for the install offer. `None` = not
@@ -460,6 +524,14 @@ fn offer_install(p: &mut Prompter<'_>, pkg: &str) -> Result<bool> {
             "{}",
             if cfg!(target_os = "macos") {
                 format!("install it manually (e.g. install Homebrew, then: brew install {pkg})")
+            } else if which::which("nix-env").is_ok() || which::which("nix").is_ok() {
+                // NixOS has none of the four imperative managers above. Packages are usually
+                // declared in configuration.nix / home-manager rather than installed ad hoc,
+                // so point at both routes instead of guessing which one this machine uses.
+                format!(
+                    "install it manually — add `{pkg}` to configuration.nix or home.packages, \
+                     or for a one-off: nix-shell -p {pkg}"
+                )
             } else {
                 format!("install it manually with your distro's package manager (package: {pkg})")
             }
@@ -532,6 +604,50 @@ fn set_top_level_str(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive `ensure_tool` with scripted answers and capture what it printed.
+    fn run_ensure_tool(argv0: &str, answers: &str) -> (Option<String>, String) {
+        let mut input = std::io::Cursor::new(answers.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let mut p = Prompter {
+            input: &mut input,
+            out: &mut out,
+        };
+        let got = ensure_tool(argv0, "capture_cmd", &mut p).unwrap();
+        (got, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    #[test]
+    fn a_foreign_tool_path_is_reduced_to_the_bare_name() {
+        // Importing a macOS bundle onto Linux: /opt/homebrew/bin/sox cannot exist here, and
+        // no package manager offer can make it exist. Keeping the path leaves a config that
+        // fails with "No such file or directory" even after the user installs sox; the bare
+        // name resolves through PATH the moment it is there.
+        let missing = "/opt/homebrew/bin/definitely-not-a-real-tool-xyz";
+        // "n" declines any install offer that may be made.
+        let (fixed, printed) = run_ensure_tool(missing, "n\nn\nn\n");
+        assert_eq!(fixed.as_deref(), Some("definitely-not-a-real-tool-xyz"));
+        assert!(
+            printed.contains("resolves via PATH"),
+            "should explain the rewrite, got: {printed}"
+        );
+    }
+
+    #[test]
+    fn a_tool_that_is_present_is_left_alone() {
+        // Nothing to fix: no rewrite, no noise.
+        let (fixed, printed) = run_ensure_tool("/bin/sh", "");
+        assert_eq!(fixed, None);
+        assert!(printed.contains("✓"), "got: {printed}");
+    }
+
+    #[test]
+    fn a_bare_name_is_not_rewritten_to_itself() {
+        // Already a PATH lookup; there is nothing better to offer, so leave it be rather
+        // than emit a confusing "using `x` instead of x".
+        let (fixed, _) = run_ensure_tool("definitely-not-a-real-tool-xyz", "n\nn\nn\n");
+        assert_eq!(fixed, None);
+    }
 
     #[test]
     fn parses_system_profiler_devices() {

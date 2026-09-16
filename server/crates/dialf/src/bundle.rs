@@ -581,6 +581,16 @@ fn import_impl(
                 "audio.{key}: changed SoX audio driver from coreaudio to alsa for Linux"
             ));
         }
+        // Keys whose argv[0] we just repointed. The "not found" check below reads the config
+        // as it was parsed, so without this it would warn again naming the old path — right
+        // after saying we had replaced it.
+        let repointed = crate::hostcheck::rewrite_unusable_tool_paths(&mut doc, &mut edits);
+        for (key, old, new) in &repointed {
+            warnings.push(format!(
+                "audio.{key}: {old} does not exist here — using `{new}` instead, so it \
+                 resolves once the tool is installed"
+            ));
+        }
         if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
             warnings.push(
                 "config shared_key is still the insecure `change-me` placeholder — set it to a \
@@ -600,7 +610,7 @@ fn import_impl(
             } else {
                 which::which(argv0).is_ok()
             };
-            if !found {
+            if !found && !repointed.iter().any(|(k, _, _)| *k == label) {
                 warnings.push(format!(
                     "audio.{label} tool not found on this machine: {argv0} — install it or edit the config"
                 ));

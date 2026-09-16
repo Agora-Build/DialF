@@ -78,6 +78,14 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **SSH can't show TCC dialogs**; Screen Sharing can.
 - `launchctl kill` on a `KeepAlive` unit is a **no-op** — launchd resurrects it instantly.
   `service stop` boots the job out instead; `start` bootstraps before kickstart.
+- **An imported bundle carries the *builder's* tool paths.** A macOS config landing on Linux
+  keeps `/opt/homebrew/bin/sox`, which can never work there — even after installing sox — so
+  import drops an absolute `argv[0]` that is missing here down to the bare tool name (or to
+  wherever `which` finds it). Both the interactive precheck and the non-interactive path do
+  this; without it the run fails with a bare "No such file or directory".
+- **NixOS has none of apt/dnf/pacman/zypper**, so the install offer finds nothing. It gets a
+  hint naming configuration.nix / home.packages / `nix-shell -p` instead of a message about a
+  "distro package manager" it does not have.
 - After an npm upgrade the LaunchAgent points at a **deleted** versioned binary → launchd
   crash-loops it (`EX_CONFIG`). `dialf import` self-heals this by re-running `service install`.
 
