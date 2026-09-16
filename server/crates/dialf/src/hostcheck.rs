@@ -496,6 +496,30 @@ fn package_for(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// What to tell someone when no package manager we can drive is available.
+///
+/// Nix comes first and on either platform: a machine with nix has a working way to get the
+/// tool, and nix-darwin boxes have nix without Homebrew — telling those to install Homebrew
+/// would be advice for a system they deliberately don't run. Packages there are usually
+/// declared rather than installed ad hoc, so both routes are named.
+fn manual_install_hint(pkg: &str, has_nix: bool, is_macos: bool) -> String {
+    if has_nix {
+        return format!(
+            "install it manually — `nix-shell -p {pkg}` for a one-off, or add `{pkg}` to your \
+             Nix configuration (configuration.nix / home.packages) to keep it"
+        );
+    }
+    if is_macos {
+        return format!("install it manually (e.g. install Homebrew, then: brew install {pkg})");
+    }
+    // Being specific about what was looked for beats "use your distro's package manager",
+    // which is unhelpful right after failing to find one.
+    format!(
+        "install it manually: no supported package manager found \
+         (apt-get/dnf/pacman/zypper) — install `{pkg}` however this system does it"
+    )
+}
+
 /// Offer to install `pkg` via the native package manager.
 /// Returns true if an install command ran successfully.
 fn offer_install(p: &mut Prompter<'_>, pkg: &str) -> Result<bool> {
@@ -519,23 +543,8 @@ fn offer_install(p: &mut Prompter<'_>, pkg: &str) -> Result<bool> {
         })
     };
     let Some(cmd) = cmd else {
-        writeln!(
-            p.out,
-            "{}",
-            if cfg!(target_os = "macos") {
-                format!("install it manually (e.g. install Homebrew, then: brew install {pkg})")
-            } else if which::which("nix-env").is_ok() || which::which("nix").is_ok() {
-                // NixOS has none of the four imperative managers above. Packages are usually
-                // declared in configuration.nix / home-manager rather than installed ad hoc,
-                // so point at both routes instead of guessing which one this machine uses.
-                format!(
-                    "install it manually — add `{pkg}` to configuration.nix or home.packages, \
-                     or for a one-off: nix-shell -p {pkg}"
-                )
-            } else {
-                format!("install it manually with your distro's package manager (package: {pkg})")
-            }
-        )?;
+        let has_nix = which::which("nix").is_ok() || which::which("nix-env").is_ok();
+        writeln!(p.out, "{}", manual_install_hint(pkg, has_nix, cfg!(target_os = "macos")))?;
         return Ok(false);
     };
     if !p.yes(&format!("install now with `{}`?", cmd.join(" ")))? {
@@ -615,6 +624,29 @@ mod tests {
         };
         let got = ensure_tool(argv0, "capture_cmd", &mut p).unwrap();
         (got, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    #[test]
+    fn the_install_hint_suits_the_machine() {
+        // Nix present: same advice on either platform, because nix-darwin exists and those
+        // machines deliberately have no Homebrew.
+        for is_macos in [true, false] {
+            let hint = manual_install_hint("sox", true, is_macos);
+            assert!(hint.contains("nix-shell -p sox"), "{hint}");
+            assert!(hint.contains("configuration.nix"), "{hint}");
+            assert!(!hint.contains("Homebrew"), "nix box told to use brew: {hint}");
+        }
+
+        // macOS without nix: Homebrew is the reasonable suggestion.
+        let mac = manual_install_hint("sox", false, true);
+        assert!(mac.contains("brew install sox"), "{mac}");
+
+        // Linux with nothing we can drive: say what was looked for rather than waving at
+        // "your distro's package manager", which we just failed to find.
+        let linux = manual_install_hint("sox", false, false);
+        assert!(linux.contains("apt-get/dnf/pacman/zypper"), "{linux}");
+        assert!(linux.contains("sox"), "{linux}");
+        assert!(!linux.contains("nix-shell"), "{linux}");
     }
 
     #[test]
