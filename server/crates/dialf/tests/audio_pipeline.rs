@@ -344,3 +344,48 @@ fn a_named_run_writes_recognisable_recordings() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A capture tool that ignores the configured rate is caught by measuring what it delivers.
+///
+/// This is the silent-corruption case: the config's rate is substituted into the capture
+/// command and then stamped into the WAV header, with nothing checking the tool honoured it.
+/// Mislabelled audio plays back at the wrong speed with no error anywhere.
+#[test]
+fn a_capture_delivering_the_wrong_rate_is_detected() {
+    use dialf::audio::backend::CaptureSource;
+    use dialf::audio::command_backend::{measured_rate_mismatch, CommandCaptureSource};
+    use dialf::audio::tool_detect::CaptureCommand;
+
+    // Paced by the shell rather than sox: `sox -n synth` generates its whole buffer as fast
+    // as it can, so it EOFs before there is any elapsed time to measure against. This emits
+    // 4800 bytes every 0.1s = 2400 frames/0.1s = ~24000 frames/s of 16-bit mono.
+    let cmd = CaptureCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while :; do /usr/bin/head -c 4800 /dev/zero; sleep 0.1; done".into(),
+        ],
+    };
+
+    // Claim a rate far from what arrives, so shell-pacing jitter cannot blur the verdict.
+    const CLAIMED: u32 = 8_000;
+    let mut src = CommandCaptureSource::spawn(&cmd, CLAIMED, 1).expect("spawn capture");
+    let started = std::time::Instant::now();
+    let mut frames: u64 = 0;
+    let mut buf = vec![0i16; 4096];
+    // Past RATE_CHECK_AFTER, which deliberately waits out the tool's startup burst.
+    while started.elapsed() < std::time::Duration::from_millis(3_500) {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => frames += n as u64, // mono: one sample per frame
+            Err(_) => break,
+        }
+    }
+
+    let measured = measured_rate_mismatch(CLAIMED, frames, started.elapsed())
+        .expect("a ~24kHz stream labelled 8000 Hz must be flagged");
+    assert!(measured > 15_000, "measured {measured} Hz, expected well above the claimed 8000");
+    // The source still reports the configured rate — which is the trap: the WAV header would
+    // say 8000 while the samples arrive at another rate entirely.
+    assert_eq!(src.sample_rate(), CLAIMED);
+}

@@ -29,6 +29,39 @@ pub struct CommandCaptureSource {
     /// rest of the stream.
     leftover: Vec<u8>,
     byte_buf: Vec<u8>,
+    /// When capture began, for measuring the rate the tool is really delivering.
+    started: std::time::Instant,
+    frames_seen: u64,
+    /// The rate check runs once; after that the counters are just ignored.
+    rate_checked: bool,
+}
+
+/// Minimum capture time before judging the delivered rate. Short reads at startup are bursty
+/// (the tool's own buffering), so a snap judgement would fire on a correct setup.
+const RATE_CHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How far the measured rate may drift from the configured one before it is worth saying.
+/// Generous: this is looking for 44100-vs-48000 (8.8%), not clock jitter.
+const RATE_TOLERANCE: f64 = 0.04;
+
+/// The rate actually being delivered, when it disagrees with `configured` enough to matter.
+///
+/// `sample_rate` in config is taken on faith — it is substituted into the capture command and
+/// then stamped into the WAV headers, with nothing checking the tool honoured it. A tool that
+/// ignores the request (or a card that cannot do that rate) yields audio labelled at the wrong
+/// rate: it plays back slow and low-pitched, and every duration is off by the same factor,
+/// with no error anywhere. Measuring what arrives is the only tool-agnostic way to notice.
+pub fn measured_rate_mismatch(
+    configured: u32,
+    frames: u64,
+    elapsed: std::time::Duration,
+) -> Option<u32> {
+    if configured == 0 || elapsed < RATE_CHECK_AFTER || frames == 0 {
+        return None;
+    }
+    let measured = frames as f64 / elapsed.as_secs_f64();
+    let drift = (measured - configured as f64).abs() / configured as f64;
+    (drift > RATE_TOLERANCE).then_some(measured.round() as u32)
 }
 
 impl CommandCaptureSource {
@@ -81,6 +114,9 @@ impl CommandCaptureSource {
             channels: channels.max(1),
             leftover: Vec::new(),
             byte_buf: Vec::new(),
+            started: std::time::Instant::now(),
+            frames_seen: 0,
+            rate_checked: false,
         })
     }
 
@@ -117,6 +153,24 @@ impl CaptureSource for CommandCaptureSource {
         }
         let frames = (self.leftover.len() / frame_bytes).min(out.len() / ch);
         let used = frames * frame_bytes;
+        if !self.rate_checked {
+            self.frames_seen += frames as u64;
+            if let Some(measured) =
+                measured_rate_mismatch(self.sample_rate, self.frames_seen, self.started.elapsed())
+            {
+                tracing::warn!(
+                    configured = self.sample_rate,
+                    measured,
+                    "capture is delivering ~{measured} Hz but config says {} Hz — recordings \
+                     will be labelled at the configured rate and play back at the wrong speed; \
+                     set audio.sample_rate to what the card actually runs",
+                    self.sample_rate
+                );
+                self.rate_checked = true;
+            } else if self.started.elapsed() >= RATE_CHECK_AFTER {
+                self.rate_checked = true; // measured fine; stop counting
+            }
+        }
         for i in 0..frames * ch {
             let lo = self.leftover[i * 2] as u16;
             let hi = self.leftover[i * 2 + 1] as u16;
@@ -268,6 +322,41 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, (0i16..12).collect::<Vec<_>>(), "samples in order, none lost");
+    }
+
+    #[test]
+    fn the_configured_rate_is_reported_when_the_tool_ignores_it() {
+        use std::time::Duration;
+        // The case that motivates this: card runs 48k, config says 44100, the tool delivers
+        // 48k anyway. 8.8% out — recordings would be labelled 44100 and play back slow.
+        assert_eq!(
+            measured_rate_mismatch(44_100, 48_000 * 4, Duration::from_secs(4)),
+            Some(48_000)
+        );
+        // And the other way round.
+        assert_eq!(
+            measured_rate_mismatch(48_000, 44_100 * 4, Duration::from_secs(4)),
+            Some(44_100)
+        );
+    }
+
+    #[test]
+    fn an_honest_capture_says_nothing() {
+        use std::time::Duration;
+        assert_eq!(measured_rate_mismatch(48_000, 48_000 * 4, Duration::from_secs(4)), None);
+        // Clock jitter and buffering wobble must not trip it — 1% is normal.
+        assert_eq!(measured_rate_mismatch(48_000, 48_480 * 4, Duration::from_secs(4)), None);
+        assert_eq!(measured_rate_mismatch(16_000, 16_000 * 10, Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn no_judgement_before_there_is_evidence() {
+        use std::time::Duration;
+        // Startup is bursty: a tool's first buffers arrive all at once, so an early sample
+        // would read as a wildly wrong rate on a perfectly good setup.
+        assert_eq!(measured_rate_mismatch(48_000, 96_000, Duration::from_millis(500)), None);
+        assert_eq!(measured_rate_mismatch(48_000, 0, Duration::from_secs(10)), None);
+        assert_eq!(measured_rate_mismatch(0, 48_000, Duration::from_secs(10)), None);
     }
 
     #[test]

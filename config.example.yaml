@@ -32,6 +32,18 @@ audio:
   sample_rate: 48000                # card native rate — ALSO the recording rate (rx/tx are
                                     # written exactly as captured; 16k for VAD is derived
                                     # internally). Lower it to shrink recordings.
+                                    #
+                                    # Set this to what the card ACTUALLY runs. It is passed
+                                    # to the capture tool as {rate} and then written into the
+                                    # WAV headers, and nothing verifies the tool honoured it:
+                                    # ask a 48k-only card for 44100 and, if the tool obliges,
+                                    # fine — but if it ignores you, the recording is stamped
+                                    # 44100 while holding 48k samples, so it plays back ~9%
+                                    # slow and low-pitched with no error anywhere. dialfd
+                                    # measures the delivered rate and warns in the log if it
+                                    # drifts >4%, but matching the card avoids both that and
+                                    # a pointless resample. (VAD is unaffected — an awkward
+                                    # ratio like 44100->16000 just uses linear resampling.)
   channels: 1                       # capture channels; 2 records a true stereo rx.wav
                                     # (a stereo bridge/breakout — one source per input)
   # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0". Selects the device for auto-detected

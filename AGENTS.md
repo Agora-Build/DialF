@@ -92,6 +92,13 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   verifies them (and carries renames into the argv), and the daemon uses them to reap stray
   audio processes. Keep them in sync with the pinned command.
 - The capture tool's stderr is relayed into the daemon log — read it before theorizing.
+- **`audio.sample_rate` is taken on faith**: it is substituted into the capture command and
+  then stamped into the WAV headers, and nothing verifies the tool honoured it. A tool that
+  ignores the request yields audio labelled at the wrong rate — it plays back slow and
+  low-pitched and every duration is off, with no error. The capture source measures what
+  actually arrives and warns after 3s if it drifts >4% (`measured_rate_mismatch`); set the
+  rate to what the card really runs. VAD is unaffected — a non-integer ratio like 44100->16000
+  just falls back to the linear resampler instead of the decimator.
 
 ### Android app
 - **Never use a time-limited foreground service type.** `dataSync` is capped at 6h/day on
