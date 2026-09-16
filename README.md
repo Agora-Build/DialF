@@ -326,8 +326,10 @@ A USB sound card bridges the phone and host: card **output → phone mic** (inje
 card **input ← phone earpiece** (capture the far end). A recorded job writes (paths returned
 by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (the phone / far end), recorded **exactly as the
-  card delivers it**: `audio.sample_rate` and `audio.channels`, no resampling, nothing discarded
+- `<job>-rx.wav` — captured from the card (the phone / far end), written **exactly as the
+  capture tool delivers it** at `audio.sample_rate` / `audio.channels` — dialf never resamples
+  or discards. (sox itself converts if you ask for a rate the card doesn't run; set
+  `sample_rate` to the card's own rate to skip that.)
 - `<job>-tx.wav` — audio injected into the card (our prompts), same rate/channels as rx so the
   two legs share one clock
 - `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two

@@ -122,8 +122,11 @@ audio:
   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "MiniFuse 2"]
 ```
 
-Match `sample_rate` to the card's actual rate (the MiniFuse Control Center shows it, e.g.
-44100 vs 48000) so CoreAudio doesn't resample twice.
+Set `sample_rate` to the card's own rate (the MiniFuse Control Center shows it, e.g. 44100 vs
+48000). Any rate still works — sox opens the card natively and inserts a `rate` effect to
+convert, so the recording is correctly labelled either way — but matching the card skips a
+conversion you don't need. dialfd measures the delivered rate at startup and logs
+`capture rate confirmed`, or warns if a tool ignored the request.
 
 ### Loopback channels — keep tx out of rx
 
@@ -155,8 +158,9 @@ and every channel reads silent.)
 
 Each recorded job writes (paths returned by `dialf run`):
 
-- `<job>-rx.wav` — captured from the card (far end), at the card's own `audio.sample_rate` /
-  `audio.channels` (no resampling — set `channels: 2` to record a stereo pair)
+- `<job>-rx.wav` — captured from the card (far end), written exactly as the capture tool
+  delivers it at `audio.sample_rate` / `audio.channels` — dialf never resamples (set
+  `channels: 2` to record a stereo pair)
 - `<job>-tx.wav` — audio injected into the card (our prompts), matching rx's rate/channels
 - `<job>-mix.wav` — **stereo** (when `mix_recording: true`): left = tx, right = rx, so the two
   voices stay separated. Set `mix_channels: rx_tx` to swap the channels.
