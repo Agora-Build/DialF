@@ -407,6 +407,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     }
 
     let engine = Arc::new(AudioEngine::new(config.audio.clone()));
+    // Check what the card really delivers, off the startup path: opening it takes a couple of
+    // seconds and a diagnostic must not hold up binding the sockets.
+    spawn_capture_rate_probe(engine.clone(), config.audio.sample_rate);
     let registry = Arc::new(Mutex::new(Registry::new()));
     let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
     // Markers left by a prior (crashed) instance name calls that may still be up — reconciled (hung
@@ -1128,6 +1131,29 @@ fn job_needs_phone(job: &[schema::Step]) -> bool {
                 | schema::StepKind::SmsSend { .. }
         )
     })
+}
+
+/// Measure the capture tool's real output rate in the background and warn if it disagrees
+/// with config. Runs once per daemon start — the card rarely changes underneath us.
+fn spawn_capture_rate_probe(engine: Arc<AudioEngine>, configured: u32) {
+    tokio::task::spawn_blocking(move || {
+        let Some(measured) = engine.probe_capture_rate() else {
+            // No card, no tool, or consent not granted — the job path reports those properly.
+            tracing::debug!("capture rate probe skipped");
+            return;
+        };
+        if crate::audio::command_backend::rate_drifts(configured, measured) {
+            tracing::warn!(
+                configured,
+                measured,
+                "the capture device is delivering ~{measured} Hz but audio.sample_rate is \
+                 {configured} — recordings get stamped {configured} Hz and will play back at \
+                 the wrong speed. Set audio.sample_rate to {measured}."
+            );
+        } else {
+            tracing::info!(rate = measured, "capture rate confirmed");
+        }
+    });
 }
 
 /// Longest label we keep in a recording filename. Long enough to be descriptive, short

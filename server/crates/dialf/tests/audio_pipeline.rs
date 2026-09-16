@@ -389,3 +389,55 @@ fn a_capture_delivering_the_wrong_rate_is_detected() {
     // say 8000 while the samples arrive at another rate entirely.
     assert_eq!(src.sample_rate(), CLAIMED);
 }
+
+/// The pre-flight probe measures what the capture tool really delivers, before any job runs.
+///
+/// Drives `measure_source_rate` rather than `probe_capture_rate`, because opening a real card
+/// goes through the macOS microphone-consent gate that a test binary does not hold.
+#[test]
+fn the_preflight_probe_measures_the_real_capture_rate() {
+    use dialf::audio::command_backend::CommandCaptureSource;
+    use dialf::audio::engine::AudioEngine;
+    use dialf::audio::tool_detect::CaptureCommand;
+
+    // Paced source: 4800 bytes every 0.1s = ~24000 frames/s of 16-bit mono, whatever rate
+    // the config claims. (`sox -n synth` is no good here — it emits its whole buffer at once.)
+    let cmd = CaptureCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while :; do /usr/bin/head -c 4800 /dev/zero; sleep 0.1; done".into(),
+        ],
+    };
+    // Claimed rate is deliberately wrong: the source delivers ~24000.
+    let mut src = CommandCaptureSource::spawn(&cmd, 8_000, 1).expect("spawn capture");
+
+    let measured = AudioEngine::measure_source_rate(&mut src)
+        .expect("probe should measure a live paced source");
+    assert!(
+        (18_000..=30_000).contains(&measured),
+        "measured {measured} Hz, expected ~24000"
+    );
+    assert!(
+        dialf::audio::command_backend::rate_drifts(8_000, measured),
+        "a ~24kHz source against a configured 8000 must count as drift"
+    );
+
+    // And an honest configuration is not flagged.
+    assert!(!dialf::audio::command_backend::rate_drifts(measured, measured));
+}
+
+/// A capture tool that dies must not make the probe hang or panic — a diagnostic can never
+/// be the reason the daemon fails to start.
+#[test]
+fn the_preflight_probe_gives_up_on_a_dead_capture() {
+    use dialf::audio::command_backend::CommandCaptureSource;
+    use dialf::audio::engine::AudioEngine;
+    use dialf::audio::tool_detect::CaptureCommand;
+
+    let cmd = CaptureCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exit 1".into()],
+    };
+    let mut src = CommandCaptureSource::spawn(&cmd, 48_000, 1).expect("spawn");
+    assert_eq!(AudioEngine::measure_source_rate(&mut src), None);
+}

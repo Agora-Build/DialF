@@ -97,8 +97,15 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   ignores the request yields audio labelled at the wrong rate — it plays back slow and
   low-pitched and every duration is off, with no error. The capture source measures what
   actually arrives and warns after 3s if it drifts >4% (`measured_rate_mismatch`); set the
-  rate to what the card really runs. VAD is unaffected — a non-integer ratio like 44100->16000
+  rate to what the card really runs. A pre-flight probe (`measure_source_rate`, run in the
+  background at daemon start) reports the real rate before the first job, so the mismatch
+  surfaces in the log rather than in a recording. VAD is unaffected — a non-integer ratio like 44100->16000
   just falls back to the linear resampler instead of the decimator.
+- **Don't add dialf-side resampling to the recording path.** sox already converts when asked
+  (`{rate}` in `capture_cmd`), and dialf's resampler is linear for non-integer ratios like
+  48000->32000 — worse than the tool's. Recording at the card's native rate and converting
+  offline is better than either: nothing in the live path, and the native file can still be
+  re-derived into anything.
 
 ### Android app
 - **Never use a time-limited foreground service type.** `dataSync` is capped at 6h/day on

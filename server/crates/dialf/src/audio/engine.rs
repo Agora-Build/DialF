@@ -72,7 +72,54 @@ impl AudioEngine {
         Ok(())
     }
 
+    /// Time a live capture source and report the frame rate it actually delivers.
+    ///
+    /// Split out from [`Self::probe_capture_rate`] so it can be exercised without the
+    /// microphone-consent gate that opening a real card goes through.
+    pub fn measure_source_rate(src: &mut impl super::backend::CaptureSource) -> Option<u32> {
+    // Discard the opening burst — a tool's first buffers arrive all at once, so measuring
+    // from the very first sample reads as a wildly wrong rate on a healthy card.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+    const MEASURE: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+    let mut buf = vec![0i16; 4096];
+    let ch = src.channels().max(1) as u64;
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < SETTLE {
+        if matches!(src.read(&mut buf), Ok(0) | Err(_)) {
+            return None;
+        }
+    }
+
+    let measure_from = std::time::Instant::now();
+    let mut frames: u64 = 0;
+    while measure_from.elapsed() < MEASURE {
+        match src.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => frames += n as u64 / ch,
+        }
+    }
+    let elapsed = measure_from.elapsed().as_secs_f64();
+    (elapsed > 0.0 && frames > 0).then(|| (frames as f64 / elapsed).round() as u32)
+}
+
+/// Briefly run the capture tool and report the rate it actually delivers.
+    ///
+    /// `audio.sample_rate` is only a *request*: it is substituted into the capture command and
+    /// then stamped into the WAV headers. A tool that ignores it produces audio labelled at
+    /// the wrong rate — slow, low-pitched, every duration off, and no error. The in-stream
+    /// check catches that a few seconds into a recording; this catches it before the first
+    /// job, when there is still time to fix the config.
+    ///
+    /// Best-effort by design: no card, no tool, or a denied microphone all just yield `None`.
+    /// A diagnostic must never be the reason the daemon won't start.
+    pub fn probe_capture_rate(&self) -> Option<u32> {
+        Self::measure_source_rate(&mut self.open_capture().ok()?)
+    }
+
     /// Open the configured sound-card capture source.
+    ///
     pub fn open_capture(&self) -> anyhow::Result<CommandCaptureSource> {
         // macOS: settle mic consent BEFORE spawning the tool — shows the dialog and waits
         // for the click if never asked; fails fast with the fix if denied. The tool's own

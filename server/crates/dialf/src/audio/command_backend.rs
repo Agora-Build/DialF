@@ -44,6 +44,15 @@ const RATE_CHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 /// Generous: this is looking for 44100-vs-48000 (8.8%), not clock jitter.
 const RATE_TOLERANCE: f64 = 0.04;
 
+/// Whether a measured rate is far enough from the configured one to be worth reporting.
+pub fn rate_drifts(configured: u32, measured: u32) -> bool {
+    if configured == 0 {
+        return false;
+    }
+    let drift = (measured as f64 - configured as f64).abs() / configured as f64;
+    drift > RATE_TOLERANCE
+}
+
 /// The rate actually being delivered, when it disagrees with `configured` enough to matter.
 ///
 /// `sample_rate` in config is taken on faith — it is substituted into the capture command and
@@ -59,9 +68,8 @@ pub fn measured_rate_mismatch(
     if configured == 0 || elapsed < RATE_CHECK_AFTER || frames == 0 {
         return None;
     }
-    let measured = frames as f64 / elapsed.as_secs_f64();
-    let drift = (measured - configured as f64).abs() / configured as f64;
-    (drift > RATE_TOLERANCE).then_some(measured.round() as u32)
+    let measured = (frames as f64 / elapsed.as_secs_f64()).round() as u32;
+    rate_drifts(configured, measured).then_some(measured)
 }
 
 impl CommandCaptureSource {
