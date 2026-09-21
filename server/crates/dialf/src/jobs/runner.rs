@@ -183,7 +183,7 @@ pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOut
                 end_reason: StepEnd::Cancelled,
                 summary: CANCELLED_SUMMARY.to_string(),
             });
-            push_skipped(&mut outcomes, steps, index, at, StepEnd::Cancelled);
+            push_skipped(&mut outcomes, steps, index, at);
             break;
         }
         // The far end hung up — stop here rather than run the remaining steps (more prompts, a
@@ -203,7 +203,7 @@ pub fn run_job(steps: &[Step], io: &mut dyn JobIo) -> anyhow::Result<Vec<StepOut
                 summary: CALL_ENDED_SUMMARY.to_string(),
             });
             // Record each remaining step as skipped, so it's clear what didn't run.
-            push_skipped(&mut outcomes, steps, index, at, StepEnd::CallEnded);
+            push_skipped(&mut outcomes, steps, index, at);
             break;
         }
     }
@@ -216,7 +216,6 @@ fn push_skipped(
     steps: &[Step],
     index: usize,
     at_ms: u64,
-    _cause: StepEnd,
 ) {
     for (j, skipped) in steps.iter().enumerate().skip(index + 1) {
         outcomes.push(StepOutcome::skipped(

@@ -59,6 +59,9 @@ skipped + logged.
 
 ## 2. Control API (local Unix socket)
 
+> Writing a client of your own? [INTEGRATION.md](INTEGRATION.md) is the guide — connection
+> model, a working client, error handling and deployment. This section is the field reference.
+
 `dialf` and any other local tool send one JSON request per line to `dialfd`'s control
 socket and read one JSON response per line. Each request has an `id`, an `op`, and op-specific
 fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.

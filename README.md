@@ -19,6 +19,10 @@ dialf (CLI) ──▶ dialfd (host daemon) ──WiFi──▶ mobile app  ─�
 - **Scripted audio conversations** (YAML + ten-vad), call recording, runtime audio injection.
 - Works **while the phone is locked**; runs on macOS & Linux, arm64 & x86_64.
 
+**Building DialF into your own product?** Start with
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md) — driving the phone as a *Programmable
+Application* from your own service over the control socket, rather than through the CLI.
+
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol + control API,
 [`docs/HARDWARE.md`](docs/HARDWARE.md) for the sound-card bridge wiring + macOS
 microphone/LaunchAgent setup, [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md) for using a
@@ -468,8 +472,8 @@ Layout:
   - `jobs/` — sample jobs
 - `app/` — Flutter + Kotlin phone app ([`app/README.md`](app/README.md))
 - `samples/` — ready-to-use voice prompts for the sample jobs
-- `docs/` — [`PROTOCOL.md`](docs/PROTOCOL.md), [`HARDWARE.md`](docs/HARDWARE.md),
-  [`DEVICE_SHARING.md`](docs/DEVICE_SHARING.md)
+- `docs/` — [`INTEGRATION.md`](docs/INTEGRATION.md), [`PROTOCOL.md`](docs/PROTOCOL.md),
+  [`HARDWARE.md`](docs/HARDWARE.md), [`DEVICE_SHARING.md`](docs/DEVICE_SHARING.md)
 - `config.example.yaml` — sample daemon config (sound card + recording)
 
 ### Release
