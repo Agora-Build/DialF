@@ -441,3 +441,71 @@ fn the_preflight_probe_gives_up_on_a_dead_capture() {
     let mut src = CommandCaptureSource::spawn(&cmd, 48_000, 1).expect("spawn");
     assert_eq!(AudioEngine::measure_source_rate(&mut src), None);
 }
+
+/// `wait_for_speech_start` must return **while the far end is still speaking** — that is the
+/// whole barge-in mechanism. Returning after the turn ends would make the next `audio.play`
+/// an ordinary reply, not an interrupt, and interrupt latency unmeasurable.
+#[test]
+fn wait_for_speech_start_returns_during_speech_not_after_it() {
+    use dialf::audio::engine::run_wait_for_speech_start;
+
+    if !dialf::vad_linked() {
+        eprintln!("ten-vad not linked (stub build); skipping barge-in test");
+        return;
+    }
+
+    // Same ~7.6s speech clip the turn test uses.
+    let mut src = WavFileSource::open(Path::new(FIXTURE)).expect("open fixture");
+    let started = run_wait_for_speech_start(
+        &mut src,
+        15_000, // plenty: the clip starts talking early
+        300,    // linger briefly past onset
+        100,    // default onset debounce
+        &AtomicBool::new(false),
+    )
+    .expect("onset wait ran");
+    assert!(started, "the fixture is speech — onset must be detected");
+
+    // The decisive check: the source still has audio left, i.e. we returned mid-clip rather
+    // than having consumed the whole turn.
+    let mut rest = vec![0i16; 1024];
+    let remaining = src.read(&mut rest).expect("read after onset");
+    assert!(
+        remaining > 0,
+        "returned at end-of-clip — that is wait_for_speech's job, not this one"
+    );
+}
+
+/// Silence must time out and say so, rather than blocking until the clip runs out.
+#[test]
+fn wait_for_speech_start_times_out_on_silence() {
+    use dialf::audio::engine::run_wait_for_speech_start;
+
+    if !dialf::vad_linked() {
+        eprintln!("ten-vad not linked (stub build); skipping barge-in timeout test");
+        return;
+    }
+
+    // 10s of digital silence at the VAD's own rate: nothing to trigger onset.
+    let dir = std::env::temp_dir().join(format!("dialf-bargein-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let quiet = dir.join("silence.wav");
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(&quiet, spec).unwrap();
+    for _ in 0..160_000 {
+        w.write_sample(0i16).unwrap();
+    }
+    w.finalize().unwrap();
+
+    let mut src = WavFileSource::open(&quiet).expect("open silence");
+    let started =
+        run_wait_for_speech_start(&mut src, 600, 2_000, 100, &AtomicBool::new(false)).unwrap();
+    assert!(!started, "silence must report no onset");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

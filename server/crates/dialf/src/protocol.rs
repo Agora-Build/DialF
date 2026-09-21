@@ -233,6 +233,10 @@ pub enum ControlOp {
     /// List connected devices.
     #[serde(rename = "devices.list")]
     DevicesList,
+    /// Report the capability manifest: which script steps this daemon implements, and at
+    /// which spec version. Clients validate scripts against it before dispatching them.
+    #[serde(rename = "server.manifest")]
+    ServerManifest,
     /// Place a call from `device` to `number` (optionally on a specific SIM).
     #[serde(rename = "call.dial")]
     CallDial {

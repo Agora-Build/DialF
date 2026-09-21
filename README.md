@@ -180,6 +180,7 @@ dialf mmi <device> <code> [--sim N]            # (advanced) raw MMI/USSD code, r
 dialf run  <job.yaml> [--device <id>] [--name <label>]   # run a scripted job once
 dialf run  <job.yaml> --autoanswer <numbers>   # serve: answer those numbers with this job (Ctrl-C reverts)
 dialf play <file>                              # inject audio out the sound card
+dialf manifest                                 # which job steps this build implements
 dialf --version                                # CLI + running daemon (dialfd) versions
 
 dialf devices share --list                     # adb devices attached to this host
@@ -292,6 +293,25 @@ prompts play only after a real answer (not on a fixed timer). `audio.wait_for_sp
 from the card → resamples to 16 kHz → runs ten-vad per 256-sample hop; speech onset (a
 continuous `onset_duration_ms` voiced run, so noise/echo doesn't false-trigger) followed by
 `silence_duration_ms` of non-speech ends the turn (`end_timeout_ms` is the overall cap).
+
+**Interrupting the far end.** `audio.wait_for_speech_start` is the mirror image: it returns
+while the other side is *still* talking, so the next `audio.play` cuts in rather than replies.
+A timeout here is not a failure — the step reports it and the job carries on.
+
+```yaml
+- type: audio.wait_for_speech_start
+  timeout_ms: 15000            # give up if it never starts speaking
+  wait_after_start_ms: 2000    # let it talk this long, then return mid-sentence
+- type: audio.play             # lands on top of it
+  file: samples/interrupt.wav
+```
+
+**Reading the result.** `dialf run` reports each step with `t_start_ms`/`t_end_ms` **relative
+to the start of the recording**, an `end_reason`, and any `id` you put on the step — so a
+recording can be segmented step by step without correlating clocks. Alongside them the result
+carries the recording paths and the call's disposition (answer latency, duration, how it
+ended). `dialf manifest` prints which steps this build implements, for callers that generate
+jobs. Full shapes in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ### Auto-answer inbound calls
 

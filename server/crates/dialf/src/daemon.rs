@@ -658,6 +658,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 "config_path": state.config_path.display().to_string(),
             }),
         )),
+        ControlOp::ServerManifest => Ok(ok_data(&id, crate::jobs::schema::manifest())),
         ControlOp::DevicesList => {
             let list = state.registry.lock().unwrap().list();
             Ok(ok_data(&id, json!(list)))
@@ -851,7 +852,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             state.job_force.store(false, Ordering::SeqCst);
             state.job_abort.store(false, Ordering::SeqCst);
             // `dialf run` is outbound/one-shot: the job owns call setup (call.dial, etc.).
-            let (outcomes, recording) = run_job_on_device(
+            let out = run_job_on_device(
                 state,
                 device_id,
                 job,
@@ -862,8 +863,15 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 name,
             )
             .await?;
-            let recording = recording.map(|r| json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix }));
-            Ok(ok_data(&id, json!({ "steps": outcomes, "recording": recording })))
+            // `t0_epoch_ms` sits on the recording because that is what every step's
+            // `t_start_ms`/`t_end_ms` counts from — the two are only meaningful together.
+            let recording = out.recording.map(|r| {
+                json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix, "t0_epoch_ms": out.t0_epoch_ms })
+            });
+            Ok(ok_data(
+                &id,
+                json!({ "steps": out.outcomes, "recording": recording, "call": out.call }),
+            ))
         }
         ControlOp::JobCancel { force } => {
             // `dialf run` sends this on Ctrl+C; the running job's runner / wait_for_speech observe
@@ -1198,6 +1206,18 @@ pub fn sanitize_label(label: &str) -> Option<String> {
 /// Run a parsed job against a device, recording when configured. The duplex session is started
 /// inside the blocking task so the capture thread records rx before the first step runs; the
 /// recording is always finalized (even on job error) so mix.wav is written and both legs padded.
+/// Everything a finished job reports: the step outcomes, the recording it produced, what the
+/// call did, and the wall-clock origin the step timestamps are relative to.
+pub struct JobRunOutput {
+    pub outcomes: Vec<runner::StepOutcome>,
+    pub recording: Option<RecordOutput>,
+    pub call: Option<crate::phone::CallSummary>,
+    /// Epoch ms at which recording started — the `t=0` that every `t_*_ms` counts from.
+    /// `None` when the job was not recorded, in which case the timestamps are relative to
+    /// job start instead and there is no audio to align them to anyway.
+    pub t0_epoch_ms: Option<i64>,
+}
+
 pub async fn run_job_on_device(
     state: &DaemonState,
     device_id: String,
@@ -1207,7 +1227,7 @@ pub async fn run_job_on_device(
     force: Arc<AtomicBool>,
     abort: Arc<AtomicBool>,
     label: Option<String>,
-) -> anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)> {
+) -> anyhow::Result<JobRunOutput> {
     let engine = state.engine.clone();
     // A relative `record_dir` resolves against the config file's dir (like autoanswer job paths),
     // so recordings land next to the config regardless of the daemon's CWD; absolute is unchanged.
@@ -1223,10 +1243,14 @@ pub async fn run_job_on_device(
     let registry = state.registry.clone();
     let rt = tokio::runtime::Handle::current();
 
-    type JobResult = anyhow::Result<(Vec<runner::StepOutcome>, Option<RecordOutput>)>;
+    type JobResult = anyhow::Result<JobRunOutput>;
     tokio::task::spawn_blocking(move || -> JobResult {
+        let mut t0_epoch_ms = None;
         let session = match record_dir {
             Some(dir) => {
+                // Stamped as close to the first captured frame as we can get, so a consumer
+                // can place the recording on a wall clock.
+                t0_epoch_ms = Some(now_ms());
                 Some(engine.start_duplex(
                     dir,
                     session_name(label.as_deref(), now_ms()),
@@ -1240,10 +1264,17 @@ pub async fn run_job_on_device(
             hub, engine, rt, registry, device_id, session, inbound, cancel, force, abort,
         );
         let run = runner::run_job(&job, &mut io);
+        // Read the call disposition before `finish` consumes the IO.
+        let call = io.call_summary();
         // Finalize the recording BEFORE propagating a run error, so a cancelled/force-cancelled
         // job still saves its audio files (rx/tx/mix) up to the cancel point.
         let recording = io.finish()?;
-        Ok((run?, recording))
+        Ok(JobRunOutput {
+            outcomes: run?,
+            recording,
+            call,
+            t0_epoch_ms,
+        })
     })
     .await?
 }

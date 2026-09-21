@@ -116,6 +116,14 @@ enum Command {
         #[arg(long)]
         no_restart: bool,
     },
+    /// Print the capability manifest: the script steps this build implements, and the spec
+    /// version. Clients validate scripts against it before dispatching them.
+    Manifest {
+        /// Ask the running daemon instead of reporting what this binary implements. Use it to
+        /// check a daemon you did not just build — the two can differ across an upgrade.
+        #[arg(long)]
+        daemon: bool,
+    },
     /// Install/manage dialfd as an OS background service (launchd/systemd).
     Service {
         #[command(subcommand)]
@@ -596,6 +604,21 @@ async fn main() -> anyhow::Result<()> {
             // Re-resolve the control socket: `socket` above was resolved from the config that
             // the import just replaced, and the restarted daemon binds per the NEW config.
             restart_daemon_and_verify(&Config::resolve_client_socket(), &report.config_path).await
+        }
+        Command::Manifest { daemon } => {
+            let manifest = if daemon {
+                let resp = call(&socket, ControlOp::ServerManifest).await?;
+                if resp.ok == Some(false) {
+                    anyhow::bail!(resp
+                        .error
+                        .unwrap_or_else(|| "server.manifest failed".to_string()));
+                }
+                resp.data.unwrap_or(serde_json::Value::Null)
+            } else {
+                dialf::jobs::schema::manifest()
+            };
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+            Ok(())
         }
         Command::Service { action, user } => {
             let scope = if user {

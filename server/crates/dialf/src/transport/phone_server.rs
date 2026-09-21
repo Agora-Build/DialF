@@ -443,7 +443,8 @@ async fn trigger_autoanswer(
         )
             .await
         {
-            Ok((outcomes, _)) => {
+            Ok(out) => {
+                let outcomes = out.outcomes;
                 match outcomes
                     .iter()
                     .position(|o| o.summary == crate::jobs::runner::CALL_ENDED_SUMMARY)

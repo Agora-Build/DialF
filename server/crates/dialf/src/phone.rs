@@ -46,6 +46,56 @@ pub struct PhoneJobIo {
     /// like a cancel — shared across all job types, so an app crash+restart aborts auto-answer jobs
     /// too, not just `dialf run`.
     abort: Arc<AtomicBool>,
+    /// Job start, used as the timestamp origin when nothing is being recorded.
+    started: Instant,
+    /// Call disposition, accumulated as the job runs so the result can carry it without a
+    /// follow-up `call.list` — which would race the next call.
+    call: CallTrack,
+}
+
+/// What the job observed about the call it placed or answered.
+#[derive(Debug, Default)]
+struct CallTrack {
+    /// When the call was placed or answered — the origin for `answer_latency_ms`.
+    began: Option<Instant>,
+    /// When it went active.
+    answered: Option<Instant>,
+    /// When it ended, however it ended.
+    ended: Option<Instant>,
+    /// The far-end number, as dialled or as reported for an inbound call.
+    remote_number: Option<String>,
+    /// SIM subscription id, when the phone reported one.
+    sim: Option<String>,
+    /// Why the call finished. `None` until something decides.
+    end_reason: Option<CallEnd>,
+}
+
+/// How a call finished, for the `job.run` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEnd {
+    /// The job ran its course and the call was still up (or we hung up).
+    Completed,
+    /// The far end hung up mid-job.
+    FarEndHangup,
+    /// Never answered within `call.wait_answered`'s timeout.
+    NoAnswer,
+}
+
+/// Call disposition reported alongside the step outcomes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallSummary {
+    /// Dial → answered. `None` for an inbound call, which was already connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_latency_ms: Option<u64>,
+    /// Answered → ended (or → now, if still up when the job finished).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub end_reason: CallEnd,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim: Option<String>,
 }
 
 impl PhoneJobIo {
@@ -77,7 +127,32 @@ impl PhoneJobIo {
             cancel,
             force,
             abort,
+            started: Instant::now(),
+            call: CallTrack {
+                // An auto-answered call is already connected when the job starts, so its
+                // clock begins here and there is no answer latency to report.
+                began: inbound.then(Instant::now),
+                answered: inbound.then(Instant::now),
+                ..CallTrack::default()
+            },
         }
+    }
+
+    /// The call disposition observed so far, or `None` if this job never had a call.
+    pub fn call_summary(&self) -> Option<CallSummary> {
+        let began = self.call.began?;
+        let answered = self.call.answered;
+        let end = self.call.ended.unwrap_or_else(Instant::now);
+        Some(CallSummary {
+            // Inbound calls were already up; reporting a latency there would be inventing one.
+            answer_latency_ms: (!self.inbound)
+                .then(|| answered.map(|a| a.duration_since(began).as_millis() as u64))
+                .flatten(),
+            duration_ms: answered.map(|a| end.duration_since(a).as_millis() as u64),
+            end_reason: self.call.end_reason.unwrap_or(CallEnd::Completed),
+            remote_number: self.call.remote_number.clone(),
+            sim: self.call.sim.clone(),
+        })
     }
 
     /// The device's current call state, if any (read from the registry the reader loop updates).
@@ -116,9 +191,42 @@ impl JobIo for PhoneJobIo {
             .wait_for_speech(turn, self.session.as_mut(), &self.cancel)
     }
 
+    fn wait_for_speech_start(
+        &mut self,
+        timeout_ms: u64,
+        wait_after_start_ms: u64,
+        onset_duration_ms: u64,
+    ) -> anyhow::Result<bool> {
+        self.engine.wait_for_speech_start(
+            timeout_ms,
+            wait_after_start_ms,
+            onset_duration_ms,
+            self.session.as_mut(),
+            &self.cancel,
+        )
+    }
+
+    /// Milliseconds since recording start, read off the recording's own frame clock so a
+    /// timestamp cannot drift from the audio it describes. Without a session there is no
+    /// recording to be relative to, so fall back to wall time from the job's start.
+    fn now_ms(&mut self) -> u64 {
+        match &self.session {
+            Some(s) => {
+                let rate = s.sample_rate().max(1) as u64;
+                s.rx_len() * 1000 / rate
+            }
+            None => self.started.elapsed().as_millis() as u64,
+        }
+    }
+
     fn dial(&mut self, number: &str) -> anyhow::Result<()> {
         self.in_call = true;
         self.saw_active = false; // fresh call
+        self.call.began = Some(Instant::now());
+        self.call.answered = None;
+        self.call.ended = None;
+        self.call.end_reason = None;
+        self.call.remote_number = Some(number.to_string());
         self.cmd(Action::Dial {
             number: number.to_string(),
             sim_sub_id: None, // job-driven dials use the default SIM
@@ -146,12 +254,23 @@ impl JobIo for PhoneJobIo {
                 .get(&self.device_id)
                 .and_then(|d| d.current_call.as_ref().map(|c| c.state));
             match state {
-                Some(CallState::Active) => return Ok(()),
+                Some(CallState::Active) => {
+                    // First sighting only: a later re-entry must not restate the answer time
+                    // and shorten the reported duration.
+                    self.call.answered.get_or_insert_with(Instant::now);
+                    return Ok(());
+                }
                 Some(_) => seen = true, // dialing / ringing
-                None if seen => anyhow::bail!("call ended before it was answered"),
+                None if seen => {
+                    self.call.ended = Some(Instant::now());
+                    self.call.end_reason = Some(CallEnd::NoAnswer);
+                    anyhow::bail!("call ended before it was answered");
+                }
                 None => {} // not placed yet — keep waiting
             }
             if Instant::now() >= deadline {
+                self.call.ended = Some(Instant::now());
+                self.call.end_reason = Some(CallEnd::NoAnswer);
                 anyhow::bail!("call not answered within {timeout_ms}ms");
             }
             std::thread::sleep(Duration::from_millis(150));
@@ -164,7 +283,13 @@ impl JobIo for PhoneJobIo {
         self.cmd(Action::Answer { call_id: None })
     }
 
+    /// Our own hangup closes the call cleanly — distinct from the far end dropping it, which
+    /// `call_ended` records as `far_end_hangup`.
     fn hangup(&mut self) -> anyhow::Result<()> {
+        if self.call.ended.is_none() {
+            self.call.ended = Some(Instant::now());
+            self.call.end_reason = Some(CallEnd::Completed);
+        }
         // We're ending the call ourselves, so stop watching for "ended" — otherwise steps after
         // call.hangup (a final log, a follow-up SMS) would be skipped.
         self.in_call = false;
@@ -183,7 +308,17 @@ impl JobIo for PhoneJobIo {
 
     fn call_ended(&mut self) -> bool {
         let state = self.call_state();
-        call_ended_decision(self.in_call, &mut self.saw_active, state)
+        // Note the moment the call first goes active even when the job never waited for an
+        // answer (an inbound run, or a script that dials and goes straight to playing).
+        if state == Some(CallState::Active) {
+            self.call.answered.get_or_insert_with(Instant::now);
+        }
+        let ended = call_ended_decision(self.in_call, &mut self.saw_active, state);
+        if ended && self.call.ended.is_none() {
+            self.call.ended = Some(Instant::now());
+            self.call.end_reason = Some(CallEnd::FarEndHangup);
+        }
+        ended
     }
 
     fn inbound_mode(&self) -> bool {

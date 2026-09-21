@@ -78,12 +78,60 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `mmi.send`     | `device`, `code`, `sim_sub_id?` | `{code, success, response?}`           |
 | `voicemail.set`| `device`, `enabled`, `number?`, `sim_sub_id?` | `{enabled, success, response?}`        |
 | `audio.play`   | `file`, `device?`               | ok                                     |
-| `job.run`      | `path?` \| `steps?`, `device?`  | `{steps:[...], recording:{rx,tx,mix}}` |
+| `job.run`      | `path?` \| `steps?`, `device?`, `name?` | `{steps:[...], recording:{...}, call:{...}}` (below) |
+| `server.manifest` | —                            | capability manifest (§ *Capability manifest*) |
 | `autoanswer.serve` | `numbers[]`, `path`, `device?` | streamed `{event}` lines (see below) |
 | `job.status`   | `job_id`                        | (not tracked yet)                      |
 
 `sms.list` asks the phone to report its inbox, waits briefly for the `sms` frames, then
 returns what it has recorded.
+
+### The `job.run` result
+
+```jsonc
+{
+  "steps": [
+    { "index": 3, "id": "rsp-001-answer",        // `id` echoes the step's own, omitted if unset
+      "type": "audio.wait_for_speech",
+      "description": "listen for the answer",     // DialF's own label, from the job file
+      "t_start_ms": 12340, "t_end_ms": 19870,     // relative to recording start
+      "end_reason": "completed",                  // completed|timeout|skipped|cancelled|call_ended
+      "summary": "speech 4.1s then 3.0s silence" }
+  ],
+  "recording": { "rx": "…-rx.wav", "tx": "…-tx.wav", "mix": "…-mix.wav",
+                 "t0_epoch_ms": 1758412800123 },  // wall clock at t=0
+  "call": { "answer_latency_ms": 4200, "duration_ms": 63500,
+            "end_reason": "completed",            // completed|far_end_hangup|no_answer
+            "remote_number": "+1555…", "sim": "…" }
+}
+```
+
+**`t=0` is the start of the recording**, not the start of the job — DialF records the whole
+session, so every step timestamp is an offset into the rx/tx/mix files and needs no
+correlation to read. `t0_epoch_ms` is there only to tie the session to other clocks.
+
+The `rx` and `tx` legs are **timeline-aligned**: played audio is anchored at the rx frame
+clock and both legs are padded to the same length, tx silent wherever nothing played. So
+response latency (end of tx speech → onset of rx speech) is computable from the two files
+alone, with the step timestamps used for segmentation and cross-checking.
+
+`recording` is absent for a job that ran without audio; `call` is absent when the job placed
+no call (e.g. `record-only.yaml`).
+
+### Capability manifest
+
+`server.manifest` (and `dialf manifest`, which prints the same without a daemon) reports which
+steps this build implements and which spec it targets — so a client can check compatibility
+before dispatching a job instead of discovering a missing step mid-call:
+
+```jsonc
+{ "executor": "dialf", "version": "0.3.7", "spec_version": "0.1",
+  "steps": ["call.dial", "audio.wait_for_speech_start", …],
+  "inline_orchestrated": ["sms.send", "control.wait", "control.log"],
+  "extensions": [] }
+```
+
+`inline_orchestrated` are the steps DialF can run *during* a call rather than only around it.
 
 `autoanswer.serve` is **connection-scoped**: the daemon registers an auto-answer override
 (answer `numbers` with the job at `path`, overriding config) and streams `done:false`
@@ -112,6 +160,7 @@ dialf sms list <device> [--human]              read recent texts (--human = read
 dialf run  <job.yaml> [--device <id>]          run a YAML job once
 dialf run  <job.yaml> --autoanswer <numbers>   serve: answer those numbers with this job (foreground; Ctrl-C reverts)
 dialf play <file>                              inject audio out the sound card
+dialf manifest [--daemon]                      print the capability manifest (--daemon: ask the running one)
 dialf service install|uninstall|start|stop|status [--user]   (install also takes --config <path>)
 dialf --version                                CLI + running daemon (dialfd) versions
 ```
@@ -132,9 +181,37 @@ Flags:
 | `call.hangup`           | —                                       |
 | `audio.play`            | `file`                                  |
 | `audio.wait_for_speech` | `end_timeout_ms`, `silence_duration_ms`, `onset_duration_ms` |
+| `audio.wait_for_speech_start` | `timeout_ms` (15000), `wait_after_start_ms` (2000), `onset_duration_ms` |
 | `sms.send`              | `to`, `body`                            |
-| `wait`                  | `ms`                                    |
-| `log`                   | `message`                               |
+| `wait` / `control.wait` | `ms`                                    |
+| `log` / `control.log`   | `message`                               |
+
+Every step also takes an optional **`id`** (a string of your choosing) and `description`.
+DialF never interprets `id`; it is echoed back in the step outcome so a caller that generated
+the job can match outcomes to its own model without counting indices.
+
+### Scripting an interruption
+
+`audio.wait_for_speech` returns when the far end *stops* talking.
+`audio.wait_for_speech_start` returns while it is **still** talking: it blocks until speech
+onset, waits `wait_after_start_ms` longer, then returns. The next `audio.play` therefore lands
+on top of the far end — that is the barge-in:
+
+```yaml
+- type: audio.play                    # ask a question
+  file: corpus/question1.wav
+- type: audio.wait_for_speech_start   # it starts answering; let it run 2s
+  timeout_ms: 15000
+  wait_after_start_ms: 2000
+- type: audio.play                    # cut in while it is mid-sentence
+  file: corpus/interrupt.wav
+- type: audio.wait_for_speech         # capture how it reacts
+  end_timeout_ms: 40000
+```
+
+Both windows are measured in **captured audio**, not wall clock. If the far end never speaks,
+the step ends with `end_reason: timeout` and the job **continues** — a turn that yields no
+interrupt is not a failed call.
 
 Example jobs in `server/jobs/`:
 

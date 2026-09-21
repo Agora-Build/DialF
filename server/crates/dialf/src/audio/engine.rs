@@ -215,6 +215,45 @@ impl AudioEngine {
             }
         }
     }
+
+    /// [`run_wait_for_speech_start`] against the recording session, or a bare capture when
+    /// nothing is being recorded. Mirrors [`Self::wait_for_speech`].
+    pub fn wait_for_speech_start(
+        &self,
+        timeout_ms: u64,
+        wait_after_start_ms: u64,
+        onset_duration_ms: u64,
+        sess: Option<&mut DuplexSession>,
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<bool> {
+        match sess {
+            Some(s) => {
+                s.vad_begin();
+                let started = {
+                    let mut src = VadFrameSource::new(s.vad_receiver_mut());
+                    run_wait_for_speech_start(
+                        &mut src,
+                        timeout_ms,
+                        wait_after_start_ms,
+                        onset_duration_ms,
+                        cancel,
+                    )
+                };
+                s.vad_end();
+                started
+            }
+            None => {
+                let mut src = DownmixMono::new(self.open_capture()?);
+                run_wait_for_speech_start(
+                    &mut src,
+                    timeout_ms,
+                    wait_after_start_ms,
+                    onset_duration_ms,
+                    cancel,
+                )
+            }
+        }
+    }
 }
 
 /// Read `file`, convert it to the tx leg's shape (the card's rate and channel count), and
@@ -250,6 +289,118 @@ fn tee_tx(sess: &mut DuplexSession, file: &Path) -> anyhow::Result<()> {
 /// and return why the turn ended. Generic so tests can feed a WAV file source and the
 /// live path can feed the duplex session's frames. Recording (rx) is handled separately by
 /// the [`DuplexSession`]; this only does VAD.
+/// Block until the far end *starts* speaking, keep listening `wait_after_start_ms` longer,
+/// then return **while it is still speaking**.
+///
+/// This is the barge-in primitive. `run_wait_for_speech` waits for a turn to *finish*, which
+/// is the wrong moment to interrupt — by then the far end has stopped. Returning mid-speech
+/// lets the next `audio.play` land on top of it, which is what makes the interrupt scripted
+/// and its latency measurable.
+///
+/// `Ok(false)` means `timeout_ms` elapsed with no onset. That is deliberately not an error:
+/// the turn simply yields no interrupt sample, and abandoning a live call over a missing
+/// datum would be worse than continuing.
+///
+/// Capture keeps being drained throughout — the recording and the VAD stream must not stall
+/// while we wait.
+pub fn run_wait_for_speech_start<S: CaptureSource>(
+    src: &mut S,
+    timeout_ms: u64,
+    wait_after_start_ms: u64,
+    onset_duration_ms: u64,
+    cancel: &AtomicBool,
+) -> anyhow::Result<bool> {
+    // Only onset matters here, so silence/end timeouts are pushed beyond the window we watch.
+    let turn = TurnConfig {
+        onset_duration_ms,
+        end_timeout_ms: timeout_ms,
+        silence_duration_ms: u64::MAX,
+        ..TurnConfig::default()
+    };
+    let mut seg = Segmenter::new(turn)?;
+    let hop = seg.hop_size();
+    let mut resampler = Resampler16k::new(src.sample_rate());
+
+    // Both windows are counted in *audio* time, like the turn detector's own timeouts — one
+    // hop is a fixed slice of captured sound however fast it arrives. Wall-clock would be
+    // equivalent for a live card but wrong for anything that delivers faster than real time,
+    // and it would make the behaviour untestable against a file.
+    let hop_ms = (hop as u64 * 1000) / super::vad::VAD_SAMPLE_RATE as u64;
+    let hop_ms = hop_ms.max(1);
+    let timeout_hops = timeout_ms / hop_ms;
+    let linger_hops = wait_after_start_ms / hop_ms;
+
+    let mut read_buf = vec![0i16; 4096];
+    let mut pending: Vec<i16> = Vec::with_capacity(hop * 4);
+    let mut hops_seen: u64 = 0;
+    // Set to the hop index at which the far end started talking.
+    let mut onset_at: Option<u64> = None;
+
+    let stall_limit = Duration::from_millis(3_000);
+    let mut last_data = Instant::now();
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(onset_at.is_some());
+        }
+
+        let n = match src.read(&mut read_buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_data.elapsed() >= stall_limit {
+                    anyhow::bail!(
+                        "capture stalled — no audio for {} ms. Please grant Microphone permission \
+                         to the daemon (macOS) and check the sound card is connected",
+                        stall_limit.as_millis()
+                    );
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        last_data = Instant::now();
+        if n == 0 {
+            // Capture ended. Whether onset was heard first decides what the caller reports.
+            return Ok(onset_at.is_some());
+        }
+
+        let out = resampler.process(&read_buf[..n]);
+        pending.extend_from_slice(&out);
+
+        let mut start = 0;
+        while pending.len() - start >= hop {
+            let frame = &pending[start..start + hop];
+            if let Some(TurnEvent::SpeechStarted) = seg.push_hop(frame)? {
+                if onset_at.is_none() {
+                    tracing::info!(wait_after_start_ms, "wait_for_speech_start: onset");
+                    onset_at = Some(hops_seen);
+                }
+            }
+            hops_seen += 1;
+            start += hop;
+
+            match onset_at {
+                // Returning here is the point: the far end is still mid-sentence, so
+                // whatever plays next lands on top of it.
+                Some(at) if hops_seen - at >= linger_hops => {
+                    if start > 0 {
+                        pending.drain(0..start);
+                    }
+                    return Ok(true);
+                }
+                None if hops_seen >= timeout_hops => {
+                    tracing::info!(timeout_ms, "wait_for_speech_start: no speech onset");
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        if start > 0 {
+            pending.drain(0..start);
+        }
+    }
+}
+
 pub fn run_wait_for_speech<S: CaptureSource>(
     src: &mut S,
     turn: TurnConfig,
