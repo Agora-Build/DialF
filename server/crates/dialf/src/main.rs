@@ -1145,7 +1145,18 @@ async fn print_versions() -> anyhow::Result<()> {
     )
     .await;
     match q {
-        Ok(Ok(resp)) => match resp
+        Ok(Ok(resp)) => {
+            // Reported right under the versions because a denied mic is the most common reason
+            // a correctly-installed daemon still cannot run a job.
+            if let Some(mic) = resp
+                .data
+                .as_ref()
+                .and_then(|d| d.get("microphone"))
+                .and_then(|v| v.as_str())
+            {
+                print_mic_line(mic);
+            }
+            match resp
             .data
             .as_ref()
             .and_then(|d| d.get("version"))
@@ -1169,11 +1180,37 @@ async fn print_versions() -> anyhow::Result<()> {
             None => println!(
                 "dialfd (daemon): running, older than the CLI — re-run `dialf service install` (add `--user` if you installed it per-user) to update"
             ),
-        },
+        }
+        }
         Ok(Err(_)) => println!("dialfd (daemon): not running"),
         Err(_) => println!("dialfd (daemon): not responding"),
     }
     Ok(())
+}
+
+/// Report the daemon's microphone state, with the fix attached when there is one. Silent when
+/// the grant is in place, or off macOS where there is no TCC gate to report.
+fn print_mic_line(state: &str) {
+    match state {
+        "authorized" | "not_applicable" => {}
+        "denied" => {
+            println!("microphone:      DENIED for the daemon");
+            println!(
+                "  ↳ macOS will not ask again for this binary: enable `dialf` in System Settings \
+                 → Privacy & Security → Microphone (the grant is per-binary — after an upgrade \
+                 pick the newest entry), then restart the daemon"
+            );
+        }
+        "not_determined" => {
+            println!("microphone:      not yet granted");
+            println!(
+                "  ↳ approve the dialog on this Mac's screen. If none appears, the daemon was \
+                 started from tmux/screen/ssh, where macOS shows nothing — start it from a plain \
+                 Terminal window or `dialf service install --user`"
+            );
+        }
+        other => println!("microphone:      {other}"),
+    }
 }
 
 /// Foreground serve: register an auto-answer override (this job for these numbers), stream the

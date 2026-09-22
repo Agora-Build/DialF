@@ -351,6 +351,19 @@ fn reap_stray_audio(cfg: &AudioConfig) {
     }
 }
 
+/// Which multiplexer this process is running under, from the live environment.
+pub(crate) fn current_multiplexer() -> Option<&'static str> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    multiplexer_name(
+        std::env::var_os("TMUX").is_some(),
+        &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+        std::env::var_os("STY").is_some(),
+        std::env::var_os("ZELLIJ").is_some(),
+    )
+}
+
 /// Which terminal multiplexer (if any) the given env indicates. Pure, so it's testable.
 fn multiplexer_name(
     tmux_set: bool,
@@ -656,6 +669,9 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 "version": env!("CARGO_PKG_VERSION"),
                 "ten_vad": ten_vad_sys::version().unwrap_or_else(|| "stub".to_string()),
                 "config_path": state.config_path.display().to_string(),
+                // The most common deployment failure on macOS, and previously only visible by
+                // grepping the daemon log. `not_applicable` off macOS, which has no TCC gate.
+                "microphone": crate::audio::mic_permission::status_label(),
             }),
         )),
         ControlOp::ServerManifest => Ok(ok_data(&id, crate::jobs::schema::manifest())),
