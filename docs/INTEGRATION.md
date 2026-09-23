@@ -72,8 +72,9 @@ worth accepting up front rather than discovering:
 - **There is one phone and one sound card**, so one call at a time. That is hardware, not
   policy, and no amount of connection pooling changes it.
 - **File paths are resolved by the daemon**, not by you — it is the process holding the device.
-- **Permissions are a runtime concern.** Driving a real device means the OS gets a vote; on
-  macOS the microphone grant is checked when a job runs, not when your client connects (§10).
+- **Permissions are a runtime concern.** Driving a real device means the OS gets a vote. On
+  macOS a missing microphone grant only *fails* when a job runs, but `server.info` reports it,
+  so check it at startup (§6, §10).
 - **The interesting output is files.** The socket tells you what happened and where the audio
   landed; the analysis you care about happens afterwards, against the WAVs.
 
@@ -108,7 +109,8 @@ line. Every request carries an `id` you choose, echoed back so you can correlate
 {"id": "1", "op": "server.info"}
 // ←
 {"id": "1", "done": true, "ok": true,
- "data": {"version": "0.3.8", "ten_vad": "1.0", "config_path": "/Users/you/.config/dialf/config.yaml"}}
+ "data": {"version": "0.3.10", "ten_vad": "1.0", "microphone": "authorized",
+          "config_path": "/Users/you/.config/dialf/config.yaml"}}
 ```
 
 | Field | Meaning |
@@ -232,6 +234,11 @@ needed = {"call.dial", "call.wait_answered", "audio.play", "audio.wait_for_speec
 missing = needed - set(manifest["steps"])
 if missing:
     raise SystemExit(f"dialfd {info['version']} does not implement: {', '.join(sorted(missing))}")
+
+# macOS: every job records, so a missing grant fails every job. Absent on daemons before 0.3.9.
+mic = info.get("microphone")
+if mic in ("denied", "not_determined"):
+    raise SystemExit(f"dialfd's microphone permission is {mic} — see §10")
 ```
 
 `server.manifest` lists exactly the steps the running build implements, generated from the same
@@ -241,6 +248,9 @@ number: a step you need is a capability, and capabilities are what the manifest 
 
 `server.info` also returns `ten_vad`. If that reads `"stub"`, the build has no voice-activity
 detection linked — every `audio.wait_for_speech*` step will misbehave. Fail at startup.
+
+`microphone` is `authorized`, `denied`, `not_determined` or `unknown` on macOS, and
+`not_applicable` on Linux, which has no such gate.
 
 ---
 
@@ -343,9 +353,9 @@ Every op takes `device` (omit when exactly one phone is connected) unless noted.
 
 | `op` | Request fields | `data` on success |
 |---|---|---|
-| `server.info` | — | `{version, ten_vad, config_path}` |
+| `server.info` | — | `{version, ten_vad, microphone, config_path}` |
 | `server.manifest` | — | `{executor, version, spec_version, steps[], inline_orchestrated[], extensions[]}` |
-| `devices.list` | — (no `device`) | `[{id, name, addr, last_seen_ms, current_call}]` |
+| `devices.list` | — (no `device`) | `[{id, name, addr, last_seen_ms, current_call, adb?}]` — `adb`: wireless-debugging state, see [PROTOCOL.md](PROTOCOL.md#wireless-adb) |
 | `call.dial` | `number`, `sim_sub_id?` | `{dialed, sim_sub_id}` |
 | `call.answer` | — | — |
 | `call.hangup` | — | — |
@@ -387,13 +397,14 @@ remaining steps as `skipped`. A cancelled run is a readable result, not a lost o
 | `parse job file …` | bad YAML, or a step this build lacks | validate against the manifest before dispatch |
 | `a dialf serve session is already running` | second `autoanswer.serve` | one at a time, machine-wide |
 
-**Microphone permission is the single most common deployment failure on macOS**, and it fails
-at the first job rather than at daemon start, so it looks like a bug in your integration. The
-grant is keyed to the *binary path*, so every DialF upgrade needs a fresh one; a daemon started
-under `tmux`/`ssh` cannot show the dialog at all and a previously denied binary is never
-re-prompted. Run `dialfd` as a user LaunchAgent (`dialf service install --user`) and have a
-human approve it once per upgrade. Every job opens a recording session, so this gates *all* of
-them — even a job with no audio steps.
+**Microphone permission is the single most common deployment failure on macOS.** It fails at
+the first job, not at daemon start, so it looks like a bug in your integration — read
+`server.info`'s `microphone` at startup instead (§6). The grant is tied to the exact binary, so
+every DialF upgrade needs a fresh one; a daemon started under `tmux`/`ssh` cannot show the
+dialog at all, and a previously denied binary is never re-prompted. Run `dialfd` as a user
+LaunchAgent (`dialf service install --user`), started from a plain Terminal, and have a human
+approve it once per upgrade. Every job opens a recording session, so this gates *all* of them —
+even a job with no audio steps.
 
 ---
 

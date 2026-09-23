@@ -19,9 +19,8 @@ dialf (CLI) ──▶ dialfd (host daemon) ──WiFi──▶ mobile app  ─�
 - **Scripted audio conversations** (YAML + ten-vad), call recording, runtime audio injection.
 - Works **while the phone is locked**; runs on macOS & Linux, arm64 & x86_64.
 
-**Building DialF into your own product?** Start with
-[`docs/INTEGRATION.md`](docs/INTEGRATION.md) — driving the phone as a *Programmable
-Application* from your own service over the control socket, rather than through the CLI.
+**Building DialF into your own product?** See
+[Integrating DialF into your app](#integrating-dialf-into-your-app) below.
 
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol + control API,
 [`docs/HARDWARE.md`](docs/HARDWARE.md) for the sound-card bridge wiring + macOS
@@ -211,6 +210,60 @@ dialf devices connect <host> --token <dvs_…>   # reach a token-protected share
 `<device>` is the id the phone registered as (see `dialf devices`). `dialf` talks to `dialfd`
 over a local control socket, so it must run on the same host. `--human` formats
 times/numbers/durations; omit it for JSON (scriptable).
+
+## Integrating DialF into your app
+
+Use the **control socket**. It is the same interface the `dialf` CLI uses, so anything the CLI
+can do, your program can do — with structured JSON in and out instead of text to parse.
+
+| Approach | Good for | Why not always |
+|---|---|---|
+| **Control socket** (recommended) | services, test harnesses, eval pipelines | needs a few lines of client code |
+| Run the `dialf` CLI from your code | shell scripts, cron | output is written for people; no cancel, no streaming |
+| `autoanswer:` in `config.yaml` | a fixed inbound behaviour, no code at all | static: one job per number |
+
+The socket speaks **one JSON object per line** each way. This is a complete client:
+
+```python
+import json, os, socket
+
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(f"/tmp/dialfd-{os.getuid()}.sock")   # the per-user daemon on macOS
+lines = sock.makefile("rb")
+
+def call(op, **fields):
+    sock.sendall(json.dumps({"id": "1", "op": op, **fields}).encode() + b"\n")
+    resp = json.loads(lines.readline())
+    if not resp.get("ok"):
+        raise RuntimeError(resp.get("error"))
+    return resp.get("data")
+
+print(call("server.info"))     # {'version': '0.3.10', 'microphone': 'authorized', ...}
+result = call("job.run", name="demo", steps=[
+    {"type": "call.dial", "number": "+15551234"},
+    {"type": "call.wait_answered", "timeout_ms": 30000},
+    {"type": "audio.play", "file": "/abs/path/prompt.wav"},
+    {"type": "audio.wait_for_speech", "end_timeout_ms": 30000},
+    {"type": "call.hangup"},
+])
+# result["steps"]: each step's timing and end_reason; result["recording"]: the rx/tx/mix WAVs
+```
+
+What to know before you build on it:
+
+- **It is local.** A Unix socket on the machine running `dialfd`, because the call audio is a
+  cable into that machine. A remote product runs a small service next to `dialfd`.
+- **Its only protection is file permissions** — whoever can open it can dial, text and run jobs.
+- **One call at a time**, and `job.run` answers only when the job ends. To cancel it, send
+  `job.cancel` on a *second* connection: the first one is busy waiting.
+- **Check at startup, not mid-call:** `server.info` (version, and on macOS whether the
+  microphone is granted) and `server.manifest` (which job steps this build supports).
+- **The results are files.** Every step reports `t_start_ms`/`t_end_ms` as offsets into the
+  recordings, so you can cut the audio per step without matching clocks.
+
+The full guide — finding the socket in every install mode, inbound calls, every op and error,
+deployment: [`docs/INTEGRATION.md`](docs/INTEGRATION.md). Field reference:
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Sharing a phone with another machine
 
