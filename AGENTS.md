@@ -17,6 +17,9 @@ entries below cost hours of debugging, so read before re-deriving them.
 - **Claims need evidence.** "It works" means you ran it — on hardware where hardware is
   involved. Expect to be asked "are you sure?", "no regression?", "did you add tests?", and
   have the answer ready before it's asked.
+- **A polling loop proves "eventually", not "when someone looks".** For anything a user reads
+  (`dialf devices`, `--version`), also check it once, right after the event, the way a person
+  would. Loops waiting up to 90 s hid a 30 s gap that shipped in 0.3.9.
 
 ## Layout
 
@@ -176,6 +179,9 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   binary, exempt) reaches the same port. Under tmux it is never granted, and even from a
   granted Terminal the *first* attempt can fail before the grant applies. `adb_link` reports
   this as `blocked_local_network` rather than a network error.
+- **A reconnect wipes the device entry**, `adb` block included (`phone_server` upserts a fresh
+  `DeviceInfo`). The app therefore sends a heartbeat right after `hello`; before that, every
+  reconnect left `dialf devices` without the adb line for up to 30 s.
 - **Loopback to the host adb server is not gated**, so dialfd can always *read* adb's device
   list (`share::adb::list_devices`) even when it could not connect anything. That read runs on
   every heartbeat; backoff limits only `adb connect`.

@@ -21,7 +21,7 @@ closed.
 | `type`       | Fields                                                                 |
 |--------------|-----------------------------------------------------------------------|
 | `hello`      | `device_id`, `name`, `key`, `caps[]`, `app_version?`                   |
-| `heartbeat`  | `ts`, `battery?`, `adb?` — sent ~every 30s, and at once when `adb` changes |
+| `heartbeat`  | `ts`, `battery?`, `adb?` — sent right after `hello`, then ~every 30s, and at once when `adb` changes |
 | `call_state` | `call_id`, `state` (`dialing`/`ringing`/`active`/`ended`), `number?`, `direction` (`in`/`out`). `dialing` = outbound, far end ringing, not yet answered; `active` = answered/connected |
 | `sms`        | `direction` (`in`/`out`), `from?`, `to?`, `body`, `ts`                 |
 | `calls`      | `entries[]` of `{number?, kind, ts, duration}` — reply to `list_calls` |
