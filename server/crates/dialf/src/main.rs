@@ -357,6 +357,15 @@ fn init_logging(to_file: bool, system: bool) -> Option<tracing_appender::non_blo
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !needs_sigpipe_ignored(&args) {
+        // Die quietly when a reader goes away (`dialf devices | head -1`), like any Unix tool.
+        // Rust ignores SIGPIPE so that `println!` panics with "Broken pipe" instead.
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     // Logging: stdout (colored only on a real terminal) always; the daemon ALSO writes a
     // daily-rotated plain-text file (keeping the last 7), so even a foreground `dialf daemon`
     // persists logs. The returned guard must live for the process lifetime or the non-blocking file
@@ -1188,6 +1197,18 @@ async fn print_versions() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether this invocation must keep Rust's ignored SIGPIPE: the processes that write to sockets
+/// whose peers come and go. With the default disposition, one phone or adb client disconnecting
+/// mid-write would kill the daemon or the `devices connect` relay outright.
+fn needs_sigpipe_ignored(args: &[String]) -> bool {
+    let mut positional = args.iter().filter(|a| !a.starts_with('-'));
+    match positional.next().map(String::as_str) {
+        Some("daemon") => true,
+        Some("devices") => positional.next().map(String::as_str) == Some("connect"),
+        _ => false,
+    }
+}
+
 /// Report the daemon's microphone state, with the fix attached when there is one. Silent when
 /// the grant is in place, or off macOS where there is no TCC gate to report.
 fn print_mic_line(state: &str) {
@@ -1504,6 +1525,20 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_long_running_socket_writers_keep_sigpipe_ignored() {
+        let a = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert!(super::needs_sigpipe_ignored(&a("daemon")));
+        assert!(super::needs_sigpipe_ignored(&a("daemon --config x.yaml")));
+        assert!(super::needs_sigpipe_ignored(&a("devices connect 10.0.0.2:5939 --token t")));
+        // Everything else is a short-lived client whose stdout is often piped.
+        assert!(!super::needs_sigpipe_ignored(&a("--version")));
+        assert!(!super::needs_sigpipe_ignored(&a("devices --human")));
+        assert!(!super::needs_sigpipe_ignored(&a("devices share --list")));
+        assert!(!super::needs_sigpipe_ignored(&a("run daemon.yaml")), "a job file named daemon");
+        assert!(!super::needs_sigpipe_ignored(&[]));
+    }
+
     #[test]
     fn the_adb_line_carries_the_fix_when_not_connected() {
         use serde_json::json;
