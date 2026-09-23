@@ -41,6 +41,19 @@ pub enum CallState {
 // ---------------------------------------------------------------------------
 
 /// Messages a phone sends to `dialfd`.
+/// The phone's wireless-debugging state, as found by the app itself (it browses
+/// `_adb-tls-connect._tcp` and keeps the service at its own IP).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdbReport {
+    pub wifi_enabled: bool,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The phone's own mDNS advert name. adb connects a freshly paired phone by itself under a
+    /// serial built from it, so this is how dialfd recognises that connection as this phone.
+    #[serde(default)]
+    pub service: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PhoneToServer {
@@ -63,6 +76,9 @@ pub enum PhoneToServer {
         ts: i64,
         #[serde(default)]
         battery: Option<u8>,
+        /// Wireless-debugging state, from apps that report it. Older apps omit it.
+        #[serde(default)]
+        adb: Option<AdbReport>,
     },
     /// A call leg changed state.
     CallState {
@@ -403,6 +419,31 @@ pub struct ControlResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both directions must keep working: an app that doesn't report `adb` against this daemon,
+    /// and this app against a daemon that ignores the field.
+    #[test]
+    fn heartbeat_adb_is_optional() {
+        let old: PhoneToServer = serde_json::from_str(r#"{"type":"heartbeat","ts":1}"#).unwrap();
+        assert!(matches!(old, PhoneToServer::Heartbeat { adb: None, .. }));
+
+        let new: PhoneToServer = serde_json::from_str(
+            r#"{"type":"heartbeat","ts":1,"adb":{"wifi_enabled":true,"port":41195}}"#,
+        )
+        .unwrap();
+        let PhoneToServer::Heartbeat { adb: Some(r), .. } = new else {
+            panic!("adb report not parsed");
+        };
+        assert_eq!(r, AdbReport { wifi_enabled: true, port: Some(41195), service: None });
+
+        // Wireless debugging on, port not found yet.
+        let pending: PhoneToServer =
+            serde_json::from_str(r#"{"type":"heartbeat","ts":1,"adb":{"wifi_enabled":true}}"#).unwrap();
+        assert!(matches!(
+            pending,
+            PhoneToServer::Heartbeat { adb: Some(AdbReport { wifi_enabled: true, port: None, .. }), .. }
+        ));
+    }
     use crate::registry::CallRecord;
 
     #[test]

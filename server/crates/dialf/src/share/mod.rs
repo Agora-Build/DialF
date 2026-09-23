@@ -310,6 +310,14 @@ pub struct ShareConfig {
     /// Each entry is a port (`27183`) or an inclusive range (`"27183-27199"`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forward_ports: Vec<PortSpec>,
+    /// Keep phones that report a wireless-debugging port connected in this host's adb server
+    /// (`adb_link`). Independent of whether a share is running: it is as useful for local adb or
+    /// scrcpy without a cable, and tying it to a share would mean opening a port to get it.
+    pub autoconnect: bool,
+    /// Explicit adb binary for `autoconnect`, when adb is not on the service's PATH (SDK
+    /// `platform-tools` usually is not).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adb: Option<std::path::PathBuf>,
 }
 
 /// One hour: long enough for a work session, short enough that forgetting is survivable.
@@ -332,6 +340,8 @@ impl Default for ShareConfig {
             all: false,
             expire_after: DEFAULT_EXPIRE_AFTER,
             forward_ports: Vec::new(),
+            autoconnect: false,
+            adb: None,
         }
     }
 }

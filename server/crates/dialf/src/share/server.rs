@@ -581,6 +581,7 @@ mod tests {
             all: true,
             expire_after: 3600,
             forward_ports: Vec::new(),
+            ..Default::default()
         };
         // Bind on port 0, then recover the real port for clients to dial.
         let mut resolved = cfg.resolve(Profile::Adb, true).unwrap();

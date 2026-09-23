@@ -60,6 +60,20 @@ The `dialf` CLI auto-picks your own daemon if you have one, else the shared one.
 recording on macOS run the **user** service: `dialf service install --user` (details in
 [`docs/HARDWARE.md`](docs/HARDWARE.md)). On Linux a system service records fine (no TCC gate).
 
+**macOS + tmux: where to run what.** macOS decides microphone and Local Network permission by
+*who started* the process that needs them — and a process started from tmux (or screen, or
+over SSH) never gets them, silently. So:
+
+| Run from a **plain Terminal window** | Run from **anywhere**, tmux included |
+|---|---|
+| `dialf service install/start/stop --user` — starts the daemon, which records | `dialf run`, `devices`, `call`, `sms`, `play` |
+| upgrading (`npm install -g …` then `service install`) | `dialf devices share …` (the share runs in the daemon) |
+| the first `adb` command when no adb server is running — it starts the server that `adb_share.autoconnect` connects through | every other `adb` command, once a server is running |
+
+The right-hand commands are clients talking to the daemon over its local socket, which macOS
+doesn't gate. If you started the adb server from tmux by accident, `dialf devices` shows
+`blocked_local_network`; `adb kill-server`, then any `adb` command from Terminal, fixes it.
+
 Manage the service (launchd on macOS / systemd on Linux):
 
 ```sh
@@ -89,7 +103,8 @@ The new binary installs at a versioned path, so **re-run `dialf service install`
 upgrade** to point the service at it and reload (idempotent — no uninstall needed). On
 **macOS**, the daemon is unsigned, so the OS re-prompts for the **Microphone** the first
 time the upgraded daemon records — **Allow** it. (A silent empty `rx.wav` is the tell that
-the mic grant is missing; see [`docs/HARDWARE.md`](docs/HARDWARE.md).) The phone reconnects
+the mic grant is missing; see [`docs/HARDWARE.md`](docs/HARDWARE.md). Do the upgrade from a plain Terminal, not tmux — see
+*macOS + tmux* above — or the prompt never appears.) The phone reconnects
 on its own a few seconds after the reload.
 
 ### Build from source
@@ -255,6 +270,40 @@ server and report no devices. Plain `adb` needs neither.
 
 Full walkthrough, including the Netbird setup and the security trade-offs:
 [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md).
+
+### No cable: wireless debugging
+
+The phone app reports its **wireless-debugging** port to dialfd, so `dialf devices` shows where
+adb can reach it — no reading the port off the phone's screen, which changes every time
+wireless debugging is switched on:
+
+```
+pixel-9-pro-9657     Pixel 9 Pro      192.168.100.179  seen 1s ago   idle
+  adb: 192.168.100.179:41195  connected
+```
+
+When adb connected the phone by itself (it does after pairing), the line ends with
+`(adb -s <name>)` — the serial to pass to `adb -s` or `dialf devices share --target`.
+
+Turn on `adb_share.autoconnect` and dialfd keeps the phone connected in this host's adb server,
+reconnecting after drops and port changes — so adb, scrcpy and `dialf devices share` all work
+with no cable at all:
+
+```yaml
+adb_share:
+  autoconnect: true
+```
+
+It is independent of sharing: useful on its own for local adb, and a share started later
+simply finds the phone already there. You pair each host with the phone once (Wireless
+debugging → Pair device with pairing code, then `adb pair <ip>:<port>`); `dialf devices` says so
+when that's what's missing. Setup, every state, and the caveats (a share by `ip:port` does not
+follow a port change): [`docs/DEVICE_SHARING.md`](docs/DEVICE_SHARING.md#no-cable-wireless-debugging).
+
+**macOS:** connecting needs **Local Network** permission for whichever process owns the adb
+server. Start the service (or the adb server) from a plain Terminal window, not tmux — under
+tmux macOS never grants it, and `adb connect` fails with `No route to host` even though the
+network is fine. `dialf devices` reports this as `blocked_local_network`.
 
 ## How It Works
 

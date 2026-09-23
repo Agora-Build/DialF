@@ -125,9 +125,22 @@ audio:
   #   playback_cmd: ["/opt/homebrew/bin/sox", "-q", "-V1", "{file}", "-t", "coreaudio", "BlackHole 2ch"]
   #   capture_cmd:  ["/opt/homebrew/bin/sox", "-q", "-t", "coreaudio", "BlackHole 16ch", "-t", "raw", "-b", "16", "-e", "signed-integer", "-r", "{rate}", "-c", "{channels}", "-", "remix", "1"]
 
-# --- Device sharing: let another machine drive this host's phone over adb ---------------
-# `dialf devices share --target <serial>` exposes the host's adb server so a remote machine
-# can run `adb shell`, `install`, `logcat`, `push`/`pull` against a phone plugged in here.
+# --- adb: wireless debugging + device sharing -------------------------------------------
+# Two independent things live under `adb_share`:
+#
+#   autoconnect  keep the phone connected to THIS host's adb server over Wi-Fi (wireless
+#                debugging), so adb/scrcpy work here with no cable. The app reports the port;
+#                `dialf devices --human` shows `adb: <ip>:<port>  <state>` either way. Pair this
+#                host with the phone once (`adb pair`). Opens no port.
+#   share        `dialf devices share --target <serial>` exposes the host's adb server so a
+#                remote machine can run `adb shell`, `install`, `logcat`, `push`/`pull` against
+#                a phone here — plugged in, or connected by `autoconnect`.
+#
+# Minimal, cable-less local adb:
+#
+# adb_share:
+#   autoconnect: true
+#
 # `dialf devices share --list` shows what is attached; sharing never defaults to everything.
 #
 # The default bind is 0.0.0.0:5939 — reachable from the network. Without `--token` the share
@@ -150,3 +163,8 @@ audio:
 #                             # through `adb forward` (scrcpy, flutter run, Android Studio).
 #                             # A range covers wherever scrcpy lands; a single port must match
 #                             # scrcpy's --port exactly. Numbers and "a-b" strings both work.
+#   autoconnect: false        # keep phones' wireless debugging connected in this host's adb
+#                             # server — no cable. Works whether or not a share is running.
+#                             # The endpoint shows in `dialf devices` either way.
+#   adb: ~/Library/Android/sdk/platform-tools/adb   # only if adb is not on the service PATH
+#                             # and not in the SDK's default location

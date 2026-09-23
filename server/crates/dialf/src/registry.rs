@@ -93,20 +93,19 @@ pub struct VoicemailResult {
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,
-    /// The phone's LAN IP, taken from the WebSocket peer — useful for reaching the phone over
-    /// WiFi (`adb connect <ip>:<port>`) to debug the app without a USB cable. `None` until the
-    /// phone connects.
+    /// The phone's LAN IP, taken from the WebSocket peer. `None` until the phone connects.
     ///
-    /// Only the IP is known here, never the adb port. `5555` is *not* a default — it's just the
-    /// convention for classic `adb tcpip 5555`, which has to be enabled over USB and is lost on
-    /// reboot. Android 11+ Wireless debugging instead uses a *random* port shown only on the phone
-    /// screen (and gated behind one-time pairing). To get a fixed, known port unattended — no human
-    /// reading the screen — you need root: set `service.adb.tcp.port 5555` and persist it across
-    /// boots with a Magisk service script (plain `setprop` is wiped on reboot).
+    /// The wireless-debugging port is not derived from this: Android 11+ picks a random one each
+    /// time it is switched on, and `5555` is only the old `adb tcpip` convention. The app finds
+    /// the real port itself and reports it — see `adb`.
     #[serde(default)]
     pub addr: Option<String>,
     pub last_seen_ms: i64,
     pub current_call: Option<CallInfo>,
+    /// Wireless-debugging endpoint and connection state (`adb_link`). `None` for apps that
+    /// don't report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adb: Option<crate::adb_link::AdbStatus>,
 }
 
 /// Registry of devices keyed by id.
@@ -184,6 +183,7 @@ mod tests {
             addr: None,
             last_seen_ms,
             current_call: None,
+            adb: None,
         }
     }
 

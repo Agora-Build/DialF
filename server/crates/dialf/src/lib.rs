@@ -6,6 +6,7 @@
 //! - **Audio plane:** `dialfd` owns the sound card via external CLI tools, runs VAD, and
 //!   executes YAML jobs ([`jobs`]).
 
+pub mod adb_link;
 pub mod audio;
 pub mod bundle;
 pub mod config;

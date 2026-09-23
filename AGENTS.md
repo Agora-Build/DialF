@@ -34,7 +34,7 @@ Android forbids capturing call audio, so audio never crosses WiFi.
 ## Build / test / verify
 
 ```sh
-cd server && cargo test --workspace          # ~101 tests; keep them green
+cd server && cargo test --workspace          # ~255 tests; keep them green
 cd app/android && ./gradlew :app:testDebugUnitTest   # JVM unit tests (no emulator)
 cd app && flutter build apk --release --build-name=X.Y.Z --build-number=N
 ```
@@ -161,6 +161,36 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - Install scope decides socket sharing: `--user` = private per-user socket; system install =
   one shared socket owned by the `dialf` group (0660). The control socket has **no auth
   beyond fs permissions** — group members can dial/SMS/run jobs.
+
+### Wireless adb (`adb_share.autoconnect`)
+- **The app finds its own port; nothing else can.** Android exposes no API for the
+  wireless-debugging port, and `service.adb.tls.port` is empty even for the shell user. The
+  app browses `_adb-tls-connect._tcp` and must keep only the service at **its own IP** —
+  every phone on the LAN with wireless debugging on is visible.
+- **adb never reconnects a wireless device by itself** after a drop, even while it still sees
+  the phone's mDNS advert. dialfd re-checks on every heartbeat, so `devices.list` can lag an
+  external `adb disconnect` by up to one heartbeat (~30 s) — check `adb devices`, not the
+  reported state, when timing matters.
+- **On macOS `adb connect` needs Local Network permission** on the process that owns the adb
+  server, given per responsible process. Without it: `No route to host`, while `nc` (an Apple
+  binary, exempt) reaches the same port. Under tmux it is never granted, and even from a
+  granted Terminal the *first* attempt can fail before the grant applies. `adb_link` reports
+  this as `blocked_local_network` rather than a network error.
+- **Loopback to the host adb server is not gated**, so dialfd can always *read* adb's device
+  list (`share::adb::list_devices`) even when it could not connect anything. That read runs on
+  every heartbeat; backoff limits only `adb connect`.
+- **The port moves without the setting moving.** One off/on on a Pixel restarted adbd twice in
+  two seconds (two ports) while `adb_wifi_enabled` read `1` throughout. NSD's cache also answers
+  first with the *previous* port, and adbd re-advertises under the **same service name**, so the
+  new port arrives only as an *update* — via `registerServiceInfoCallback`, which must stay
+  registered. A one-shot search reports a dead port indefinitely.
+- **adb 37 says nothing useful when unpaired**: a bare `failed to connect to <ip>:<port>`, while
+  TCP to that port succeeds. Network failures always carry a reason after the address; that is
+  the only tell. (Older adb said `failed to authenticate`.) Test string matching against the
+  adb actually installed, not against what the output is assumed to say.
+- **adb connects a freshly paired phone by itself**, as `<advert>._adb-tls-connect._tcp`. The
+  app reports the advert name so dialfd accepts that serial; connecting `ip:port` as well lists
+  the phone twice and breaks every bare `adb shell`/`scrcpy` with "more than one device".
 
 ### Device sharing (`dialf devices share`)
 - **The ADB server protocol has no authentication** — its loopback bind *is* its security

@@ -1388,6 +1388,29 @@ fn human_device(d: &serde_json::Value) {
         _ => "idle".to_string(),
     };
     println!("{id:<20} {name:<16} {addr:<16} seen {ago}s ago   {call}");
+    if let Some(line) = human_adb(d.get("adb")) {
+        println!("  {line}");
+    }
+}
+
+/// One line for the phone's wireless-debugging state, with the fix when it isn't connected.
+/// `None` for apps that don't report it.
+fn human_adb(adb: Option<&serde_json::Value>) -> Option<String> {
+    let adb = adb.filter(|v| !v.is_null())?;
+    let state = adb.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+    let endpoint = adb.get("endpoint").and_then(|v| v.as_str());
+    let mut line = match endpoint {
+        Some(ep) => format!("adb: {ep}  {state}"),
+        None => format!("adb: {state}"),
+    };
+    // adb may list the phone under its mDNS name instead; that is what `adb -s` needs.
+    if let Some(serial) = adb.get("serial").and_then(|v| v.as_str()).filter(|s| Some(*s) != endpoint) {
+        line.push_str(&format!(" (adb -s {serial})"));
+    }
+    if let Some(detail) = adb.get("detail").and_then(|v| v.as_str()) {
+        line.push_str(&format!(" — {detail}"));
+    }
+    Some(line)
 }
 
 fn human_sms(m: &serde_json::Value) {
@@ -1481,6 +1504,31 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_adb_line_carries_the_fix_when_not_connected() {
+        use serde_json::json;
+        assert_eq!(super::human_adb(None), None);
+        assert_eq!(super::human_adb(Some(&json!(null))), None);
+        assert_eq!(
+            super::human_adb(Some(&json!({"endpoint": "10.0.0.5:41195", "state": "connected"}))).unwrap(),
+            "adb: 10.0.0.5:41195  connected"
+        );
+        let line = super::human_adb(Some(&json!({
+            "endpoint": "10.0.0.5:41195", "state": "needs_pairing", "detail": "pair once"
+        })))
+        .unwrap();
+        assert_eq!(line, "adb: 10.0.0.5:41195  needs_pairing — pair once");
+        assert_eq!(super::human_adb(Some(&json!({"state": "off"}))).unwrap(), "adb: off");
+        // Listed under the endpoint itself: nothing to add.
+        let same = json!({"endpoint": "10.0.0.5:41195", "serial": "10.0.0.5:41195", "state": "connected"});
+        assert_eq!(super::human_adb(Some(&same)).unwrap(), "adb: 10.0.0.5:41195  connected");
+        let mdns = json!({"endpoint": "10.0.0.5:41195", "serial": "adb-X._adb-tls-connect._tcp", "state": "connected"});
+        assert_eq!(
+            super::human_adb(Some(&mdns)).unwrap(),
+            "adb: 10.0.0.5:41195  connected (adb -s adb-X._adb-tls-connect._tcp)"
+        );
+    }
+
     use super::{fmt_duration, fmt_number, human_duration, pick_host, ver_rel, VerRel};
 
     #[test]

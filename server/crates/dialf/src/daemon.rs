@@ -102,6 +102,8 @@ pub struct DaemonState {
     /// The running device share, if any (`dialf devices share`). Runtime-controlled rather
     /// than config-only so an exposed port can be closed without restarting the daemon.
     pub share: Arc<tokio::sync::Mutex<Option<crate::share::server::ShareHandle>>>,
+    /// Wireless-adb link per phone (`adb_link`).
+    pub adb_links: crate::adb_link::Links,
 }
 
 /// RAII lock on the sound card (one call/recording at a time). Releases on drop.
@@ -465,6 +467,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         mmi_results: Arc::new(Mutex::new(HashMap::new())),
         voicemail_results: Arc::new(Mutex::new(HashMap::new())),
         share: Arc::new(tokio::sync::Mutex::new(None)),
+        adb_links: Default::default(),
     };
 
     // Advertise on the LAN (non-fatal if it fails). Kept alive for the daemon's lifetime.
@@ -1585,6 +1588,7 @@ mod tests {
             mmi_results: Arc::new(Mutex::new(HashMap::new())),
             voicemail_results: Arc::new(Mutex::new(HashMap::new())),
             share: Arc::new(tokio::sync::Mutex::new(None)),
+            adb_links: Default::default(),
         }
     }
 

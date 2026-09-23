@@ -208,6 +208,25 @@ pub fn system_control_socket() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// `autoconnect` lives under `adb_share` but must not depend on a share running — local adb
+    /// without a cable is the first use, and it should not require opening a port.
+    #[test]
+    fn autoconnect_sits_under_adb_share_independently() {
+        let cfg: Config = serde_yaml::from_str(
+            "adb_share:\n  autoconnect: true\n  adb: /opt/sdk/platform-tools/adb\n",
+        )
+        .unwrap();
+        assert!(cfg.adb_share.autoconnect);
+        assert!(!cfg.adb_share.enabled, "autoconnect must not imply autostarting a share");
+        assert_eq!(cfg.adb_share.adb.as_deref(), Some(std::path::Path::new("/opt/sdk/platform-tools/adb")));
+
+        // Configs written before the keys existed load unchanged, with auto-connect off.
+        let old: Config = serde_yaml::from_str("adb_share:\n  enabled: true\n").unwrap();
+        assert!(old.adb_share.enabled && !old.adb_share.autoconnect && old.adb_share.adb.is_none());
+        let bare: Config = serde_yaml::from_str("{}").unwrap();
+        assert!(!bare.adb_share.autoconnect);
+    }
+
     #[test]
     fn autoanswer_map_parses_jobs_and_answer_only() {
         // A path runs a job; `~` and an empty value both mean answer-only.

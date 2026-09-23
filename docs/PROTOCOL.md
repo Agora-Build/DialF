@@ -21,7 +21,7 @@ closed.
 | `type`       | Fields                                                                 |
 |--------------|-----------------------------------------------------------------------|
 | `hello`      | `device_id`, `name`, `key`, `caps[]`, `app_version?`                   |
-| `heartbeat`  | `ts`, `battery?` — sent ~every 30s                                     |
+| `heartbeat`  | `ts`, `battery?`, `adb?` — sent ~every 30s, and at once when `adb` changes |
 | `call_state` | `call_id`, `state` (`dialing`/`ringing`/`active`/`ended`), `number?`, `direction` (`in`/`out`). `dialing` = outbound, far end ringing, not yet answered; `active` = answered/connected |
 | `sms`        | `direction` (`in`/`out`), `from?`, `to?`, `body`, `ts`                 |
 | `calls`      | `entries[]` of `{number?, kind, ts, duration}` — reply to `list_calls` |
@@ -57,6 +57,51 @@ skipped + logged.
 
 ---
 
+### Wireless adb
+
+Apps that support it report their wireless-debugging state on the heartbeat:
+
+```json
+{"type":"heartbeat","ts":1758580000000,
+ "adb":{"wifi_enabled":true,"port":41195,"service":"adb-48071FDAP0045Q-YX799R"}}
+```
+
+The app finds the port itself: it browses `_adb-tls-connect._tcp` and keeps only the service
+advertised at its own IP (every phone on the LAN with wireless debugging on is visible). It
+keeps watching while wireless debugging is on, because adbd can move to a new port without the
+setting changing. `port` is absent while the port isn't known (just switched on, or adbd
+restarting). `service` is the advert name: adb connects a freshly paired phone by itself as
+`<service>._adb-tls-connect._tcp`, and dialfd needs the name to recognise that as the same phone.
+Older apps omit `adb`; older daemons ignore it.
+
+dialfd adds it to that device in `devices.list`:
+
+```jsonc
+"adb": { "endpoint": "192.168.100.179:41195",   // ip:port
+         "serial": "adb-….\_adb-tls-connect._tcp",  // what adb lists it as, when connected
+         "state": "connected", "detail": "…" }
+```
+
+`serial` is what `adb -s` needs. It is the endpoint when dialfd made the connection, and the
+mDNS form when adb connected the phone by itself; dialfd accepts either and never adds a second
+connection for a phone adb already has.
+
+| `state` | Meaning |
+|---|---|
+| `off` | wireless debugging off, or its port not found yet |
+| `available` | endpoint known, not connected (`adb_share.autoconnect` off, or not tried yet) |
+| `connecting` | `adb connect` in progress |
+| `connected` | listed as `device` by this host's adb server |
+| `needs_pairing` | this host was never paired with the phone — `detail` says how |
+| `blocked_local_network` | macOS Local Network permission missing for the adb server |
+| `adb_not_found` | no adb binary found — set `adb_share.adb` |
+| `error` | anything else; adb's own output is in `detail` |
+
+The state is re-checked on each heartbeat, so it can lag an external change (someone runs
+`adb disconnect`) by up to ~30 s. After a failure dialfd backs off from re-running
+`adb connect` (30 s doubling to 5 min), but it still looks at adb's device list on every
+heartbeat, so a fix such as re-pairing shows up within one heartbeat.
+
 ## 2. Control API (local Unix socket)
 
 > Writing a client of your own? [INTEGRATION.md](INTEGRATION.md) is the guide — connection
@@ -69,7 +114,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
 | `server.info`  | —                               | `{version, ten_vad, config_path}` (the daemon's own) |
-| `devices.list` | —                               | array of devices                       |
+| `devices.list` | —                               | array of devices (see *Wireless adb*) |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.answer`  | `device`                        | ok                                     |
 | `call.hangup`  | `device`                        | ok                                     |

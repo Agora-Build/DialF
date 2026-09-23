@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.database.ContentObserver
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.nsd.NsdManager
@@ -20,6 +21,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,7 +36,8 @@ import java.util.concurrent.TimeUnit
  * the phone stays controllable while backgrounded / locked / across reboots.
  *
  * Discovers dialfd via NSD (`_dialfd._tcp`) — or a saved `server` address — sends hello +
- * a 30s heartbeat, dispatches commands to [Telecom], and forwards call/SMS events (via
+ * a 30s heartbeat (carrying this phone's wireless-debugging port, found from its own
+ * `_adb-tls-connect` advert), dispatches commands to [Telecom], and forwards call/SMS events (via
  * [Dialf.serviceListener]) back to dialfd. Reconnects with a short backoff.
  */
 class ConnForegroundService : Service() {
@@ -50,7 +53,7 @@ class ConnForegroundService : Service() {
         private const val MIN_RECONNECT_MS = 2_000L
         private const val MAX_RECONNECT_CHARGING_MS = 30_000L
         private const val MAX_RECONNECT_BATTERY_MS = 120_000L
-        // How long to leave NSD discovery (multicast) running per attempt before backing off.
+        // How long to leave the dialfd NSD search running per attempt before backing off.
         private const val DISCOVERY_WINDOW_MS = 20_000L
         // App-level liveness: heartbeat cadence, and how long the daemon may go silent (missed
         // heartbeat acks) before we treat the link as dead and reconnect (~3 missed beats).
@@ -66,6 +69,7 @@ class ConnForegroundService : Service() {
         /** Retries for an NSD resolve that lost the one-at-a-time race (FAILURE_ALREADY_ACTIVE). */
         private const val RESOLVE_RETRIES = 3
         private const val RESOLVE_RETRY_MS = 400L
+        private const val ADB_WIFI_SETTING = "adb_wifi_enabled"
         private const val TAG = "DialfConn" // `adb logcat -s DialfConn` to watch connection state
 
         /** Random id generated once per app *process* launch, sent in every `hello`. A changed
@@ -108,6 +112,24 @@ class ConnForegroundService : Service() {
     private var reconnectDelayMs = MIN_RECONNECT_MS
     private var reconnectRunnable: Runnable? = null
     private var discoveryTimeout: Runnable? = null
+
+    // Wireless debugging, reported on every heartbeat so dialfd can `adb connect` without a cable.
+    // The port is random and new each time wireless debugging is switched on, and no API exposes
+    // it — the app finds its own `_adb-tls-connect` advert instead.
+    @Volatile private var adbWifiEnabled = false
+    @Volatile private var adbPort: Int? = null
+    private var adbDiscovery: NsdManager.DiscoveryListener? = null
+    // The NSD name of our own advert, once resolved, so its loss can be told apart from another
+    // phone's.
+    private var ownAdbService: String? = null
+    // Resolve callbacks stay registered while wireless debugging is on: adbd re-advertises under
+    // the same service name on a new port, which NSD reports only as an update to that service,
+    // never as a new one. The first answer can also come from NSD's cache (the previous port),
+    // corrected by an update milliseconds later.
+    private val adbWatches = HashMap<String, NsdManager.ServiceInfoCallback>()
+    private val adbSettingObserver = object : ContentObserver(main) {
+        override fun onChange(selfChange: Boolean) = refreshAdb()
+    }
     // Held whenever the phone is on external power, to keep the CPU out of deep sleep so the
     // heartbeat keeps flowing and the daemon can place calls / send SMS the moment it's docked.
     // Released the instant it's unplugged, so it never costs battery in normal use. PARTIAL = CPU
@@ -219,6 +241,11 @@ class ConnForegroundService : Service() {
         instance = this
         nsd = getSystemService(NsdManager::class.java)
         Dialf.serviceListener = { ev -> send(ev) }
+        try {
+            contentResolver.registerContentObserver(
+                Settings.Global.getUriFor(ADB_WIFI_SETTING), false, adbSettingObserver,
+            )
+        } catch (_: Exception) {}
         // Reconnect promptly when the network comes back (e.g. wifi flaps / changes).
         val cm = getSystemService(ConnectivityManager::class.java)
         val cb = object : ConnectivityManager.NetworkCallback() {
@@ -320,6 +347,8 @@ class ConnForegroundService : Service() {
         running = false
         Dialf.serviceListener = null
         stopDiscovery()
+        stopAdbDiscovery()
+        try { contentResolver.unregisterContentObserver(adbSettingObserver) } catch (_: Exception) {}
         cancelHeartbeat()
         reconnectRunnable?.let { main.removeCallbacks(it) }
         netCallback?.let {
@@ -425,7 +454,9 @@ class ConnForegroundService : Service() {
                 main.post {
                     resolving = false
                     val host = resolved.host?.hostAddress
-                    if (host != null) {
+                    if (AdbEndpoint.isAdbService(resolved.serviceType)) {
+                        if (host != null) onAdbResolved(resolved.serviceName, listOf(host), resolved.port)
+                    } else if (host != null) {
                         daemons.add(host, resolved.port)
                         connectNextCandidate()
                     }
@@ -530,6 +561,7 @@ class ConnForegroundService : Service() {
             lastDaemonResponseMs = System.currentTimeMillis()
             daemonAcksHeartbeats = false
             startHeartbeat()
+            main.post { refreshAdb() }
             // Connected — reset the backoff and cancel any pending retry.
             reconnectDelayMs = MIN_RECONNECT_MS
             reconnectRunnable?.let { main.removeCallbacks(it) }
@@ -640,9 +672,143 @@ class ConnForegroundService : Service() {
         val sock = ws ?: return
         try {
             sock.send(
-                JSONObject().put("type", "heartbeat").put("ts", System.currentTimeMillis()).toString()
+                heartbeatFrame()
             )
         } catch (_: Exception) {}
+    }
+
+    private fun heartbeatFrame(): String {
+        val adb = JSONObject().put("wifi_enabled", adbWifiEnabled)
+        adbPort?.let { adb.put("port", it) }
+        // adb connects a freshly paired phone by itself under a serial built from this name;
+        // dialfd needs it to recognise that connection instead of adding a second one.
+        ownAdbService?.let { if (adbPort != null) adb.put("service", it) }
+        return JSONObject()
+            .put("type", "heartbeat")
+            .put("ts", System.currentTimeMillis())
+            .put("adb", adb)
+            .toString()
+    }
+
+    // --- wireless debugging ---------------------------------------------------
+
+    /** Re-read the setting and, when on, look for our own port. Main thread. */
+    private fun refreshAdb() {
+        if (!running) return
+        val enabled = try {
+            Settings.Global.getInt(contentResolver, ADB_WIFI_SETTING, 0) == 1
+        } catch (_: Exception) {
+            false
+        }
+        if (!enabled) {
+            stopAdbDiscovery()
+            setAdb(false, null)
+            return
+        }
+        // Switching it on picks a fresh port, so what we knew may be stale until found again.
+        if (!adbWifiEnabled) setAdb(true, null)
+        if (adbDiscovery == null) startAdbDiscovery()
+    }
+
+    private fun setAdb(enabled: Boolean, port: Int?) {
+        if (enabled == adbWifiEnabled && port == adbPort) return
+        adbWifiEnabled = enabled
+        adbPort = port
+        Log.i(TAG, "wireless debugging: enabled=$enabled port=$port")
+        pokeHeartbeat()
+    }
+
+    /**
+     * Watch our own advert for as long as wireless debugging is on. Not a one-shot search: adbd can
+     * restart and re-advertise on a new port without the setting ever reading anything but `1` —
+     * seen on a Pixel, where one off/on went port 44759 then 40251 within 2 s — and a search that
+     * had already stopped would keep reporting the dead port.
+     */
+    private fun startAdbDiscovery() {
+        stopAdbDiscovery()
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onStartDiscoveryFailed(t: String, code: Int) {
+                Log.w(TAG, "adb discovery failed to start (code $code)")
+                main.post { if (adbDiscovery === this) adbDiscovery = null }
+            }
+            override fun onStopDiscoveryFailed(t: String, code: Int) {}
+            override fun onDiscoveryStarted(t: String) {}
+            override fun onDiscoveryStopped(t: String) {}
+            override fun onServiceLost(info: NsdServiceInfo) {
+                main.post {
+                    // Ours went away (adbd restarting, or switched off): stop advertising a port
+                    // that no longer answers. The next advert brings the new one.
+                    if (info.serviceName == ownAdbService) setAdb(adbWifiEnabled, null)
+                }
+            }
+            override fun onServiceFound(info: NsdServiceInfo) {
+                main.post { resolveAdb(info) }
+            }
+        }
+        adbDiscovery = listener
+        try {
+            nsd.discoverServices(AdbEndpoint.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            Log.w(TAG, "adb discovery: $e")
+            adbDiscovery = null
+        }
+    }
+
+    private fun stopAdbDiscovery() {
+        adbDiscovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
+        adbDiscovery = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            adbWatches.values.forEach { try { nsd.unregisterServiceInfoCallback(it) } catch (_: Exception) {} }
+        }
+        adbWatches.clear()
+    }
+
+    /** Android 14+ resolves without the one-at-a-time limit; older versions share the queue. */
+    private fun resolveAdb(info: NsdServiceInfo) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            enqueueResolve(info)
+            return
+        }
+        val name = info.serviceName
+        if (name in adbWatches) return
+        val cb = object : NsdManager.ServiceInfoCallback {
+            override fun onServiceInfoCallbackRegistrationFailed(code: Int) {
+                Log.w(TAG, "adb resolve failed (code $code)")
+                adbWatches.remove(name)
+            }
+            override fun onServiceLost() {
+                if (name == ownAdbService) setAdb(adbWifiEnabled, null)
+            }
+            override fun onServiceInfoCallbackUnregistered() {}
+            override fun onServiceUpdated(resolved: NsdServiceInfo) {
+                val hosts = resolved.hostAddresses.mapNotNull { it.hostAddress }
+                onAdbResolved(resolved.serviceName, hosts, resolved.port)
+            }
+        }
+        adbWatches[name] = cb
+        try {
+            nsd.registerServiceInfoCallback(info, { r -> main.post(r) }, cb)
+        } catch (e: Exception) {
+            Log.w(TAG, "adb resolve: $e")
+            adbWatches.remove(name)
+        }
+    }
+
+    /** Main thread. Adopt the port only if it is advertised at one of our own addresses. */
+    private fun onAdbResolved(name: String, hosts: List<String>, port: Int) {
+        val mine = AdbEndpoint.pickOwn(hosts.map { it to port }, ownIpv4s()) ?: return
+        ownAdbService = name
+        if (adbWifiEnabled) setAdb(true, mine)
+    }
+
+    private fun ownIpv4s(): Set<String> = try {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .flatMap { it.inetAddresses.toList() }
+            .filter { it is java.net.Inet4Address && !it.isLoopbackAddress }
+            .mapNotNull { it.hostAddress }
+            .toSet()
+    } catch (_: Exception) {
+        emptySet()
     }
 
     private fun startHeartbeat() {
@@ -662,7 +828,7 @@ class ConnForegroundService : Service() {
                     return
                 }
                 sock.send(
-                    JSONObject().put("type", "heartbeat").put("ts", System.currentTimeMillis()).toString()
+                    heartbeatFrame()
                 )
                 main.postDelayed(this, HEARTBEAT_MS)
             }

@@ -346,6 +346,88 @@ Needs B to reach the phone's own address. This takes dialf out of the picture fo
 
 ---
 
+## No cable: wireless debugging
+
+Everything above assumes the phone is plugged into A. It doesn't have to be. With wireless
+debugging on, the DialF app tells dialfd the phone's adb port, and dialfd keeps the phone
+connected to A's adb server over Wi-Fi — so A can share it exactly as if it were plugged in.
+
+### One-time setup on A
+
+1. **On the phone:** Settings → System → Developer options → **Wireless debugging** → on.
+   Allow it on this network when asked.
+2. **Pair A with the phone.** Tap **Pair device with pairing code**. The phone shows an address
+   and a six-digit code. On A, in a plain Terminal window (see *macOS* below):
+
+   ```sh
+   adb pair 192.168.1.40:37113      # the address from the pairing screen, not the main one
+   # Enter pairing code: 482916
+   ```
+
+   The pairing port is different from the connect port and only exists while that screen is
+   open. You do this once per machine; the phone remembers A.
+3. **Turn on auto-connect** in A's `config.yaml`, then restart the service:
+
+   ```yaml
+   adb_share:
+     autoconnect: true
+   ```
+
+4. **Check it:**
+
+   ```sh
+   dialf devices --human
+   # pixel-9-pro-9657     Pixel 9 Pro      192.168.1.40     seen 1s ago   idle
+   #   adb: 192.168.1.40:41195  connected
+   adb devices
+   # 192.168.1.40:41195	device
+   ```
+
+From here, sharing works as in the rest of this guide. Target the serial adb lists the
+phone under — the `ip:port`, or, when `dialf devices` shows `(adb -s <name>)`, that name (adb
+connects a freshly paired phone under its mDNS name by itself):
+
+```sh
+dialf devices share --target 192.168.1.40:41195
+```
+
+### What each state means
+
+| `dialf devices` shows | What to do |
+|---|---|
+| no `adb:` line | The phone runs an app too old to report it — update the app |
+| `adb: off` | Wireless debugging is off on the phone (or its port isn't found yet — give it a few seconds) |
+| `available` — auto-connect is off | Set `adb_share.autoconnect: true`, or `adb connect` it yourself |
+| `connected` | Nothing — adb, scrcpy and sharing all work. `(adb -s …)` after it names the serial to use |
+| `needs_pairing` | Pair A once (step 2). dialfd picks the phone up within ~30 s of pairing |
+| `blocked_local_network` | macOS permission — see below |
+| `adb_not_found` | Set `adb_share.adb` to the adb binary (`~/…` is fine) |
+| `error` | adb's own message is shown; usually the phone left the network |
+
+The state is re-checked on every heartbeat, so it can trail reality by up to ~30 s. When timing
+matters, `adb devices` is the truth.
+
+### Things to know
+
+**The port changes whenever wireless debugging is switched on** (and often after a reboot or a
+Wi-Fi change). dialfd follows it and reconnects on its own. **A share made with
+`--target <ip:port>` does not follow it** — that serial no longer exists, so B loses the phone.
+Re-run the share with the new serial, or share with `--all` if A has only the phones you mean
+to expose.
+
+**Wireless debugging turns itself off** on reboot and on some network changes. Until someone
+switches it back on, the phone shows `adb: off` — nothing on A can re-enable it.
+
+**macOS: Local Network permission.** `adb connect` needs it on whichever process owns A's adb
+server. Without it adb fails with `No route to host` even though the network is fine, and
+`dialf devices` says `blocked_local_network`. Allow your terminal under System Settings →
+Privacy & Security → Local Network, and start the adb server from a **plain Terminal window**,
+not tmux — under tmux macOS never grants it. If dialfd has to start the adb server itself, it
+is the service that needs the permission, and macOS asks the first time.
+
+**Several phones:** each reports its own port, found by matching its own IP, so phones on the
+same network never report each other's.
+
 ## Why `dialf devices connect` exists
 
 `adb` cannot authenticate. `adb -H host -P port` opens a socket and immediately starts speaking

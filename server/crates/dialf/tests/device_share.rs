@@ -82,6 +82,7 @@ async fn start_share_with(upstream: &str, targets: Vec<String>, all: bool) -> Sh
         all,
         expire_after: 3600,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     // Port 0: the listener reports the port it was assigned, so parallel tests never race
     // over a "free" port that something else grabbed in between.
@@ -327,6 +328,7 @@ async fn a_restarted_share_is_reachable_again() {
         all: true,
         expire_after: 3600,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, true).unwrap()).await.unwrap();
     let addr = share.config.bind;
@@ -477,6 +479,7 @@ async fn start_open_share(upstream: &str) -> ShareHandle {
         all: true,
         expire_after: 3600,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     let resolved = cfg.resolve(Profile::Adb, false).unwrap();
     assert!(!resolved.require_auth(), "no token asked for => open share");
@@ -514,6 +517,7 @@ async fn an_open_share_still_enforces_device_scope_and_blocks_kill() {
         all: false,
         expire_after: 3600,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 
@@ -592,6 +596,7 @@ async fn a_share_closes_itself_when_it_expires() {
         all: true,
         expire_after: 1,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
     let addr = share.config.bind;
@@ -627,6 +632,7 @@ async fn expiry_is_reported_and_can_be_disabled() {
         all: true,
         expire_after: 3600,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
 
     let timed = server::start(base.resolve(Profile::Adb, false).unwrap()).await.unwrap();
@@ -656,6 +662,7 @@ async fn expiry_also_drops_a_connection_that_was_already_open() {
         all: true,
         expire_after: 1,
         forward_ports: Vec::new(),
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 
@@ -820,6 +827,7 @@ async fn share_with_forward(upstream: &str, host: &str, port: u16, token: bool) 
         all: true,
         expire_after: 3600,
         forward_ports: vec![port.into()],
+        ..Default::default()
     };
     server::start(cfg.resolve(Profile::Adb, token).unwrap()).await.unwrap()
 }
@@ -951,6 +959,7 @@ async fn expiry_closes_forward_ports_too() {
         all: true,
         expire_after: 1,
         forward_ports: vec![port.into()],
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
     assert!(TcpStream::connect(format!("{host}:{port}")).await.is_ok());
@@ -985,6 +994,7 @@ async fn a_forward_port_never_shadows_loopback() {
         all: true,
         expire_after: 3600,
         forward_ports: vec![port.into()],
+        ..Default::default()
     };
     let share = server::start(cfg.resolve(Profile::Adb, false).unwrap()).await.unwrap();
 

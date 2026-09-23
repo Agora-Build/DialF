@@ -140,6 +140,7 @@ async fn handle_conn(stream: TcpStream, peer: SocketAddr, state: DaemonState) ->
         addr: Some(peer.ip().to_string()),
         last_seen_ms: now_ms(),
         current_call: prior_call,
+        adb: None,
     });
     tracing::info!(%device_id, "phone connected");
 
@@ -206,9 +207,12 @@ where
 
 async fn handle_phone_msg(state: &DaemonState, device_id: &str, msg: PhoneToServer) {
     match msg {
-        PhoneToServer::Heartbeat { .. } => {
+        PhoneToServer::Heartbeat { adb, .. } => {
             if let Some(dev) = state.registry.lock().unwrap().get_mut(device_id) {
                 dev.last_seen_ms = now_ms();
+            }
+            if let Some(report) = adb {
+                crate::adb_link::on_report(state, device_id, report);
             }
             // Reply so the app can confirm the daemon is alive and reconnect if it goes silent.
             state.hub.send_frame(device_id, ServerToPhone::HeartbeatAck);
