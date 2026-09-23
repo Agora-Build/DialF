@@ -561,7 +561,12 @@ class ConnForegroundService : Service() {
             lastDaemonResponseMs = System.currentTimeMillis()
             daemonAcksHeartbeats = false
             startHeartbeat()
-            main.post { refreshAdb() }
+            // A reconnect gives dialfd a fresh device entry; send the wireless-debugging report at
+            // once rather than leave `dialf devices` without it until the first heartbeat, 30 s out.
+            main.post {
+                refreshAdb()
+                pokeHeartbeat()
+            }
             // Connected — reset the backoff and cancel any pending retry.
             reconnectDelayMs = MIN_RECONNECT_MS
             reconnectRunnable?.let { main.removeCallbacks(it) }
