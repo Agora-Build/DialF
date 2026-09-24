@@ -104,6 +104,16 @@ pub struct DaemonState {
     pub share: Arc<tokio::sync::Mutex<Option<crate::share::server::ShareHandle>>>,
     /// Wireless-adb link per phone (`adb_link`).
     pub adb_links: crate::adb_link::Links,
+    /// The mDNS advertisement; reported by `server.info` so an empty `dialf devices` can say
+    /// why phones aren't finding us.
+    pub mdns: Arc<Mutex<discovery::Advert>>,
+}
+
+/// The phone port, when `ws_bind` is reachable from the LAN at all (a loopback bind is not,
+/// so a firewall is beside the point).
+pub fn lan_ws_port(ws_bind: &str) -> Option<u16> {
+    let addr: std::net::SocketAddr = ws_bind.parse().ok()?;
+    (!addr.ip().is_loopback()).then_some(addr.port())
 }
 
 /// RAII lock on the sound card (one call/recording at a time). Releases on drop.
@@ -436,6 +446,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
             "found call marker(s) from a prior run — will hang up orphaned calls when the phone re-reports them"
         );
     }
+    // Advertise on the LAN (non-fatal if it fails). Kept alive for the daemon's lifetime.
+    let mdns = Arc::new(Mutex::new(discovery::advertise(&config)));
     let state = DaemonState {
         registry,
         engine,
@@ -468,16 +480,13 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         voicemail_results: Arc::new(Mutex::new(HashMap::new())),
         share: Arc::new(tokio::sync::Mutex::new(None)),
         adb_links: Default::default(),
+        mdns,
     };
-
-    // Advertise on the LAN (non-fatal if it fails). Kept alive for the daemon's lifetime.
-    let _mdns = match discovery::advertise(&state.config) {
-        Ok(d) => Some(d),
-        Err(e) => {
-            tracing::warn!(error = %e, "mDNS advertisement failed; phones must use a fixed address");
-            None
+    if let Some(port) = lan_ws_port(&state.config.ws_bind) {
+        for f in crate::reachability::firewall_findings(port) {
+            tracing::warn!(problem = %f.problem, fix = %f.fix, "phones may not reach this daemon");
         }
-    };
+    }
 
     let ten_vad = ten_vad_sys::version().unwrap_or_else(|| "stub (not linked)".to_string());
     tracing::info!(
@@ -675,6 +684,8 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 // The most common deployment failure on macOS, and previously only visible by
                 // grepping the daemon log. `not_applicable` off macOS, which has no TCC gate.
                 "microphone": crate::audio::mic_permission::status_label(),
+                "ws_bind": state.config.ws_bind,
+                "mdns": state.mdns.lock().unwrap().report(),
             }),
         )),
         ControlOp::ServerManifest => Ok(ok_data(&id, crate::jobs::schema::manifest())),
@@ -1589,6 +1600,7 @@ mod tests {
             voicemail_results: Arc::new(Mutex::new(HashMap::new())),
             share: Arc::new(tokio::sync::Mutex::new(None)),
             adb_links: Default::default(),
+            mdns: Arc::new(Mutex::new(discovery::Advert::Loopback)),
         }
     }
 

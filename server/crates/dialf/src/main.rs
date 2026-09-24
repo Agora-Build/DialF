@@ -422,6 +422,8 @@ async fn main() -> anyhow::Result<()> {
         } => run_devices_action(action).await,
         Command::Devices { human, .. } => {
             let resp = call(&socket, ControlOp::DevicesList).await?;
+            let none = resp.ok != Some(false)
+                && resp.data.as_ref().and_then(|v| v.as_array()).is_none_or(|r| r.is_empty());
             if human && resp.ok != Some(false) {
                 match resp.data.as_ref().and_then(|v| v.as_array()) {
                     Some(rows) if !rows.is_empty() => rows.iter().for_each(human_device),
@@ -429,6 +431,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 print_response(&resp);
+            }
+            if none && (human || std::io::stderr().is_terminal()) {
+                explain_no_phones(&socket).await;
             }
             ok_or_err(resp)
         }
@@ -1388,6 +1393,52 @@ fn human_calls(c: &serde_json::Value) {
         fmt_number(num),
         fmt_duration(dur)
     );
+}
+
+/// Why no phone is connected, when this host is the reason: no mDNS responder, a firewall in
+/// the way, or a loopback bind. Goes to stderr so stdout stays the list scripts parse. The
+/// firewall is checked here rather than by the daemon so a port opened a minute ago is seen
+/// as open — the CLI and daemon are always on the same host (Unix socket).
+async fn explain_no_phones(socket: &Path) {
+    use dialf::reachability::{checklist, firewall_findings, Finding};
+    let info = match call(socket, ControlOp::ServerInfo).await {
+        Ok(r) => r.data.unwrap_or_default(),
+        Err(_) => return,
+    };
+    let ws_bind = info
+        .get("ws_bind")
+        .and_then(|v| v.as_str())
+        .unwrap_or(dialf::config::DEFAULT_WS_BIND);
+    let mut findings = Vec::new();
+    let Some(port) = dialf::daemon::lan_ws_port(ws_bind) else {
+        eprintln!(
+            "no phones connected: dialfd listens on {ws_bind}, which phones cannot reach — \
+             set `ws_bind: 0.0.0.0:8765` in the config and restart dialfd"
+        );
+        return;
+    };
+    let mdns = info.get("mdns");
+    if mdns.and_then(|m| m.get("state")).and_then(|s| s.as_str()) == Some("failed") {
+        let field = |k: &str| {
+            mdns.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        };
+        findings.push(Finding { problem: field("problem"), fix: field("fix") });
+    }
+    findings.extend(firewall_findings(port));
+    let findings = dialf::reachability::merge_same_fix(findings);
+
+    if findings.is_empty() {
+        eprintln!("no phones connected. This host looks ready (mDNS advertising, no firewall in the way).");
+    } else {
+        eprintln!("no phones connected. This host is keeping them out:");
+        for f in &findings {
+            eprintln!("  ✗ {}\n    fix: {}", f.problem, f.fix);
+        }
+    }
+    eprintln!("also check:");
+    for line in checklist(port) {
+        eprintln!("  - {line}");
+    }
 }
 
 fn human_device(d: &serde_json::Value) {

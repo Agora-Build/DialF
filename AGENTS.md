@@ -155,6 +155,16 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - **mDNS**: a loopback-bound daemon must not advertise, and every daemon start reaps
   *orphaned* advertisers (`ppid == 1`) of any instance name — killed scratch daemons used to
   leave ghost endpoints luring phones for weeks.
+- **"Phone always disconnected" is usually the host, not dialf.** Two host things are needed:
+  an mDNS responder (Linux: avahi-daemon *plus* `avahi-publish`, and on NixOS
+  `publish.userServices` or avahi refuses a non-root publisher) and a firewall open on TCP
+  `ws_bind` + UDP 5353. NixOS enables its firewall by default; a 5353 rule scoped to `wt0` does
+  not help a WiFi phone. `reachability.rs` names the cause and fix per OS; it is logged at
+  daemon start and printed by an empty `dialf devices` (stderr only; stdout stays `[]`).
+  `avahi-publish` fails *after* a successful spawn when avahi-daemon is down, so discovery waits
+  for its "Established" line rather than trusting the spawn. A host cannot test its own
+  firewall by connecting to its LAN IP (that goes over `lo`); from a phone on adb,
+  `echo | toybox nc -w 3 <host> 8765` does.
 - `dialf export` picks its config as `--config` > `<dir>/config.yaml` > `~/.config/dialf/`.
   A folder's own copy therefore wins over the one the daemon is actually running, and can be
   a stale leftover — export asks `server.info` and prints a note when the two differ rather

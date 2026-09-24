@@ -16,6 +16,7 @@ pub mod hub;
 pub mod jobs;
 pub mod phone;
 pub mod protocol;
+pub mod reachability;
 pub mod registry;
 pub mod service;
 pub mod share;

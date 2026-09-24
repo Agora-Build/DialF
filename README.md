@@ -173,6 +173,37 @@ Host (the computer running `dialfd`) and phone on the **same WiFi**. Minimal man
 (`<device>` is the id from `dialf devices`; omit `--device`/`<device>` when exactly one phone
 is connected.)
 
+### The phone stays "disconnected"
+
+When no phone is connected, `dialf devices --human` (or plain `dialf devices` in a terminal) prints
+what on the host is keeping it out, with the fix for your OS. The same diagnosis is logged when
+`dialfd` starts. The host needs two things dialf cannot grant itself:
+
+- **An mDNS responder**, so the phone can *discover* `dialfd`. macOS has Bonjour built in. On
+  Linux, `dialfd` uses avahi:
+
+  | OS | Fix |
+  |---|---|
+  | Ubuntu / Debian | `sudo apt install avahi-daemon avahi-utils && sudo systemctl enable --now avahi-daemon` |
+  | Arch | `sudo pacman -S avahi && sudo systemctl enable --now avahi-daemon` |
+  | Fedora | `sudo dnf install avahi-tools && sudo systemctl enable --now avahi-daemon` |
+  | NixOS | `services.avahi = { enable = true; openFirewall = true; publish = { enable = true; userServices = true; }; };` |
+
+  Then run `dialf service restart`: `dialfd` advertises only when it starts.
+- **A firewall that lets the phone in** on TCP 8765 (`ws_bind`) and UDP 5353 (mDNS):
+
+  | Firewall | Fix |
+  |---|---|
+  | NixOS (on by default) | `networking.firewall.allowedTCPPorts = [ 8765 ];` (the avahi block above opens 5353) |
+  | ufw (Ubuntu) | `sudo ufw allow 8765/tcp && sudo ufw allow 5353/udp` |
+  | firewalld (Fedora) | `sudo firewall-cmd --permanent --add-port=8765/tcp --add-service=mdns && sudo firewall-cmd --reload` |
+  | nftables (Arch) | add `tcp dport 8765 accept` and `udp dport 5353 accept` to the input chain in `/etc/nftables.conf` |
+  | macOS application firewall | `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <dialf> --unblockapp <dialf>` (the path is versioned, so repeat after upgrades) |
+
+Beyond the host: a guest network or a router with client/AP isolation blocks phone-to-computer
+traffic. To skip discovery entirely, type `<host LAN IP>:8765` into the app's *dialfd address*
+field.
+
 ## Commands
 
 Start the daemon (or install it as a service, above), then drive it with `dialf`:
