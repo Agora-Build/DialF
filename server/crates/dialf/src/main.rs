@@ -21,6 +21,33 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Subcommand, Debug)]
+enum OverrideAction {
+    /// Show the active runtime overrides.
+    Show,
+    /// Recordings land here instead of config's record_dir, until cleared or restart.
+    RecordDir {
+        /// Made absolute against the CLI's cwd (dialfd runs with cwd=/).
+        path: PathBuf,
+    },
+    /// Replace the whole auto-answer map: `NUM` answers only, `NUM=JOB.yaml` runs that job.
+    /// No entries at all = auto-answer nothing (silences config until cleared).
+    Autoanswer {
+        entries: Vec<String>,
+        /// Send each job file's *content* instead of its path — the file needn't stay on
+        /// disk, and dialfd validates it now.
+        #[arg(long)]
+        inline: bool,
+    },
+    /// Clear overrides: the named ones, or both when no flag is given.
+    Clear {
+        #[arg(long)]
+        record_dir: bool,
+        #[arg(long)]
+        autoanswer: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run the dialfd daemon (control socket + audio engine + phone WS plane).
@@ -86,6 +113,10 @@ enum Command {
         /// `-`, so the label is always a safe filename.
         #[arg(long)]
         name: Option<String>,
+        /// Directory for this run's recordings only — wins over `dialf override record-dir`
+        /// and over config. Created if missing.
+        #[arg(long)]
+        record_dir: Option<PathBuf>,
     },
     /// Play an audio file out the sound card.
     Play { file: PathBuf },
@@ -123,6 +154,13 @@ enum Command {
         /// check a daemon you did not just build — the two can differ across an upgrade.
         #[arg(long)]
         daemon: bool,
+    },
+    /// Runtime overrides: change where recordings land and how inbound numbers are
+    /// auto-answered, without touching config.yaml. In-memory only — a daemon restart
+    /// clears them.
+    Override {
+        #[command(subcommand)]
+        action: OverrideAction,
     },
     /// Install/manage dialfd as an OS background service (launchd/systemd).
     Service {
@@ -526,6 +564,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             device,
             autoanswer,
+            record_dir,
             name,
         } => {
             // dialfd reads the job file from *its* working directory (often a service with
@@ -554,6 +593,7 @@ async fn main() -> anyhow::Result<()> {
                     path: Some(abs),
                     steps: None,
                     device,
+                    record_dir: record_dir.map(|d| absolutize(&d)),
                 };
                 let resp = call_run(&socket, op).await?;
                 print_response(&resp);
@@ -637,6 +677,25 @@ async fn main() -> anyhow::Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&manifest)?);
             Ok(())
+        }
+        Command::Override { action } => {
+            let op = match action {
+                OverrideAction::Show => ControlOp::OverrideShow,
+                OverrideAction::RecordDir { path } => ControlOp::OverrideSet {
+                    record_dir: Some(absolutize(&path)),
+                    autoanswer: None,
+                },
+                OverrideAction::Autoanswer { entries, inline } => ControlOp::OverrideSet {
+                    record_dir: None,
+                    autoanswer: Some(parse_autoanswer_entries(&entries, inline)?),
+                },
+                OverrideAction::Clear { record_dir, autoanswer } => {
+                    ControlOp::OverrideClear { record_dir, autoanswer }
+                }
+            };
+            let resp = call(&socket, op).await?;
+            print_response(&resp);
+            ok_or_err(resp)
         }
         Command::Service { action, user } => {
             let scope = if user {
@@ -1216,6 +1275,53 @@ fn needs_sigpipe_ignored(args: &[String]) -> bool {
         Some("devices") => positional.next().map(String::as_str) == Some("connect"),
         _ => false,
     }
+}
+
+/// Make a CLI-supplied path absolute against the CLI's cwd. Not canonicalize: the directory
+/// may not exist yet (dialfd creates record dirs), and job paths are canonicalized separately
+/// where existence is required.
+fn absolutize(p: &std::path::PathBuf) -> String {
+    let abs = if p.is_absolute() {
+        p.clone()
+    } else {
+        std::env::current_dir().map(|c| c.join(p)).unwrap_or_else(|_| p.clone())
+    };
+    abs.to_string_lossy().to_string()
+}
+
+/// `NUM` (answer only) / `NUM=JOB.yaml` entries for `dialf override autoanswer`. With
+/// `--inline`, each job file is read here and sent as raw content (`yaml` form), so the
+/// daemon validates it now and the file needn't outlive this command.
+fn parse_autoanswer_entries(
+    entries: &[String],
+    inline: bool,
+) -> anyhow::Result<std::collections::BTreeMap<String, Option<dialf::protocol::AutoanswerValue>>> {
+    use dialf::protocol::AutoanswerValue;
+    let mut map = std::collections::BTreeMap::new();
+    for e in entries {
+        let (num, value) = match e.split_once('=') {
+            None => (e.trim(), None),
+            Some((num, job)) => {
+                let job = job.trim();
+                let value = if inline {
+                    let yaml = std::fs::read_to_string(job)
+                        .with_context(|| format!("read job file {job}"))?;
+                    AutoanswerValue::Yaml { yaml }
+                } else {
+                    // dialfd re-reads the file at answer time, so it must resolve from cwd=/.
+                    let abs = std::fs::canonicalize(job)
+                        .with_context(|| format!("job file not found: {job}"))?;
+                    AutoanswerValue::Path(abs.to_string_lossy().to_string())
+                };
+                (num.trim(), Some(value))
+            }
+        };
+        if num.is_empty() {
+            anyhow::bail!("empty phone number in `{e}` (want NUM or NUM=JOB.yaml)");
+        }
+        map.insert(num.to_string(), value);
+    }
+    Ok(map)
 }
 
 /// Report the daemon's microphone state, with the fix attached when there is one. Silent when

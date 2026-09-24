@@ -35,7 +35,7 @@ pub const DEFAULT_SPEECH_START_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_WAIT_AFTER_START_MS: u64 = 2_000;
 
 /// One job step: its kind plus optional envelope fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     #[serde(flatten)]
     pub kind: StepKind,
@@ -49,7 +49,7 @@ pub struct Step {
 }
 
 /// The kinds of step the runner understands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StepKind {
     /// Play an audio file out the sound card.

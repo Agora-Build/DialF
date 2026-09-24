@@ -166,6 +166,12 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   for its "Established" line rather than trusting the spawn. A host cannot test its own
   firewall by connecting to its LAN IP (that goes over `lo`); from a phone on adb,
   `echo | toybox nc -w 3 <host> 8765` does.
+- **Runtime overrides (`override.*`) live in their own store**, not the serve `overrides`
+  map: serve entries are last-writer-wins and cleared *by owner token* on disconnect, so a
+  persistent entry sharing that map would be replaced by a same-number serve and then deleted
+  with it. Precedence: serve > `override.set` > config; per-run `job.run.record_dir` beats
+  the record_dir override. The autoanswer override replaces the config map wholesale (empty
+  map = answer nothing); everything validates at set time and restart clears all of it.
 - `dialf export` picks its config as `--config` > `<dir>/config.yaml` > `~/.config/dialf/`.
   A folder's own copy therefore wins over the one the daemon is actually running, and can be
   a stale leftover — export asks `server.info` and prints a note when the two differ rather

@@ -368,7 +368,11 @@ async fn trigger_autoanswer(
     number: Option<String>,
     handler: InboundHandler,
 ) {
-    let (path, want_device) = match handler {
+    enum Source {
+        Path(String),
+        Steps(std::sync::Arc<Vec<crate::jobs::schema::Step>>),
+    }
+    let (source, want_device) = match handler {
         InboundHandler::AnswerOnly => {
             tracing::info!(%device_id, ?number, "auto-answer");
             let _ = state
@@ -377,7 +381,9 @@ async fn trigger_autoanswer(
                 .await;
             return;
         }
-        InboundHandler::Job { path, device } => (path, device),
+        InboundHandler::Job { path, device } => (Source::Path(path), device),
+        // Runtime override with inline content: parsed and validated at set time.
+        InboundHandler::Steps(steps) => (Source::Steps(steps), None),
     };
 
     // An override may pin to one phone; ignore calls landing on a different device.
@@ -396,8 +402,12 @@ async fn trigger_autoanswer(
     };
 
     let n = number.unwrap_or_default();
-    tracing::info!(%device_id, number = %n, job = %path, "auto-answer job");
-    state.emit(format!("answered {n} → running {path}"));
+    let job_desc = match &source {
+        Source::Path(p) => p.clone(),
+        Source::Steps(s) => format!("inline job ({} steps)", s.len()),
+    };
+    tracing::info!(%device_id, number = %n, job = %job_desc, "auto-answer job");
+    state.emit(format!("answered {n} → running {job_desc}"));
 
     // Detached: the reader loop MUST keep flowing so the job's wait_for_answer /
     // wait_for_speech observe later call_state frames. Never await the job inline here.
@@ -417,15 +427,18 @@ async fn trigger_autoanswer(
             state.emit(format!("{n} → answer failed: {e:#}"));
             return;
         }
-        let job = match daemon::load_job_file(&path) {
-            Ok(j) => j,
-            Err(e) => {
-                // Call is answered but we have no script to run — hang up, don't strand the caller.
-                tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed (call answered, no script)");
-                state.emit(format!("{n} → job load failed: {e:#}"));
-                let _ = state.hub.fire(&device_id, Action::Hangup { call_id: None }).await;
-                return;
-            }
+        let job = match &source {
+            Source::Steps(s) => (**s).clone(),
+            Source::Path(path) => match daemon::load_job_file(path) {
+                Ok(j) => j,
+                Err(e) => {
+                    // Call is answered but we have no script to run — hang up, don't strand the caller.
+                    tracing::error!(error = %format!("{e:#}"), job = %path, "auto-answer job load failed (call answered, no script)");
+                    state.emit(format!("{n} → job load failed: {e:#}"));
+                    let _ = state.hub.fire(&device_id, Action::Hangup { call_id: None }).await;
+                    return;
+                }
+            },
         };
         // Auto-answer jobs aren't cancelable from the CLI (no `dialf run` client); pass fresh
         // always-false cancel/force. But they DO share `job_abort` so an app relaunch aborts them
@@ -443,6 +456,7 @@ async fn trigger_autoanswer(
             cancel,
             force,
             abort,
+            None,
             None,
         )
             .await

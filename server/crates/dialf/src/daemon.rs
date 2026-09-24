@@ -3,7 +3,7 @@
 //! Serves the local control socket, the phone WebSocket plane, and the mDNS advertisement.
 //! Phones register dynamically over WebSocket as they connect.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +19,7 @@ use crate::config::{AudioConfig, Config};
 use crate::hub::Hub;
 use crate::jobs::{runner, schema};
 use crate::phone::PhoneJobIo;
-use crate::protocol::{Action, ControlOp, ControlRequest, ControlResponse};
+use crate::protocol::{Action, AutoanswerValue, ControlOp, ControlRequest, ControlResponse};
 use crate::registry::{CallRecord, MmiResult, Registry, SimInfo, SmsRecord, VoicemailResult};
 use crate::transport::{control_server, discovery, phone_server};
 
@@ -39,6 +39,33 @@ pub struct AutoanswerOverride {
     pub path: String,
     /// Restrict to this device id; `None` answers on whichever phone receives the call.
     pub device: Option<String>,
+}
+
+/// One number's handler in the runtime autoanswer override (`override.set`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InboundJob {
+    AnswerOnly,
+    /// Absolute job-file path — validated at set time, re-read at answer time like a config
+    /// entry, so edits between set and ring still apply.
+    Path(String),
+    /// Steps parsed and validated at set time (the inline / raw-YAML forms). Arc because the
+    /// map is cloned into the answer task per ring.
+    Steps(Arc<Vec<schema::Step>>),
+}
+
+/// Runtime config overrides (`override.*` ops). In-memory only: a daemon restart is a clean
+/// slate, by design — integrators re-assert what they need after reconnecting.
+///
+/// Deliberately NOT the serve `overrides` map: serve entries are cleared by owner token on
+/// disconnect and registration is last-writer-wins, so a persistent entry sharing that map
+/// would be replaced by a same-number serve and then deleted with it. Precedence:
+/// serve > this > config.
+#[derive(Debug, Default)]
+pub struct RuntimeOverrides {
+    /// Where recordings land, instead of `audio.record_dir`. Always absolute.
+    pub record_dir: Option<PathBuf>,
+    /// When `Some`, replaces `config.autoanswer` entirely (empty map = answer nothing).
+    pub autoanswer: Option<BTreeMap<String, InboundJob>>,
 }
 
 /// Shared daemon state. Cheap to clone (everything is `Arc`).
@@ -85,6 +112,8 @@ pub struct DaemonState {
     pub pending_orphans: Arc<Mutex<HashMap<String, String>>>,
     /// Live auto-answer overrides (number → handler), keyed by phone number.
     pub overrides: Arc<Mutex<HashMap<String, AutoanswerOverride>>>,
+    /// Runtime config overrides (`override.*`); see [`RuntimeOverrides`].
+    pub runtime_overrides: Arc<Mutex<RuntimeOverrides>>,
     /// Monotonic source of override registration tokens.
     pub serve_token: Arc<AtomicU64>,
     /// Broadcast of human-readable event lines to foreground-serve clients.
@@ -146,6 +175,8 @@ pub enum InboundHandler {
         path: String,
         device: Option<String>,
     },
+    /// Answer and run steps already parsed at `override.set` time (no file involved).
+    Steps(Arc<Vec<schema::Step>>),
 }
 
 impl DaemonState {
@@ -183,6 +214,16 @@ impl DaemonState {
                 path: ov.path.clone(),
                 device: ov.device.clone(),
             });
+        }
+        // A runtime override (`override.set`) replaces the config map wholesale: a number it
+        // does not list stays unanswered even if config lists it. That is what lets an app
+        // silence auto-answer with an empty map — impossible through config alone.
+        if let Some(map) = self.runtime_overrides.lock().unwrap().autoanswer.as_ref() {
+            return match map.get(number)? {
+                InboundJob::AnswerOnly => Some(InboundHandler::AnswerOnly),
+                InboundJob::Path(p) => Some(InboundHandler::Job { path: p.clone(), device: None }),
+                InboundJob::Steps(s) => Some(InboundHandler::Steps(s.clone())),
+            };
         }
         match self.config.autoanswer.get(number) {
             None => None,
@@ -471,6 +512,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         instances: Arc::new(Mutex::new(HashMap::new())),
         pending_orphans: Arc::new(Mutex::new(pending_orphans)),
         overrides: Arc::new(Mutex::new(HashMap::new())),
+        runtime_overrides: Arc::new(Mutex::new(RuntimeOverrides::default())),
         serve_token: Arc::new(AtomicU64::new(1)),
         events,
         inbox: Arc::new(Mutex::new(HashMap::new())),
@@ -675,9 +717,8 @@ pub async fn handle(state: &DaemonState, req: ControlRequest) -> ControlResponse
 async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<ControlResponse> {
     let id = req.id.clone();
     match req.op {
-        ControlOp::ServerInfo => Ok(ok_data(
-            &id,
-            json!({
+        ControlOp::ServerInfo => {
+            let mut info = json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "ten_vad": ten_vad_sys::version().unwrap_or_else(|| "stub".to_string()),
                 "config_path": state.config_path.display().to_string(),
@@ -686,8 +727,14 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 "microphone": crate::audio::mic_permission::status_label(),
                 "ws_bind": state.config.ws_bind,
                 "mdns": state.mdns.lock().unwrap().report(),
-            }),
-        )),
+            });
+            // Present only while something is overridden, so its absence is meaningful: an
+            // integrator sees ambient runtime state before dispatching work.
+            if let Some(ovr) = overrides_summary_json(state) {
+                info["overrides"] = ovr;
+            }
+            Ok(ok_data(&id, info))
+        }
         ControlOp::ServerManifest => Ok(ok_data(&id, crate::jobs::schema::manifest())),
         ControlOp::DevicesList => {
             let list = state.registry.lock().unwrap().list();
@@ -857,7 +904,10 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             steps,
             device,
             name,
+            record_dir,
         } => {
+            // Per-run recording dir: same validation as the override, applied to one run only.
+            let record_dir = record_dir.as_deref().map(validate_record_dir).transpose()?;
             let job = match (path, steps) {
                 (Some(p), _) => load_job_file(&p)?,
                 (None, Some(s)) => s,
@@ -891,6 +941,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 state.job_force.clone(),
                 state.job_abort.clone(),
                 name,
+                record_dir,
             )
             .await?;
             // `t0_epoch_ms` sits on the recording because that is what every step's
@@ -918,6 +969,42 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
         ControlOp::AutoanswerServe { .. } => {
             // Streamed + connection-scoped: handled directly in control_server, never here.
             anyhow::bail!("autoanswer.serve must be handled on its own connection")
+        }
+        ControlOp::OverrideSet { record_dir, autoanswer } => {
+            if record_dir.is_none() && autoanswer.is_none() {
+                anyhow::bail!("override.set requires `record_dir` and/or `autoanswer`");
+            }
+            // Validate everything BEFORE touching the store: a rejected request changes nothing.
+            let dir = record_dir.as_deref().map(validate_record_dir).transpose()?;
+            let map = autoanswer.map(validate_autoanswer).transpose()?;
+            let summary = {
+                let mut ovr = state.runtime_overrides.lock().unwrap();
+                if let Some(d) = dir {
+                    ovr.record_dir = Some(d);
+                }
+                if let Some(m) = map {
+                    ovr.autoanswer = Some(m);
+                }
+                override_summary(&ovr)
+            };
+            state.emit(format!("override set: {summary}"));
+            Ok(ok_data(&id, overrides_json(state)))
+        }
+        ControlOp::OverrideShow => Ok(ok_data(&id, overrides_json(state))),
+        ControlOp::OverrideClear { record_dir, autoanswer } => {
+            let all = !record_dir && !autoanswer;
+            let summary = {
+                let mut ovr = state.runtime_overrides.lock().unwrap();
+                if record_dir || all {
+                    ovr.record_dir = None;
+                }
+                if autoanswer || all {
+                    ovr.autoanswer = None;
+                }
+                override_summary(&ovr)
+            };
+            state.emit(format!("override cleared: now {summary}"));
+            Ok(ok_data(&id, overrides_json(state)))
         }
         ControlOp::JobStatus { job_id } => {
             anyhow::bail!("job.status not tracked yet (job_id={job_id})")
@@ -1067,6 +1154,134 @@ fn share_targets_json(targets: &crate::share::Targets) -> serde_json::Value {
 
 /// Resolve a possibly-relative path under `base` (e.g. the config dir). Absolute paths, and the
 /// `base = None`/empty case, are returned unchanged.
+/// Where recordings land right now: per-run dir > runtime override > config. The config
+/// value may be relative (resolved against the config file's dir, like autoanswer job
+/// paths); override paths are validated absolute at set time.
+pub(crate) fn effective_record_dir(state: &DaemonState) -> Option<PathBuf> {
+    if let Some(dir) = state.runtime_overrides.lock().unwrap().record_dir.clone() {
+        return Some(dir);
+    }
+    state
+        .config
+        .audio
+        .record_dir
+        .as_deref()
+        .map(|d| resolve_path_under(state.config_dir.as_deref(), d))
+}
+
+/// Validate an override/per-run recording dir: absolute (the daemon runs with cwd=/), and
+/// creatable now — a typo should fail the request, not the first call an hour later.
+fn validate_record_dir(dir: &str) -> anyhow::Result<PathBuf> {
+    let p = PathBuf::from(dir);
+    if !p.is_absolute() {
+        anyhow::bail!("record_dir must be an absolute path (the daemon runs with cwd=/): `{dir}`");
+    }
+    std::fs::create_dir_all(&p).with_context(|| format!("create record_dir `{dir}`"))?;
+    Ok(p)
+}
+
+/// Validate an `override.set` autoanswer map into runtime handlers. All-or-nothing: the
+/// first bad entry fails the whole request and nothing is stored.
+fn validate_autoanswer(
+    map: BTreeMap<String, Option<AutoanswerValue>>,
+) -> anyhow::Result<BTreeMap<String, InboundJob>> {
+    let mut out = BTreeMap::new();
+    for (number, value) in map {
+        if number.trim().is_empty() {
+            anyhow::bail!("autoanswer: empty phone number key");
+        }
+        let job = match value {
+            None => InboundJob::AnswerOnly,
+            Some(AutoanswerValue::Path(p)) => {
+                if !Path::new(&p).is_absolute() {
+                    anyhow::bail!(
+                        "autoanswer {number}: job path must be absolute (socket callers have \
+                         no working directory to resolve `{p}` against)"
+                    );
+                }
+                // Parse now so a typo fails the set; still re-read at answer time (edits apply).
+                let text = std::fs::read_to_string(&p)
+                    .with_context(|| format!("autoanswer {number}: read job file {p}"))?;
+                schema::parse(&text)
+                    .with_context(|| format!("autoanswer {number}: parse job file {p}"))?;
+                InboundJob::Path(p)
+            }
+            Some(AutoanswerValue::Yaml { yaml }) => {
+                let steps = schema::parse(&yaml)
+                    .with_context(|| format!("autoanswer {number}: parse job content"))?;
+                check_inline_paths(&number, &steps)?;
+                InboundJob::Steps(Arc::new(steps))
+            }
+            Some(AutoanswerValue::Steps(steps)) => {
+                check_inline_paths(&number, &steps)?;
+                InboundJob::Steps(Arc::new(steps))
+            }
+        };
+        out.insert(number, job);
+    }
+    Ok(out)
+}
+
+/// Inline job content has no directory for relative `audio.play` paths to resolve against
+/// (a job FILE's paths resolve against the file's own dir) — so require absolute, at set time.
+fn check_inline_paths(number: &str, steps: &[schema::Step]) -> anyhow::Result<()> {
+    for (i, step) in steps.iter().enumerate() {
+        if let schema::StepKind::AudioPlay { file } = &step.kind {
+            if !Path::new(file).is_absolute() {
+                anyhow::bail!(
+                    "autoanswer {number}: step {i} plays relative path `{file}` — inline job \
+                     content has no directory to resolve it against; use an absolute path"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `server.info` teaser: `None` when nothing is overridden (the field is omitted), else the
+/// dir and the number COUNT — numbers themselves stay in `override.show`, which is asked for.
+fn overrides_summary_json(state: &DaemonState) -> Option<serde_json::Value> {
+    let ovr = state.runtime_overrides.lock().unwrap();
+    if ovr.record_dir.is_none() && ovr.autoanswer.is_none() {
+        return None;
+    }
+    Some(json!({
+        "record_dir": ovr.record_dir,
+        "autoanswer_numbers": ovr.autoanswer.as_ref().map(BTreeMap::len),
+    }))
+}
+
+/// `override.show` payload: the full current state, numbers included (the caller set them).
+fn overrides_json(state: &DaemonState) -> serde_json::Value {
+    let ovr = state.runtime_overrides.lock().unwrap();
+    let autoanswer = ovr.autoanswer.as_ref().map(|m| {
+        m.iter()
+            .map(|(n, j)| {
+                let v = match j {
+                    InboundJob::AnswerOnly => json!("answer_only"),
+                    InboundJob::Path(p) => json!({ "job": p }),
+                    InboundJob::Steps(s) => json!({ "steps": s.len() }),
+                };
+                (n.clone(), v)
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    });
+    json!({ "record_dir": ovr.record_dir, "autoanswer": autoanswer })
+}
+
+/// One log-safe line describing the override state (no phone numbers: the count suffices).
+fn override_summary(ovr: &RuntimeOverrides) -> String {
+    let rec = match &ovr.record_dir {
+        Some(d) => format!("record_dir={}", d.display()),
+        None => "record_dir=(config)".to_string(),
+    };
+    let auto = match &ovr.autoanswer {
+        Some(m) => format!("autoanswer={} number(s)", m.len()),
+        None => "autoanswer=(config)".to_string(),
+    };
+    format!("{rec}, {auto}")
+}
+
 pub(crate) fn resolve_path_under(base: Option<&Path>, path: &Path) -> PathBuf {
     let joined = match base {
         Some(b) if !b.as_os_str().is_empty() && path.is_relative() => b.join(path),
@@ -1257,16 +1472,10 @@ pub async fn run_job_on_device(
     force: Arc<AtomicBool>,
     abort: Arc<AtomicBool>,
     label: Option<String>,
+    record_dir: Option<PathBuf>,
 ) -> anyhow::Result<JobRunOutput> {
     let engine = state.engine.clone();
-    // A relative `record_dir` resolves against the config file's dir (like autoanswer job paths),
-    // so recordings land next to the config regardless of the daemon's CWD; absolute is unchanged.
-    let record_dir = state
-        .config
-        .audio
-        .record_dir
-        .as_deref()
-        .map(|d| resolve_path_under(state.config_dir.as_deref(), d));
+    let record_dir = record_dir.or_else(|| effective_record_dir(state));
     let mix_recording = state.config.audio.mix_recording;
     let mix_tx_left = state.config.audio.mix_channels.tx_left();
     let hub = state.hub.clone();
@@ -1591,6 +1800,7 @@ mod tests {
             instances: Arc::new(Mutex::new(HashMap::new())),
             pending_orphans: Arc::new(Mutex::new(HashMap::new())),
             overrides: Arc::new(Mutex::new(HashMap::new())),
+            runtime_overrides: Arc::new(Mutex::new(RuntimeOverrides::default())),
             serve_token: Arc::new(AtomicU64::new(1)),
             events,
             inbox: Arc::new(Mutex::new(HashMap::new())),
@@ -1711,6 +1921,160 @@ mod tests {
                 device: None,
             })
         );
+    }
+
+    /// The runtime map REPLACES config while set: numbers it lists get its handler, numbers
+    /// it doesn't stay unanswered even when config lists them, and an empty map silences
+    /// auto-answer entirely. Serve overrides still beat it; clearing restores config.
+    #[test]
+    fn runtime_override_replaces_config_and_serve_still_wins() {
+        let mut cfg = BTreeMap::new();
+        cfg.insert("+1111".to_string(), Some("jobs/a.yaml".to_string()));
+        let state = test_state(cfg);
+
+        let steps = Arc::new(schema::parse("- type: call.answer").unwrap());
+        let mut map = BTreeMap::new();
+        map.insert("+2222".to_string(), InboundJob::AnswerOnly);
+        map.insert("+3333".to_string(), InboundJob::Path("/abs/b.yaml".into()));
+        map.insert("+4444".to_string(), InboundJob::Steps(steps.clone()));
+        state.runtime_overrides.lock().unwrap().autoanswer = Some(map);
+
+        assert_eq!(state.resolve_inbound("+2222"), Some(InboundHandler::AnswerOnly));
+        assert_eq!(
+            state.resolve_inbound("+3333"),
+            Some(InboundHandler::Job { path: "/abs/b.yaml".into(), device: None })
+        );
+        assert_eq!(state.resolve_inbound("+4444"), Some(InboundHandler::Steps(steps)));
+        // Config lists +1111, but the runtime map replaces config wholesale.
+        assert_eq!(state.resolve_inbound("+1111"), None);
+
+        // A serve session for a number the runtime map also names wins over it.
+        state.register_override(
+            "+2222".to_string(),
+            AutoanswerOverride { token: 9, path: "/tmp/serve.yaml".into(), device: None },
+        );
+        assert_eq!(
+            state.resolve_inbound("+2222"),
+            Some(InboundHandler::Job { path: "/tmp/serve.yaml".into(), device: None })
+        );
+        state.clear_overrides(9);
+
+        // Empty map = answer nothing (impossible through config alone).
+        state.runtime_overrides.lock().unwrap().autoanswer = Some(BTreeMap::new());
+        assert_eq!(state.resolve_inbound("+1111"), None);
+
+        // Cleared -> config behaviour returns.
+        state.runtime_overrides.lock().unwrap().autoanswer = None;
+        assert_eq!(
+            state.resolve_inbound("+1111"),
+            Some(InboundHandler::Job { path: "/etc/dialf/jobs/a.yaml".into(), device: None })
+        );
+    }
+
+    #[test]
+    fn effective_record_dir_prefers_the_override() {
+        let mut state = test_state(BTreeMap::new());
+        // No config, no override -> None (recording disabled).
+        assert_eq!(effective_record_dir(&state), None);
+
+        // Config only: relative resolves under the config dir, like autoanswer job paths.
+        let mut config = (*state.config).clone();
+        config.audio.record_dir = Some(PathBuf::from("recordings"));
+        state.config = Arc::new(config);
+        assert_eq!(effective_record_dir(&state), Some(PathBuf::from("/etc/dialf/recordings")));
+
+        // Override wins; clearing it falls back to config.
+        state.runtime_overrides.lock().unwrap().record_dir = Some(PathBuf::from("/tmp/ovr"));
+        assert_eq!(effective_record_dir(&state), Some(PathBuf::from("/tmp/ovr")));
+        state.runtime_overrides.lock().unwrap().record_dir = None;
+        assert_eq!(effective_record_dir(&state), Some(PathBuf::from("/etc/dialf/recordings")));
+    }
+
+    #[test]
+    fn record_dir_validation_requires_absolute_and_creates() {
+        let err = validate_record_dir("relative/dir").unwrap_err();
+        assert!(err.to_string().contains("absolute"), "got: {err}");
+
+        let dir = std::env::temp_dir().join(format!("dialf-ovr-test-{}", std::process::id()));
+        let sub = dir.join("a/b");
+        let got = validate_record_dir(&sub.to_string_lossy()).unwrap();
+        assert_eq!(got, sub);
+        assert!(sub.is_dir(), "validation creates the directory now, not at first call");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn autoanswer_validation_accepts_all_forms_and_rejects_bad_ones() {
+        let steps_yaml = "- type: call.answer\n- type: audio.play\n  file: /abs/p.wav\n";
+
+        // yaml form and steps form come out identical.
+        let mut m = BTreeMap::new();
+        m.insert("+1".to_string(), Some(AutoanswerValue::Yaml { yaml: steps_yaml.into() }));
+        m.insert(
+            "+2".to_string(),
+            Some(AutoanswerValue::Steps(schema::parse(steps_yaml).unwrap())),
+        );
+        m.insert("+3".to_string(), None);
+        let out = validate_autoanswer(m).unwrap();
+        assert_eq!(out["+1"], out["+2"]);
+        assert_eq!(out["+3"], InboundJob::AnswerOnly);
+
+        // Unparseable content fails, naming the number.
+        let mut m = BTreeMap::new();
+        m.insert("+9".to_string(), Some(AutoanswerValue::Yaml { yaml: "- type: nope".into() }));
+        let err = format!("{:#}", validate_autoanswer(m).unwrap_err());
+        assert!(err.contains("autoanswer +9"), "got: {err}");
+
+        // Inline content with a relative audio.play path fails, naming the step.
+        let mut m = BTreeMap::new();
+        m.insert(
+            "+8".to_string(),
+            Some(AutoanswerValue::Yaml { yaml: "- type: audio.play\n  file: rel.wav".into() }),
+        );
+        let err = validate_autoanswer(m).unwrap_err().to_string();
+        assert!(err.contains("step 0") && err.contains("rel.wav"), "got: {err}");
+
+        // A path value must be absolute, and the file must exist and parse NOW.
+        let mut m = BTreeMap::new();
+        m.insert("+7".to_string(), Some(AutoanswerValue::Path("jobs/x.yaml".into())));
+        assert!(validate_autoanswer(m).unwrap_err().to_string().contains("absolute"));
+        let mut m = BTreeMap::new();
+        m.insert("+6".to_string(), Some(AutoanswerValue::Path("/no/such/job.yaml".into())));
+        assert!(format!("{:#}", validate_autoanswer(m).unwrap_err()).contains("read job file"));
+
+        // Empty number key rejected.
+        let mut m = BTreeMap::new();
+        m.insert("  ".to_string(), None);
+        assert!(validate_autoanswer(m).unwrap_err().to_string().contains("empty phone number"));
+    }
+
+    /// The server.info teaser exists only while something is overridden, and carries a COUNT,
+    /// not the numbers; override.show carries the full map.
+    #[test]
+    fn override_visibility_shapes() {
+        let state = test_state(BTreeMap::new());
+        assert_eq!(overrides_summary_json(&state), None);
+
+        let mut map = BTreeMap::new();
+        map.insert("+1".to_string(), InboundJob::AnswerOnly);
+        map.insert("+2".to_string(), InboundJob::Path("/abs/j.yaml".into()));
+        {
+            let mut ovr = state.runtime_overrides.lock().unwrap();
+            ovr.autoanswer = Some(map);
+            ovr.record_dir = Some(PathBuf::from("/tmp/ovr"));
+        }
+        let teaser = overrides_summary_json(&state).unwrap();
+        assert_eq!(teaser["record_dir"], "/tmp/ovr");
+        assert_eq!(teaser["autoanswer_numbers"], 2);
+        assert!(teaser.to_string().find("+1").is_none(), "no numbers in the teaser");
+
+        let full = overrides_json(&state);
+        assert_eq!(full["autoanswer"]["+1"], "answer_only");
+        assert_eq!(full["autoanswer"]["+2"]["job"], "/abs/j.yaml");
+
+        // The log line never carries numbers either.
+        let line = override_summary(&state.runtime_overrides.lock().unwrap());
+        assert_eq!(line, "record_dir=/tmp/ovr, autoanswer=2 number(s)");
     }
 
     #[test]

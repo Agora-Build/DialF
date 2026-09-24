@@ -328,6 +328,10 @@ pub enum ControlOp {
         /// daemon-side, since it becomes part of a filename.
         #[serde(default)]
         name: Option<String>,
+        /// Absolute directory for this run's recordings only — wins over the `override.set`
+        /// value and over config; validated (created) before the job starts.
+        #[serde(default)]
+        record_dir: Option<String>,
     },
     /// Register a foreground auto-answer override: answer `numbers` with the job at `path`
     /// (absolute), taking precedence over `config.autoanswer`. The override lives only as
@@ -339,6 +343,32 @@ pub enum ControlOp {
         path: String,
         #[serde(default)]
         device: Option<String>,
+    },
+    /// Set runtime overrides: in-memory only, lost on daemon restart. Each field present
+    /// replaces that override wholesale; validation happens before anything is stored, so a
+    /// rejected request changes nothing. The reply is the resulting `override.show` state.
+    #[serde(rename = "override.set")]
+    OverrideSet {
+        /// Absolute directory recordings should land in (created now, so typos fail here).
+        #[serde(default)]
+        record_dir: Option<String>,
+        /// Replaces the WHOLE `config.autoanswer` map while set — a number not listed here
+        /// stays unanswered even if config lists it, and an empty map silences auto-answer
+        /// entirely. Value: `null` = answer only; string = absolute job-file path; array =
+        /// inline steps; `{"yaml": "..."}` = raw job-file content parsed server-side.
+        #[serde(default)]
+        autoanswer: Option<std::collections::BTreeMap<String, Option<AutoanswerValue>>>,
+    },
+    /// Report the active runtime overrides.
+    #[serde(rename = "override.show")]
+    OverrideShow,
+    /// Clear runtime overrides: the named ones, or both when neither flag is set.
+    #[serde(rename = "override.clear")]
+    OverrideClear {
+        #[serde(default)]
+        record_dir: bool,
+        #[serde(default)]
+        autoanswer: bool,
     },
     /// Query a running job's status.
     #[serde(rename = "job.status")]
@@ -400,6 +430,16 @@ pub enum ControlOp {
     },
 }
 
+/// One number's job in an `override.set` autoanswer map. Untagged: a JSON array is inline
+/// steps, an object with a `yaml` key is raw job-file content, a bare string is a path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutoanswerValue {
+    Steps(Vec<crate::jobs::schema::Step>),
+    Yaml { yaml: String },
+    Path(String),
+}
+
 /// A response (or streamed event) on the control socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlResponse {
@@ -419,6 +459,38 @@ pub struct ControlResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three autoanswer value forms must land on the intended variants (untagged enums
+    /// resolve by order, so this pins the order too), and `null` must survive as None.
+    #[test]
+    fn override_set_value_forms_deserialize_distinctly() {
+        let req: ControlRequest = serde_json::from_str(
+            r#"{"id":"1","op":"override.set","record_dir":"/tmp/r","autoanswer":{
+                "+1": null,
+                "+2": "/abs/job.yaml",
+                "+3": [{"type":"call.answer"}],
+                "+4": {"yaml":"- type: call.answer"}
+            }}"#,
+        )
+        .unwrap();
+        let ControlOp::OverrideSet { record_dir, autoanswer } = req.op else {
+            panic!("wrong op");
+        };
+        assert_eq!(record_dir.as_deref(), Some("/tmp/r"));
+        let m = autoanswer.unwrap();
+        assert_eq!(m["+1"], None);
+        assert!(matches!(m["+2"], Some(AutoanswerValue::Path(_))));
+        assert!(matches!(m["+3"], Some(AutoanswerValue::Steps(ref s)) if s.len() == 1));
+        assert!(matches!(m["+4"], Some(AutoanswerValue::Yaml { .. })));
+
+        // clear: no flags means "both", spelled as defaults.
+        let req: ControlRequest =
+            serde_json::from_str(r#"{"id":"2","op":"override.clear"}"#).unwrap();
+        assert!(matches!(
+            req.op,
+            ControlOp::OverrideClear { record_dir: false, autoanswer: false }
+        ));
+    }
 
     /// Both directions must keep working: an app that doesn't report `adb` against this daemon,
     /// and this app against a daemon that ignores the field.

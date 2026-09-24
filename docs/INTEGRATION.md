@@ -370,7 +370,18 @@ Every op takes `device` (omit when exactly one phone is connected) unless noted.
 | `job.run` | `steps[]` \| `path`, `device?`, `name?` | §7 |
 | `job.cancel` | `force?` | `{cancelled, force}` |
 | `autoanswer.serve` | `numbers[]`, `path` | streamed events, §8 |
+| `override.set` | `record_dir?`, `autoanswer?` | active overrides |
+| `override.show` | — | active overrides |
+| `override.clear` | `record_dir?`, `autoanswer?` | active overrides |
 | `share.start` / `share.devices` / `share.stop` / `share.status` | see [DEVICE_SHARING.md](DEVICE_SHARING.md) | |
+
+**Runtime overrides.** `override.set` redirects recordings (`record_dir`) and replaces the
+auto-answer map without touching the owner's config file — the job can be a path, inline
+steps, or raw YAML content, validated when you set it (a bad request changes nothing). The
+overrides are **in-memory only**: re-assert them after a daemon restart, and check
+`server.info`'s `overrides` field to see what's active before dispatching. An empty
+autoanswer map silences inbound handling entirely; `override.clear` restores config. Full
+semantics and precedence: [PROTOCOL.md](PROTOCOL.md#runtime-overrides).
 
 `sms.list`, `call.list` and `sims.list` ask the phone and wait ~800 ms for its reply, then
 return what arrived. They are snapshots of what the daemon has recorded, not a guarantee the

@@ -113,7 +113,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
-| `server.info`  | —                               | `{version, ten_vad, config_path}` (the daemon's own) |
+| `server.info`  | —                               | `{version, ten_vad, microphone, ws_bind, mdns, config_path, overrides?}` (the daemon's own) |
 | `devices.list` | —                               | array of devices (see *Wireless adb*) |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.answer`  | `device`                        | ok                                     |
@@ -126,9 +126,12 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 | `mmi.send`     | `device`, `code`, `sim_sub_id?` | `{code, success, response?}`           |
 | `voicemail.set`| `device`, `enabled`, `number?`, `sim_sub_id?` | `{enabled, success, response?}`        |
 | `audio.play`   | `file`, `device?`               | ok                                     |
-| `job.run`      | `path?` \| `steps?`, `device?`, `name?` | `{steps:[...], recording:{...}, call:{...}}` (below) |
+| `job.run`      | `path?` \| `steps?`, `device?`, `name?`, `record_dir?` | `{steps:[...], recording:{...}, call:{...}}` (below) |
 | `server.manifest` | —                            | capability manifest (§ *Capability manifest*) |
 | `autoanswer.serve` | `numbers[]`, `path`, `device?` | streamed `{event}` lines (see below) |
+| `override.set` | `record_dir?`, `autoanswer?`    | active overrides (§ *Runtime overrides*) |
+| `override.show` | —                              | active overrides                       |
+| `override.clear` | `record_dir?`, `autoanswer?` (bools) | active overrides                 |
 | `job.status`   | `job_id`                        | (not tracked yet)                      |
 
 `sms.list` asks the phone to report its inbox, waits briefly for the `sms` frames, then
@@ -180,6 +183,38 @@ before dispatching a job instead of discovering a missing step mid-call:
 ```
 
 `inline_orchestrated` are the steps DialF can run *during* a call rather than only around it.
+
+### Runtime overrides
+
+`override.set` changes two config values **in memory only** — a daemon restart is a clean
+slate, so an integrating app re-asserts what it needs after reconnecting. Mirrored by the
+`dialf override` CLI.
+
+```jsonc
+{"op":"override.set",
+ "record_dir": "/abs/dir",            // recordings land here (absolute; created now)
+ "autoanswer": {                      // replaces config.autoanswer ENTIRELY while set
+    "+1555…":  null,                        // answer only
+    "+1666…":  "/abs/job.yaml",             // job file (validated now, re-read per call)
+    "+1777…":  [ {"type":"call.answer"} ],  // inline steps
+    "+1888…":  {"yaml": "- type: call.answer\n…"}  // raw job-file content
+ }}
+```
+
+Each field present replaces that override wholesale; a field left out is untouched.
+Everything is validated **before** anything is stored — a rejected request changes nothing:
+`record_dir` and job paths must be absolute (the daemon runs with `cwd=/`), job files must
+exist and parse, inline content must parse and may not use relative `audio.play` paths
+(there is no directory to resolve them against). Because the autoanswer override replaces
+the whole map, an **empty map silences auto-answer entirely** — including numbers config
+lists — until cleared.
+
+Precedence: a live `autoanswer.serve` session > `override.set` > `config.yaml`. For
+recordings: `job.run`'s per-run `record_dir` > `override.set` > `config.yaml`.
+
+`override.show` returns the active state; `override.clear` removes the named overrides
+(both, when neither flag is set). While anything is overridden, `server.info` carries an
+`overrides` teaser (`{record_dir, autoanswer_numbers}` — a count, not the numbers).
 
 `autoanswer.serve` is **connection-scoped**: the daemon registers an auto-answer override
 (answer `numbers` with the job at `path`, overriding config) and streams `done:false`
