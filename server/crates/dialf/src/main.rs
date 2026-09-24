@@ -396,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Daemon { config, system } => {
+            dialf::reachability::set_system_service(system);
             // An explicit `--config` that doesn't exist is a user error — fail loudly rather than
             // silently starting with built-in defaults. The implicit default path may legitimately
             // be absent (fresh install) and falls back to defaults.
@@ -1413,12 +1414,10 @@ async fn explain_no_phones(socket: &Path) -> String {
         .get("ws_bind")
         .and_then(|v| v.as_str())
         .unwrap_or(dialf::config::DEFAULT_WS_BIND);
+    let system = socket == dialf::config::system_control_socket();
+    dialf::reachability::set_system_service(system);
     let Some(port) = dialf::daemon::lan_ws_port(ws_bind) else {
-        let loopback = Finding {
-            problem: format!("dialfd listens on {ws_bind}, which phones cannot reach"),
-            fix: "set `ws_bind: 0.0.0.0:8765` in the config, then `dialf service restart`".into(),
-        };
-        return render_no_phones(vec![loopback], &[]);
+        return render_no_phones(vec![dialf::reachability::loopback_finding(ws_bind, system)], &[]);
     };
     let mut findings = Vec::new();
     let mdns = info.get("mdns");

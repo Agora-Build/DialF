@@ -69,8 +69,46 @@ pub(crate) fn parse_os_release(text: &str) -> Distro {
 const NIXOS_AVAHI: &str = "services.avahi = { enable = true; openFirewall = true; \
      publish = { enable = true; userServices = true; }; };";
 
-/// dialfd advertises once, at start, so every avahi fix ends with this.
-const RESTART: &str = "then `dialf service restart`";
+/// Whether this process belongs to the machine-wide service rather than a per-user one. Set once
+/// at startup — by the daemon from `--system`, by the CLI from which socket it reached — because
+/// the restart command differs, and the system form fails outright against a user install:
+/// `dialf service restart` alone targets the system service, which a `--user` Mac doesn't have.
+static SYSTEM_SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_system_service(system: bool) {
+    SYSTEM_SERVICE.store(system, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The command that restarts dialfd in the given scope.
+pub fn restart_command(system: bool) -> &'static str {
+    if system {
+        "sudo dialf service restart"
+    } else {
+        "dialf service restart --user"
+    }
+}
+
+/// dialfd advertises once, at start, so every avahi fix ends with a restart.
+fn restart_step() -> String {
+    let system = SYSTEM_SERVICE.load(std::sync::atomic::Ordering::Relaxed);
+    format!("then `{}`", restart_command(system))
+}
+
+/// dialfd bound to loopback, which no phone can reach. The fix keeps the configured port: telling
+/// someone on 8796 to set 8765 would quietly move them off the port they chose.
+pub fn loopback_finding(ws_bind: &str, system: bool) -> Finding {
+    let port = ws_bind
+        .parse::<std::net::SocketAddr>()
+        .map(|a| a.port())
+        .unwrap_or(crate::config::DEFAULT_WS_BIND_PORT);
+    Finding {
+        problem: format!("dialfd listens on {ws_bind}, which phones cannot reach"),
+        fix: format!(
+            "set `ws_bind: 0.0.0.0:{port}` in the config, then `{}`",
+            restart_command(system)
+        ),
+    }
+}
 
 /// How to get a working `avahi-publish` (the tool *and* a running avahi-daemon it can talk to).
 pub fn avahi_install_fix(d: Distro) -> String {
@@ -93,13 +131,13 @@ pub fn avahi_install_fix(d: Distro) -> String {
                           avahi-daemon"
             .into(),
     };
-    format!("{fix}, {RESTART}")
+    format!("{fix}, {}", restart_step())
 }
 
 /// Turn what `avahi-publish` said on its way out into a cause and a fix.
 pub fn avahi_failure(stderr: &str, d: Distro) -> Finding {
     let mut f = avahi_cause(stderr, d);
-    f.fix = format!("{}, {RESTART}", f.fix);
+    f.fix = format!("{}, {}", f.fix, restart_step());
     f
 }
 
@@ -843,6 +881,28 @@ table inet filter {
         assert!(ports_cover("22,443,8765", 8765));
         assert!(!ports_cover("22,443", 8765));
         assert!(!ports_cover("ssh", 22));
+    }
+
+    /// `dialf service restart` alone targets the system service, and fails on a Mac that — as
+    /// recommended — runs the per-user one.
+    #[test]
+    fn restart_advice_matches_the_service_scope() {
+        assert_eq!(restart_command(false), "dialf service restart --user");
+        assert_eq!(restart_command(true), "sudo dialf service restart");
+    }
+
+    #[test]
+    fn the_loopback_fix_keeps_the_configured_port() {
+        let f = loopback_finding("127.0.0.1:8796", false);
+        assert_eq!(f.problem, "dialfd listens on 127.0.0.1:8796, which phones cannot reach");
+        assert_eq!(
+            f.fix,
+            "set `ws_bind: 0.0.0.0:8796` in the config, then `dialf service restart --user`"
+        );
+        assert!(loopback_finding("[::1]:9000", true).fix.contains("0.0.0.0:9000"));
+        assert!(loopback_finding("[::1]:9000", true).fix.ends_with("`sudo dialf service restart`"));
+        // Unparseable: fall back to the default port rather than print nonsense.
+        assert!(loopback_finding("localhost", false).fix.contains("0.0.0.0:8765"));
     }
 
     #[test]

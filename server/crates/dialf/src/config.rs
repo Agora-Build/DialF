@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default WebSocket bind address for the phone control plane.
 pub const DEFAULT_WS_BIND: &str = "0.0.0.0:8765";
+/// The port in [`DEFAULT_WS_BIND`].
+pub const DEFAULT_WS_BIND_PORT: u16 = 8765;
 /// Default mDNS service type advertised on the LAN.
 pub const DEFAULT_SERVICE_TYPE: &str = "_dialfd._tcp.local.";
 /// Native capture/playback rate used with the sound card before resampling to 16k.

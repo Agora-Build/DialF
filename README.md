@@ -189,7 +189,8 @@ what on the host is keeping it out, with the fix for your OS. The same diagnosis
   | Fedora | `sudo dnf install avahi-tools && sudo systemctl enable --now avahi-daemon` |
   | NixOS | `services.avahi = { enable = true; openFirewall = true; publish = { enable = true; userServices = true; }; };` |
 
-  Then run `dialf service restart`: `dialfd` advertises only when it starts.
+  Then restart dialfd — `dialf service restart --user` for a per-user service,
+  `sudo dialf service restart` for the system one: `dialfd` advertises only when it starts.
 - **A firewall that lets the phone in** on TCP 8765 (`ws_bind`) and UDP 5353 (mDNS):
 
   | Firewall | Fix |
