@@ -388,17 +388,21 @@ class ConnForegroundService : Service() {
         daemons.clear()
         resolveQueue.clear()
         resolveAttempts.clear()
+        var found = 0
         val listener = object : NsdManager.DiscoveryListener {
             override fun onServiceFound(info: NsdServiceInfo) {
-                main.post { enqueueResolve(info) }
+                main.post { found++; enqueueResolve(info) }
             }
             override fun onServiceLost(info: NsdServiceInfo) {}
             override fun onDiscoveryStarted(t: String) {}
             override fun onDiscoveryStopped(t: String) {}
-            override fun onStartDiscoveryFailed(t: String, e: Int) {}
+            override fun onStartDiscoveryFailed(t: String, e: Int) {
+                Log.w(TAG, "discovery failed to start (code $e)")
+            }
             override fun onStopDiscoveryFailed(t: String, e: Int) {}
         }
         discovery = listener
+        multicast.acquire()
         try {
             nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
             // Keep discovering for the whole window even after connecting: on a LAN with
@@ -406,11 +410,16 @@ class ConnForegroundService : Service() {
             // fail over to the next one instantly instead of waiting out another round.
             val t = Runnable {
                 stopDiscovery()
-                if (running && ws == null) scheduleReconnect()
+                if (running && ws == null) {
+                    // Silence here used to be indistinguishable from "not searching at all".
+                    Log.i(TAG, "discovery window ended: $found $SERVICE_TYPE service(s) found, none connected")
+                    scheduleReconnect()
+                }
             }
             discoveryTimeout = t
             main.postDelayed(t, DISCOVERY_WINDOW_MS)
         } catch (_: Exception) {
+            multicast.release()
             scheduleReconnect()
         }
     }
@@ -424,7 +433,11 @@ class ConnForegroundService : Service() {
             } catch (_: Exception) {}
         }
         discovery = null
+        multicast.release()
     }
+
+    /** Held only while a discovery window is open. */
+    private val multicast by lazy { DiscoveryMulticastLock(applicationContext) }
 
     // --- candidate resolution -------------------------------------------------
     // NsdManager resolves ONE service at a time: a second resolveService() while one is in
