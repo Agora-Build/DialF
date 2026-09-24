@@ -425,15 +425,18 @@ async fn main() -> anyhow::Result<()> {
             let none = resp.ok != Some(false)
                 && resp.data.as_ref().and_then(|v| v.as_array()).is_none_or(|r| r.is_empty());
             if human && resp.ok != Some(false) {
-                match resp.data.as_ref().and_then(|v| v.as_array()) {
-                    Some(rows) if !rows.is_empty() => rows.iter().for_each(human_device),
-                    _ => println!("(no phones connected)"),
+                if let Some(rows) = resp.data.as_ref().and_then(|v| v.as_array()) {
+                    rows.iter().for_each(human_device);
+                }
+                if none {
+                    print!("{}", explain_no_phones(&socket).await);
                 }
             } else {
                 print_response(&resp);
-            }
-            if none && (human || std::io::stderr().is_terminal()) {
-                explain_no_phones(&socket).await;
+                // stdout stays the `[]` scripts parse; the explanation is for a person.
+                if none && std::io::stderr().is_terminal() {
+                    eprint!("{}", explain_no_phones(&socket).await);
+                }
             }
             ok_or_err(resp)
         }
@@ -1396,27 +1399,28 @@ fn human_calls(c: &serde_json::Value) {
 }
 
 /// Why no phone is connected, when this host is the reason: no mDNS responder, a firewall in
-/// the way, or a loopback bind. Goes to stderr so stdout stays the list scripts parse. The
-/// firewall is checked here rather than by the daemon so a port opened a minute ago is seen
-/// as open — the CLI and daemon are always on the same host (Unix socket).
-async fn explain_no_phones(socket: &Path) {
-    use dialf::reachability::{checklist, firewall_findings, Finding};
-    let info = match call(socket, ControlOp::ServerInfo).await {
-        Ok(r) => r.data.unwrap_or_default(),
-        Err(_) => return,
-    };
+/// the way, or a loopback bind. The firewall is checked here rather than by the daemon so a
+/// port opened a minute ago is seen as open — the CLI and daemon are always on the same host
+/// (Unix socket).
+async fn explain_no_phones(socket: &Path) -> String {
+    use dialf::reachability::{checklist, firewall_findings, render_no_phones, Finding};
+    let info = call(socket, ControlOp::ServerInfo)
+        .await
+        .ok()
+        .and_then(|r| r.data)
+        .unwrap_or_default();
     let ws_bind = info
         .get("ws_bind")
         .and_then(|v| v.as_str())
         .unwrap_or(dialf::config::DEFAULT_WS_BIND);
-    let mut findings = Vec::new();
     let Some(port) = dialf::daemon::lan_ws_port(ws_bind) else {
-        eprintln!(
-            "no phones connected: dialfd listens on {ws_bind}, which phones cannot reach — \
-             set `ws_bind: 0.0.0.0:8765` in the config and restart dialfd"
-        );
-        return;
+        let loopback = Finding {
+            problem: format!("dialfd listens on {ws_bind}, which phones cannot reach"),
+            fix: "set `ws_bind: 0.0.0.0:8765` in the config, then `dialf service restart`".into(),
+        };
+        return render_no_phones(vec![loopback], &[]);
     };
+    let mut findings = Vec::new();
     let mdns = info.get("mdns");
     if mdns.and_then(|m| m.get("state")).and_then(|s| s.as_str()) == Some("failed") {
         let field = |k: &str| {
@@ -1425,20 +1429,7 @@ async fn explain_no_phones(socket: &Path) {
         findings.push(Finding { problem: field("problem"), fix: field("fix") });
     }
     findings.extend(firewall_findings(port));
-    let findings = dialf::reachability::merge_same_fix(findings);
-
-    if findings.is_empty() {
-        eprintln!("no phones connected. This host looks ready (mDNS advertising, no firewall in the way).");
-    } else {
-        eprintln!("no phones connected. This host is keeping them out:");
-        for f in &findings {
-            eprintln!("  ✗ {}\n    fix: {}", f.problem, f.fix);
-        }
-    }
-    eprintln!("also check:");
-    for line in checklist(port) {
-        eprintln!("  - {line}");
-    }
+    render_no_phones(findings, &checklist(port))
 }
 
 fn human_device(d: &serde_json::Value) {

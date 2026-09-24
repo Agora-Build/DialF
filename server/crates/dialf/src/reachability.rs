@@ -543,17 +543,49 @@ pub(crate) fn macos_findings_from(exe: &str, global: &str, block_all: &str, app:
 // Report
 // ---------------------------------------------------------------------------
 
-/// Fold findings that share a fix into one, so a single step isn't printed twice (on NixOS
-/// the avahi block both installs the responder and opens UDP 5353).
-pub fn merge_same_fix(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut out: Vec<Finding> = Vec::new();
+/// One fix and every problem it solves.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Step {
+    pub problems: Vec<String>,
+    pub fix: String,
+}
+
+/// Group findings by fix, so a single step isn't printed twice (on NixOS the avahi block both
+/// installs the responder and opens UDP 5353). Order of first appearance is kept.
+pub fn group_by_fix(findings: Vec<Finding>) -> Vec<Step> {
+    let mut out: Vec<Step> = Vec::new();
     for f in findings {
-        match out.iter_mut().find(|o| o.fix == f.fix) {
-            Some(o) => o.problem = format!("{}; and {}", o.problem, f.problem),
-            None => out.push(f),
+        match out.iter_mut().find(|s| s.fix == f.fix) {
+            Some(s) => s.problems.push(f.problem),
+            None => out.push(Step { problems: vec![f.problem], fix: f.fix }),
         }
     }
     out
+}
+
+/// The report `dialf devices` prints when no phone is connected. "No problems detected"
+/// rather than "ready": an unrecognised firewall or the router can still be in the way.
+pub fn render_no_phones(findings: Vec<Finding>, checklist: &[String]) -> String {
+    let mut s = String::from("No phones connected.\n");
+    let steps = group_by_fix(findings);
+    if steps.is_empty() {
+        s.push_str("No problems detected on this host.\n");
+    } else {
+        s.push_str("This host is keeping them out:\n");
+        for step in &steps {
+            for p in &step.problems {
+                s.push_str(&format!("  ✗ {p}\n"));
+            }
+            s.push_str(&format!("    fix: {}\n", step.fix));
+        }
+    }
+    if !checklist.is_empty() {
+        s.push_str("Also check:\n");
+        for line in checklist {
+            s.push_str(&format!("  - {line}\n"));
+        }
+    }
+    s
 }
 
 /// The hints that don't depend on detection: things only the person holding the phone can
@@ -763,11 +795,44 @@ table inet filter {
             fix: avahi_install_fix(Distro::NixOs),
         };
         let firewall = nixos_findings(8765, Open::No, Open::No);
-        let merged = merge_same_fix([vec![missing], firewall].concat());
+        let steps = group_by_fix([vec![missing], firewall].concat());
         // avahi+5353 share the NixOS avahi block; the TCP port is its own step.
-        assert_eq!(merged.len(), 2, "{merged:?}");
-        let avahi = merged.iter().find(|f| f.problem.contains("avahi-publish")).unwrap();
-        assert!(avahi.problem.contains("UDP 5353"), "{avahi:?}");
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(steps[0].problems.len(), 2, "{steps:?}");
+        assert!(steps[0].problems[0].contains("avahi-publish"), "{steps:?}");
+        assert!(steps[0].problems[1].contains("UDP 5353"), "{steps:?}");
+        assert!(steps[1].problems[0].contains("TCP 8765"), "{steps:?}");
+    }
+
+    #[test]
+    fn the_report_lists_each_cause_once_under_its_fix() {
+        let f = |p: &str, fix: &str| Finding { problem: p.into(), fix: fix.into() };
+        let out = render_no_phones(
+            vec![f("no avahi", "enable avahi"), f("5353 shut", "enable avahi"), f("8765 shut", "open 8765")],
+            &["same subnet".into()],
+        );
+        assert_eq!(
+            out,
+            "No phones connected.\n\
+             This host is keeping them out:\n  \
+               ✗ no avahi\n  \
+               ✗ 5353 shut\n    \
+                 fix: enable avahi\n  \
+               ✗ 8765 shut\n    \
+                 fix: open 8765\n\
+             Also check:\n  \
+               - same subnet\n"
+        );
+        assert_eq!(out.matches("No phones connected").count(), 1);
+    }
+
+    #[test]
+    fn a_clean_host_claims_only_what_was_checked() {
+        let out = render_no_phones(Vec::new(), &["same subnet".into()]);
+        assert!(out.starts_with("No phones connected.\nNo problems detected on this host.\n"), "{out}");
+        assert!(!out.contains("ready"), "{out}");
+        // No checklist (loopback bind): no dangling heading.
+        assert!(!render_no_phones(Vec::new(), &[]).contains("Also check"));
     }
 
     #[test]

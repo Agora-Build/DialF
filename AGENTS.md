@@ -160,7 +160,8 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   `publish.userServices` or avahi refuses a non-root publisher) and a firewall open on TCP
   `ws_bind` + UDP 5353. NixOS enables its firewall by default; a 5353 rule scoped to `wt0` does
   not help a WiFi phone. `reachability.rs` names the cause and fix per OS; it is logged at
-  daemon start and printed by an empty `dialf devices` (stderr only; stdout stays `[]`).
+  daemon start and printed by an empty `dialf devices` (`--human`: stdout; plain: stderr at a
+  terminal only, so stdout stays the `[]` scripts parse).
   `avahi-publish` fails *after* a successful spawn when avahi-daemon is down, so discovery waits
   for its "Established" line rather than trusting the spawn. A host cannot test its own
   firewall by connecting to its LAN IP (that goes over `lo`); from a phone on adb,
