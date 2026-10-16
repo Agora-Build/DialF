@@ -113,7 +113,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
-| `server.info`  | —                               | `{version, ten_vad, microphone, ws_bind, mdns, config_path, overrides?}` (the daemon's own) |
+| `server.info`  | —                               | `{version, ten_vad, microphone, capture, ws_bind, mdns, config_path, overrides?}` (the daemon's own) |
 | `devices.list` | —                               | array of devices (see *Wireless adb*) |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.answer`  | `device`                        | ok                                     |
@@ -150,7 +150,9 @@ returns what it has recorded.
       "summary": "speech 4.1s then 3.0s silence" }
   ],
   "recording": { "rx": "…-rx.wav", "tx": "…-tx.wav", "mix": "…-mix.wav",
-                 "t0_epoch_ms": 1758412800123 },  // wall clock at t=0
+                 "t0_epoch_ms": 1758412800123,    // wall clock at t=0
+                 "rx_peak_dbfs": -14.2,           // loudest rx sample
+                 "rx_silent": false },            // true = the phone's audio never arrived
   "call": { "answer_latency_ms": 4200, "duration_ms": 63500,
             "end_reason": "completed",            // completed|far_end_hangup|no_answer
             "remote_number": "+1555…", "sim": "…" }
@@ -168,6 +170,27 @@ alone, with the step timestamps used for segmentation and cross-checking.
 
 `recording` is absent for a job that ran without audio; `call` is absent when the job placed
 no call (e.g. `record-only.yaml`).
+
+**`rx_silent`** is true when rx never peaked above −40 dBFS over at least 2 s of recording —
+the phone's audio did not reach the capture (wrong `remix` channel, a card's input routing,
+no call connected). Real speech sits far above −40; a dead channel's preamp noise far below
+it. dialfd also logs a warning live, 30 s into a still-silent recording, and `dialf run`
+prints one at the end. `rx_peak_dbfs` is floored at −120 for digital silence.
+
+### Capture probe (`server.info.capture`)
+
+At start, dialfd runs the capture command once for ~2 s and keeps the verdict:
+
+```jsonc
+{"state": "pending"}                                  // still running
+{"state": "ok", "rate": 44219}                        // works, at the configured rate
+{"state": "rate_mismatch", "configured": 44100, "measured": 41959, "fix": "…"}
+{"state": "failed", "error": "sox FAIL remix: too few input channels", "fix": "…"}
+```
+
+`error` is the capture tool's own last stderr output; `fix` is present when that message pins
+down the cause. `dialf import` waits for the verdict after restarting the daemon and prints
+it; `dialf --version` shows any problem.
 
 ### Capability manifest
 

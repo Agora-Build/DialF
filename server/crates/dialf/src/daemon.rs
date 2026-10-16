@@ -136,6 +136,8 @@ pub struct DaemonState {
     /// The mDNS advertisement; reported by `server.info` so an empty `dialf devices` can say
     /// why phones aren't finding us.
     pub mdns: Arc<Mutex<discovery::Advert>>,
+    /// What the startup capture probe found (`server.info.capture`).
+    pub capture_probe: Arc<Mutex<crate::audio::engine::CaptureProbe>>,
 }
 
 /// The phone port, when `ws_bind` is reachable from the LAN at all (a loopback bind is not,
@@ -475,7 +477,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     let engine = Arc::new(AudioEngine::new(config.audio.clone()));
     // Check what the card really delivers, off the startup path: opening it takes a couple of
     // seconds and a diagnostic must not hold up binding the sockets.
-    spawn_capture_rate_probe(engine.clone(), config.audio.sample_rate);
+    let capture_probe = Arc::new(Mutex::new(crate::audio::engine::CaptureProbe::Pending));
+    spawn_capture_probe(engine.clone(), capture_probe.clone());
     let registry = Arc::new(Mutex::new(Registry::new()));
     let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
     // Markers left by a prior (crashed) instance name calls that may still be up — reconciled (hung
@@ -523,6 +526,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         share: Arc::new(tokio::sync::Mutex::new(None)),
         adb_links: Default::default(),
         mdns,
+        capture_probe,
     };
     if let Some(port) = lan_ws_port(&state.config.ws_bind) {
         for f in crate::reachability::firewall_findings(port) {
@@ -727,6 +731,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 "microphone": crate::audio::mic_permission::status_label(),
                 "ws_bind": state.config.ws_bind,
                 "mdns": state.mdns.lock().unwrap().report(),
+                "capture": *state.capture_probe.lock().unwrap(),
             });
             // Present only while something is overridden, so its absence is meaningful: an
             // integrator sees ambient runtime state before dispatching work.
@@ -947,7 +952,8 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             // `t0_epoch_ms` sits on the recording because that is what every step's
             // `t_start_ms`/`t_end_ms` counts from — the two are only meaningful together.
             let recording = out.recording.map(|r| {
-                json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix, "t0_epoch_ms": out.t0_epoch_ms })
+                json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix, "t0_epoch_ms": out.t0_epoch_ms,
+                        "rx_peak_dbfs": r.rx_peak_dbfs, "rx_silent": r.rx_silent })
             });
             Ok(ok_data(
                 &id,
@@ -1386,26 +1392,28 @@ fn job_needs_phone(job: &[schema::Step]) -> bool {
     })
 }
 
-/// Measure the capture tool's real output rate in the background and warn if it disagrees
-/// with config. Runs once per daemon start — the card rarely changes underneath us.
-fn spawn_capture_rate_probe(engine: Arc<AudioEngine>, configured: u32) {
+/// Probe the capture in the background: log the verdict and keep it for `server.info`, so
+/// `dialf import` / `dialf --version` can report it instead of leaving it in a log.
+fn spawn_capture_probe(engine: Arc<AudioEngine>, slot: Arc<Mutex<crate::audio::engine::CaptureProbe>>) {
+    use crate::audio::engine::CaptureProbe;
     tokio::task::spawn_blocking(move || {
-        let Some(measured) = engine.probe_capture_rate() else {
-            // No card, no tool, or consent not granted — the job path reports those properly.
-            tracing::debug!("capture rate probe skipped");
-            return;
-        };
-        if crate::audio::command_backend::rate_drifts(configured, measured) {
-            tracing::warn!(
+        let probe = engine.probe_capture();
+        match &probe {
+            CaptureProbe::Ok { rate } => tracing::info!(rate, "capture rate confirmed"),
+            CaptureProbe::RateMismatch { configured, measured, fix } => tracing::warn!(
                 configured,
                 measured,
                 "the capture device is delivering ~{measured} Hz but audio.sample_rate is \
-                 {configured} — recordings get stamped {configured} Hz and will play back at \
-                 the wrong speed. Set audio.sample_rate to {measured}."
-            );
-        } else {
-            tracing::info!(rate = measured, "capture rate confirmed");
+                 {configured}: {fix}"
+            ),
+            CaptureProbe::Failed { error, fix } => tracing::warn!(
+                error = %error,
+                fix = fix.as_deref().unwrap_or("-"),
+                "capture probe failed — recordings will not work until this is fixed"
+            ),
+            CaptureProbe::Pending => {}
         }
+        *slot.lock().unwrap() = probe;
     });
 }
 
@@ -1811,6 +1819,7 @@ mod tests {
             share: Arc::new(tokio::sync::Mutex::new(None)),
             adb_links: Default::default(),
             mdns: Arc::new(Mutex::new(discovery::Advert::Loopback)),
+            capture_probe: Arc::new(Mutex::new(crate::audio::engine::CaptureProbe::Pending)),
         }
     }
 

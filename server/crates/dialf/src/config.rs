@@ -75,7 +75,10 @@ impl MixChannels {
 pub struct AudioConfig {
     /// Native sample rate to capture/play at the card (resampled to 16k for VAD).
     pub sample_rate: u32,
-    /// Channel count at the card (mono recommended for the call bridge).
+    /// Channels in the stream DialF reads from the capture tool and writes to rx/tx.wav —
+    /// substituted for `{channels}`, and the frame width DialF parses the tool's raw output
+    /// with. NOT the card's input count: with a pinned `capture_cmd` that is sox's input-side
+    /// `-c`, and `remix` narrows it to this (1 for the call bridge).
     pub channels: u16,
     /// Capture device hint passed to the tool (e.g. ALSA `plughw:1,0`, ffmpeg index).
     #[serde(skip_serializing_if = "Option::is_none")]

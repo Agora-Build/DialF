@@ -54,6 +54,86 @@ pub struct RecordOutput {
     pub rx: PathBuf,
     pub tx: PathBuf,
     pub mix: Option<PathBuf>,
+    /// Loudest rx sample, in dBFS (floored at [`DBFS_FLOOR`]); `None` if rx got no audio.
+    pub rx_peak_dbfs: Option<f32>,
+    /// rx never rose above [`SILENT_BELOW_DBFS`] over at least [`SILENT_MIN`] of recording.
+    pub rx_silent: bool,
+}
+
+/// rx that never peaks above this is treated as "the phone's audio isn't arriving". A dead
+/// channel on a USB card sat near −55 dBFS (preamp noise) while a phone on the right one
+/// peaked around −14; speech is far above −40, and line noise is far below it.
+pub const SILENT_BELOW_DBFS: f32 = -40.0;
+/// Shortest recording judged at all — a sub-second job proves nothing either way.
+pub const SILENT_MIN: Duration = Duration::from_secs(2);
+/// How long rx may stay silent before the live warning: long enough to cover dialing and
+/// ringing, short enough to flag a broken setup while the first call is still going.
+pub const SILENT_WARN_AFTER: Duration = Duration::from_secs(30);
+/// Reported floor for an all-zero rx (digital silence has no finite dBFS).
+pub const DBFS_FLOOR: f32 = -120.0;
+
+/// The one-line explanation shown wherever a silent rx is reported (auto-answer events,
+/// `dialf run`), so the advice is the same everywhere.
+pub fn silent_rx_message(peak_dbfs: Option<f32>) -> String {
+    let peak = peak_dbfs.map(|p| format!("{p:.0} dBFS")).unwrap_or_else(|| "none".into());
+    format!(
+        "rx was silent (peak {peak}) — the phone's audio did not reach the capture. Check \
+         capture_cmd's channel (`remix N`, plus `-c` on its input side for a multichannel \
+         card) and the card's input routing"
+    )
+}
+
+/// Tracks rx loudness as it is recorded. Pure, so the thresholds are unit-testable.
+#[derive(Debug, Clone)]
+pub struct SilenceWatch {
+    rate: u32,
+    frames: u64,
+    peak: u16,
+    warned: bool,
+}
+
+impl SilenceWatch {
+    pub fn new(rate: u32) -> Self {
+        Self { rate: rate.max(1), frames: 0, peak: 0, warned: false }
+    }
+
+    /// Feed one chunk of interleaved samples. Returns `true` exactly once: the first time
+    /// rx has been recorded for [`SILENT_WARN_AFTER`] without ever leaving silence.
+    pub fn observe(&mut self, chunk: &[i16], channels: usize) -> bool {
+        for &s in chunk {
+            self.peak = self.peak.max(s.unsigned_abs());
+        }
+        self.frames += (chunk.len() / channels.max(1)) as u64;
+        if self.warned || self.duration() < SILENT_WARN_AFTER || !self.is_silent() {
+            return false;
+        }
+        self.warned = true;
+        true
+    }
+
+    fn duration(&self) -> Duration {
+        Duration::from_secs_f64(self.frames as f64 / self.rate as f64)
+    }
+
+    fn is_silent(&self) -> bool {
+        self.peak_dbfs().is_some_and(|p| p < SILENT_BELOW_DBFS)
+    }
+
+    /// Peak so far in dBFS, floored at [`DBFS_FLOOR`]; `None` before any audio.
+    pub fn peak_dbfs(&self) -> Option<f32> {
+        if self.frames == 0 {
+            return None;
+        }
+        if self.peak == 0 {
+            return Some(DBFS_FLOOR);
+        }
+        Some((20.0 * (self.peak as f32 / 32768.0).log10()).max(DBFS_FLOOR))
+    }
+
+    /// The end-of-recording verdict.
+    pub fn silent_overall(&self) -> bool {
+        self.duration() >= SILENT_MIN && self.is_silent()
+    }
 }
 
 /// Pad `sink` with silence from `have` **frames** up to `want` (no-op if `want <= have`).
@@ -233,6 +313,9 @@ impl DuplexRecorder {
             rx: rx_path,
             tx: tx_path,
             mix: mix_path,
+            // The passive recorder doesn't measure loudness; say "unknown", not "fine".
+            rx_peak_dbfs: None,
+            rx_silent: false,
         })
     }
 }
@@ -313,7 +396,7 @@ pub struct DuplexSession {
     vad_rx: Receiver<Vec<i16>>,
     /// Stops the capture (kills the child) so the bg thread's blocked read returns EOF.
     unblock: Box<dyn Fn() + Send>,
-    join: Option<JoinHandle<io::Result<(WavFileSink, u64)>>>,
+    join: Option<JoinHandle<io::Result<(WavFileSink, u64, SilenceWatch)>>>,
     silence: Vec<i16>,
 }
 
@@ -355,7 +438,7 @@ impl DuplexSession {
 
         let join = std::thread::Builder::new()
             .name("dialf-capture".into())
-            .spawn(move || -> io::Result<(WavFileSink, u64)> {
+            .spawn(move || -> io::Result<(WavFileSink, u64, SilenceWatch)> {
                 // Best-effort: raise this thread's scheduling priority so the capture pipe is
                 // drained promptly on a loaded host. Non-fatal if denied (Linux needs
                 // privileges/rtprio; macOS raises the QoS class).
@@ -372,6 +455,7 @@ impl DuplexSession {
                 let mut whole_buf: Vec<i16> = Vec::new();
                 let mut total: u64 = 0;
                 let mut was_active = false;
+                let mut watch = SilenceWatch::new(src_rate);
                 loop {
                     let n = capture.read(&mut buf)?;
                     if n == 0 {
@@ -395,6 +479,18 @@ impl DuplexSession {
                     }
                     rx.write(chunk)?;
                     total += (chunk.len() / src_channels) as u64;
+                    if watch.observe(chunk, src_channels) {
+                        // Live, while the call is still going: a dead capture otherwise shows
+                        // up only as an empty rx.wav after the fact.
+                        tracing::warn!(
+                            peak_dbfs = watch.peak_dbfs().unwrap_or(DBFS_FLOOR),
+                            "rx has stayed silent for {}s — the phone's audio is not reaching \
+                             the capture. Check capture_cmd's channel (`remix N`, and `-c` on \
+                             its input side for a multichannel card), the card's input routing, \
+                             and that the call is connected",
+                            SILENT_WARN_AFTER.as_secs()
+                        );
+                    }
                     rx_len_bg.store(total, Ordering::Relaxed);
                     let active = vad_active_bg.load(Ordering::Relaxed);
                     if active && !was_active {
@@ -416,7 +512,7 @@ impl DuplexSession {
                         }
                     }
                 }
-                Ok((rx, total))
+                Ok((rx, total, watch))
             })
             .context("spawn capture thread")?;
 
@@ -490,7 +586,7 @@ impl DuplexSession {
     pub fn finish(mut self) -> anyhow::Result<RecordOutput> {
         self.vad_active.store(false, Ordering::Relaxed);
         (self.unblock)(); // kill the capture so the bg read returns EOF
-        let (mut rx, rx_len) = match self.join.take() {
+        let (mut rx, rx_len, watch) = match self.join.take() {
             Some(h) => h
                 .join()
                 .map_err(|_| anyhow!("capture thread panicked"))??,
@@ -515,6 +611,8 @@ impl DuplexSession {
             rx: self.rx_path.clone(),
             tx: self.tx_path.clone(),
             mix: mix_path,
+            rx_peak_dbfs: watch.peak_dbfs(),
+            rx_silent: watch.silent_overall(),
         })
     }
 }
@@ -823,6 +921,71 @@ mod tests {
         assert_eq!(rx.len() % 2, 0, "file must hold whole frames");
         assert!(rx.iter().step_by(2).all(|&s| s == 1000), "left stayed left");
         assert!(rx.iter().skip(1).step_by(2).all(|&s| s == -1000), "right stayed right");
+    }
+
+    /// The nixps failure, in numbers: a dead channel sat near −55 dBFS of preamp noise, the
+    /// phone on the right channel peaked around −14. The threshold must split them.
+    #[test]
+    fn silence_watch_splits_noise_floor_from_signal() {
+        let noise = 58i16; // ≈ −55 dBFS
+        let mut w = SilenceWatch::new(1_000);
+        assert_eq!(w.peak_dbfs(), None, "no audio yet");
+        assert!(!w.observe(&[noise; 1_000], 1)); // 1 s
+        assert!(w.peak_dbfs().unwrap() < SILENT_BELOW_DBFS);
+        assert!(!w.silent_overall(), "under SILENT_MIN, no verdict");
+        assert!(!w.observe(&[noise; 1_000], 1)); // 2 s
+        assert!(w.silent_overall());
+
+        let mut loud = SilenceWatch::new(1_000);
+        loud.observe(&[noise; 1_500], 1);
+        loud.observe(&[6_500], 1); // ≈ −14 dBFS: one real sample is enough
+        loud.observe(&[noise; 1_500], 1);
+        assert!(!loud.silent_overall());
+        assert!((loud.peak_dbfs().unwrap() - -14.0).abs() < 0.1);
+    }
+
+    /// The live warning fires once, at the window, and only while still silent.
+    #[test]
+    fn silence_watch_warns_once_at_the_window() {
+        let rate = 1_000u32;
+        let window = SILENT_WARN_AFTER.as_secs() as usize * rate as usize;
+        let mut w = SilenceWatch::new(rate);
+        assert!(!w.observe(&vec![0i16; window - 1], 1), "not before the window");
+        assert!(w.observe(&[0], 1), "at the window");
+        assert!(!w.observe(&[0; 10], 1), "only once");
+        assert_eq!(w.peak_dbfs(), Some(DBFS_FLOOR), "digital zero reports the floor");
+
+        // Signal before the window: never warns.
+        let mut ok = SilenceWatch::new(rate);
+        ok.observe(&[20_000], 1);
+        assert!(!ok.observe(&vec![0i16; window], 1));
+
+        // Interleaved channels count as frames, not samples.
+        let mut st = SilenceWatch::new(rate);
+        assert!(!st.observe(&vec![0i16; window], 2), "half the window in stereo frames");
+    }
+
+    /// End to end through the recording thread: the verdict lands in RecordOutput.
+    #[test]
+    fn a_silent_session_is_reported_silent_and_a_live_one_is_not() {
+        let rate = 8_000;
+        let quiet: Vec<Vec<i16>> = (0..6).map(|_| vec![50i16; 8_000]).collect(); // 3 s stereo
+        let out = stereo_session(&tmp().join("silent"), rate, quiet, false).finish().unwrap();
+        assert!(out.rx_silent);
+        assert!(out.rx_peak_dbfs.unwrap() < SILENT_BELOW_DBFS);
+
+        let mut live: Vec<Vec<i16>> = (0..6).map(|_| vec![50i16; 8_000]).collect();
+        live[3][101] = 9_000; // one burst of real audio on the right channel
+        let out = stereo_session(&tmp().join("live"), rate, live, false).finish().unwrap();
+        assert!(!out.rx_silent);
+        assert!(out.rx_peak_dbfs.unwrap() > SILENT_BELOW_DBFS);
+    }
+
+    #[test]
+    fn the_silent_rx_message_names_the_peak_and_the_fixes() {
+        let m = silent_rx_message(Some(-55.4));
+        assert!(m.contains("-55 dBFS") && m.contains("remix") && m.contains("-c"), "{m}");
+        assert!(silent_rx_message(None).contains("peak none"));
     }
 
     /// A sink whose header disagrees with the stream would be silently wrong audio.

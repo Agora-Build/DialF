@@ -462,6 +462,12 @@ async fn trigger_autoanswer(
             .await
         {
             Ok(out) => {
+                if let Some(rec) = out.recording.as_ref().filter(|r| r.rx_silent) {
+                    state.emit(format!(
+                        "{n} → warning: {}",
+                        crate::audio::record::silent_rx_message(rec.rx_peak_dbfs)
+                    ));
+                }
                 let outcomes = out.outcomes;
                 match outcomes
                     .iter()

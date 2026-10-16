@@ -47,7 +47,9 @@ audio:
                                     # wrong — playing back at the wrong speed with no error.
                                     # dialfd probes the real rate at startup and logs
                                     # `capture rate confirmed`, or warns if they disagree.
-  channels: 1                       # capture channels; 2 records a true stereo rx.wav
+  channels: 1                       # channels DialF records (after any `remix`); 2 = stereo rx.wav.
+                                    # NOT the card's input count — for a multichannel card that is
+                                    # sox's input-side `-c N` in capture_cmd (see below)
                                     # (a stereo bridge/breakout — one source per input)
   # CoreAudio name (macOS) or ALSA, e.g. "plughw:1,0". Selects the device for auto-detected
   # commands; with capture_cmd/playback_cmd pinned (below) the argv's device is what runs,

@@ -597,6 +597,9 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let resp = call_run(&socket, op).await?;
                 print_response(&resp);
+                if let Some(warning) = silent_rx_warning(&resp) {
+                    eprintln!("\nwarning: {warning}");
+                }
                 if job_ended_on_hangup(&resp) {
                     println!(
                         "\ncaller hung up — ran once, exiting. Use `--autoanswer <numbers>` to keep answering calls."
@@ -1152,6 +1155,7 @@ async fn restart_daemon_and_verify(socket: &Path, installed_config: &Path) -> an
             Some(cfg) => println!("dialfd back up (v{version}), using config {cfg}"),
             None => println!("dialfd back up (v{version})"),
         }
+        report_capture_probe(socket).await;
         return Ok(());
     }
     anyhow::bail!(
@@ -1232,6 +1236,9 @@ async fn print_versions() -> anyhow::Result<()> {
                 .and_then(|v| v.as_str())
             {
                 print_mic_line(mic);
+            }
+            if let Some(capture) = resp.data.as_ref().and_then(|d| d.get("capture")) {
+                print_capture_line(capture);
             }
             match resp
             .data
@@ -1322,6 +1329,62 @@ fn parse_autoanswer_entries(
         map.insert(num.to_string(), value);
     }
     Ok(map)
+}
+
+/// One line for the startup capture probe when it found a problem; silent when capture is
+/// fine, still being checked, or the daemon predates the field.
+fn print_capture_line(capture: &serde_json::Value) {
+    if let Some(line) = capture_problem(capture) {
+        println!("capture:         {line}");
+    }
+}
+
+/// The problem a `server.info.capture` value describes, with its fix; `None` when there is
+/// none to report.
+fn capture_problem(capture: &serde_json::Value) -> Option<String> {
+    let field = |k: &str| capture.get(k).and_then(|v| v.as_str());
+    let line = match field("state")? {
+        "failed" => format!("FAILED — {}", field("error").unwrap_or("unknown error")),
+        "rate_mismatch" => format!(
+            "delivering ~{} Hz, config says {} Hz",
+            capture.get("measured").and_then(|v| v.as_u64()).unwrap_or(0),
+            capture.get("configured").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        _ => return None,
+    };
+    Some(match field("fix") {
+        Some(fix) => format!("{line}\n  ↳ {fix}"),
+        None => line,
+    })
+}
+
+/// After `dialf import` restarts the daemon: wait for its capture probe (a few seconds) and
+/// say what it found. Import is the moment a config meets a new machine — a capture command
+/// that can't run should be reported here, not discovered as an empty rx.wav later.
+async fn report_capture_probe(socket: &Path) {
+    for _ in 0..24 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let Ok(resp) = call(socket, ControlOp::ServerInfo).await else {
+            continue;
+        };
+        let Some(capture) = resp.data.as_ref().and_then(|d| d.get("capture")).cloned() else {
+            return; // a daemon that predates the probe report
+        };
+        match capture.get("state").and_then(|v| v.as_str()) {
+            Some("pending") => continue,
+            Some("ok") => {
+                let rate = capture.get("rate").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("capture: ok (~{rate} Hz)");
+            }
+            _ => {
+                if let Some(problem) = capture_problem(&capture) {
+                    println!("capture: {problem}");
+                }
+            }
+        }
+        return;
+    }
+    println!("capture: still being checked — `dialf --version` reports it once done");
 }
 
 /// Report the daemon's microphone state, with the fix attached when there is one. Silent when
@@ -1650,6 +1713,16 @@ fn print_response(resp: &ControlResponse) {
 
 /// True if a `job.run` response stopped early because the far end hung up (the runner records a
 /// marker outcome). Used to print a one-shot "exiting" hint.
+/// The silent-rx warning for a `job.run` response, if its recording came out silent.
+fn silent_rx_warning(resp: &ControlResponse) -> Option<String> {
+    let rec = resp.data.as_ref()?.get("recording")?;
+    if rec.get("rx_silent").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let peak = rec.get("rx_peak_dbfs").and_then(|v| v.as_f64()).map(|p| p as f32);
+    Some(dialf::audio::record::silent_rx_message(peak))
+}
+
 fn job_ended_on_hangup(resp: &ControlResponse) -> bool {
     resp.data
         .as_ref()
@@ -1672,6 +1745,41 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_problems_are_reported_and_health_is_quiet() {
+        use serde_json::json;
+        assert_eq!(super::capture_problem(&json!({"state": "ok", "rate": 44100})), None);
+        assert_eq!(super::capture_problem(&json!({"state": "pending"})), None);
+        let failed = super::capture_problem(&json!({
+            "state": "failed", "error": "sox FAIL remix: too few input channels", "fix": "add -c"
+        }))
+        .unwrap();
+        assert_eq!(failed, "FAILED — sox FAIL remix: too few input channels\n  ↳ add -c");
+        let rate = super::capture_problem(&json!({
+            "state": "rate_mismatch", "configured": 44100, "measured": 41959, "fix": "set it"
+        }))
+        .unwrap();
+        assert!(rate.starts_with("delivering ~41959 Hz, config says 44100 Hz"), "{rate}");
+    }
+
+    #[test]
+    fn dialf_run_warns_only_on_a_silent_recording() {
+        use dialf::protocol::ControlResponse;
+        let resp = |rec: serde_json::Value| ControlResponse {
+            id: "1".into(),
+            done: true,
+            ok: Some(true),
+            error: None,
+            data: Some(serde_json::json!({ "steps": [], "recording": rec })),
+        };
+        let silent = resp(serde_json::json!({"rx_silent": true, "rx_peak_dbfs": -55.2}));
+        assert!(super::silent_rx_warning(&silent).unwrap().contains("-55 dBFS"));
+        let fine = resp(serde_json::json!({"rx_silent": false, "rx_peak_dbfs": -14.0}));
+        assert_eq!(super::silent_rx_warning(&fine), None);
+        // Older daemon: no field, no warning.
+        assert_eq!(super::silent_rx_warning(&resp(serde_json::json!({"rx": "/x"}))), None);
+    }
+
     #[test]
     fn only_the_long_running_socket_writers_keep_sigpipe_ignored() {
         let a = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();

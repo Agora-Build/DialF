@@ -168,6 +168,14 @@ mod mac {
                         tracing::info!("microphone: granted");
                         Ok(())
                     }
+                    // A "no" is not always a decision: where macOS can't show the dialog
+                    // (tmux/ssh) it answers no at once and records nothing, so the status stays
+                    // undetermined and there is no Settings entry to toggle yet. Calling that
+                    // "denied" sends people to a switch that doesn't exist.
+                    Ok(false) if status(cls, media) == NOT_DETERMINED => bail!(
+                        "Microphone access was not granted and macOS recorded no decision — {}",
+                        no_dialog_hint(mux)
+                    ),
                     Ok(false) => bail!("Microphone permission denied — {FIX_HINT}, then retry"),
                     Err(_) => bail!(
                         "No answer to the microphone request after {}s — {}",

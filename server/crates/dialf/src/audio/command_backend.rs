@@ -34,7 +34,14 @@ pub struct CommandCaptureSource {
     frames_seen: u64,
     /// The rate check runs once; after that the counters are just ignored.
     rate_checked: bool,
+    /// The tool's last few stderr lines. Also relayed to the log, but a caller that sees the
+    /// capture die (the startup probe) needs the tool's own words to report, not a pointer
+    /// to a log file nobody is reading.
+    stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
+
+/// How many trailing stderr lines a capture source keeps.
+const STDERR_TAIL: usize = 5;
 
 /// Minimum capture time before judging the delivered rate. Short reads at startup are bursty
 /// (the tool's own buffering), so a snap judgement would fire on a correct setup.
@@ -106,12 +113,19 @@ impl CommandCaptureSource {
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "capture: no stdout"))?;
+        let stderr_tail = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         if let Some(stderr) = child.stderr.take() {
             let tool = argv[0].clone();
+            let tail = stderr_tail.clone();
             std::thread::spawn(move || {
                 use std::io::BufRead;
                 for line in io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
                     tracing::warn!(target: "capture_tool", tool = %tool, "{line}");
+                    let mut t = tail.lock().unwrap();
+                    if t.len() == STDERR_TAIL {
+                        t.pop_front();
+                    }
+                    t.push_back(line);
                 }
             });
         }
@@ -125,7 +139,24 @@ impl CommandCaptureSource {
             started: std::time::Instant::now(),
             frames_seen: 0,
             rate_checked: false,
+            stderr_tail,
         })
+    }
+
+    /// The tool's last few stderr lines, oldest first.
+    ///
+    /// When the tool exits, stdout's EOF can reach the reader before the relay thread has
+    /// read the stderr line explaining why, so this waits up to `settle` for one to appear.
+    pub fn stderr_tail(&self, settle: Duration) -> Vec<String> {
+        let deadline = std::time::Instant::now() + settle;
+        loop {
+            let t = self.stderr_tail.lock().unwrap();
+            if !t.is_empty() || std::time::Instant::now() >= deadline {
+                return t.iter().cloned().collect();
+            }
+            drop(t);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A handle that can kill the capture child from another thread. Killing the child
@@ -283,6 +314,25 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe reports the tool's own last words, so they must survive the tool's death
+    /// even though stdout's EOF can beat the stderr relay to the reader.
+    #[test]
+    fn a_dying_tool_leaves_its_stderr_behind() {
+        let cmd = CaptureCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo first >&2; echo 'sox FAIL remix: too few input channels' >&2; exit 2".into(),
+            ],
+        };
+        let mut src = CommandCaptureSource::spawn(&cmd, 8_000, 1).unwrap();
+        let mut buf = [0i16; 16];
+        assert_eq!(src.read(&mut buf).unwrap(), 0, "no audio, just EOF");
+        let tail = src.stderr_tail(Duration::from_secs(2));
+        assert_eq!(tail.last().map(String::as_str), Some("sox FAIL remix: too few input channels"));
+        assert_eq!(tail.len(), 2);
+    }
     use std::time::Instant;
 
     fn cmd(argv: &[&str]) -> PlaybackCommand {

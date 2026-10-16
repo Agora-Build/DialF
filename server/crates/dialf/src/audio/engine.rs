@@ -104,7 +104,7 @@ impl AudioEngine {
     (elapsed > 0.0 && frames > 0).then(|| (frames as f64 / elapsed).round() as u32)
 }
 
-/// Briefly run the capture tool and report the rate it actually delivers.
+/// Briefly run the capture tool: does it start, deliver audio, and at the rate configured?
     ///
     /// `audio.sample_rate` is only a *request*: it is substituted into the capture command and
     /// then stamped into the WAV headers. A tool that ignores it produces audio labelled at
@@ -112,10 +112,21 @@ impl AudioEngine {
     /// check catches that a few seconds into a recording; this catches it before the first
     /// job, when there is still time to fix the config.
     ///
-    /// Best-effort by design: no card, no tool, or a denied microphone all just yield `None`.
-    /// A diagnostic must never be the reason the daemon won't start.
-    pub fn probe_capture_rate(&self) -> Option<u32> {
-        Self::measure_source_rate(&mut self.open_capture().ok()?)
+    /// It also catches a capture command that cannot run at all — `remix 5` on a stream sox
+    /// opened as 2 channels exits at once — which otherwise surfaces only as a failed job.
+    /// Never fatal: a diagnostic must never be the reason the daemon won't start.
+    pub fn probe_capture(&self) -> CaptureProbe {
+        let mut src = match self.open_capture() {
+            Ok(src) => src,
+            Err(e) => return classify_probe(self.cfg.sample_rate, None, &[format!("{e:#}")]),
+        };
+        let measured = Self::measure_source_rate(&mut src);
+        let tail = if measured.is_none() {
+            src.stderr_tail(Duration::from_millis(500))
+        } else {
+            Vec::new()
+        };
+        classify_probe(self.cfg.sample_rate, measured, &tail)
     }
 
     /// Open the configured sound-card capture source.
@@ -481,4 +492,121 @@ pub fn run_wait_for_speech<S: CaptureSource>(
         "wait_for_speech finished"
     );
     Ok(reason)
+}
+
+
+/// What the startup capture probe found. Reported by `server.info` (`capture`) so `dialf
+/// import` and `dialf --version` can say it — a log line alone reached nobody: on one
+/// NixOS box the probe logged the exact failure while every recording came out empty.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CaptureProbe {
+    /// Not run yet (the daemon just started).
+    Pending,
+    Ok { rate: u32 },
+    RateMismatch { configured: u32, measured: u32, fix: String },
+    Failed {
+        error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fix: Option<String>,
+    },
+}
+
+/// Turn a probe's raw outcome into a verdict. Pure, so every branch is testable without a card.
+pub fn classify_probe(configured: u32, measured: Option<u32>, stderr: &[String]) -> CaptureProbe {
+    match measured {
+        Some(m) if command_backend::rate_drifts(configured, m) => CaptureProbe::RateMismatch {
+            configured,
+            measured: m,
+            fix: format!(
+                "set audio.sample_rate to {m} — recordings are stamped {configured} Hz and would \
+                 play back at the wrong speed"
+            ),
+        },
+        Some(m) => CaptureProbe::Ok { rate: m },
+        None => {
+            let error = if stderr.is_empty() {
+                "the capture tool exited without delivering any audio".to_string()
+            } else {
+                stderr.join(" / ")
+            };
+            CaptureProbe::Failed { fix: capture_fix(&error), error }
+        }
+    }
+}
+
+/// The fix for capture failures whose cause the tool's own message pins down.
+pub fn capture_fix(error: &str) -> Option<String> {
+    let e = error.to_ascii_lowercase();
+    if e.contains("too few input channels") {
+        return Some(
+            "capture_cmd selects a channel (`remix N`) that sox did not open — sox opens a card \
+             with 2 channels unless told otherwise, so add `-c <channels>` before the device, \
+             matching what the card offers (Linux: `grep Channels /proc/asound/card*/stream0`)"
+                .into(),
+        );
+    }
+    if e.contains("busy") {
+        return Some(
+            "another program holds the sound card — on Linux usually PipeWire; release the card \
+             for direct access, e.g. `audictl card hide <card>`"
+                .into(),
+        );
+    }
+    if e.contains("can't open input") || e.contains("cannot find card") || e.contains("no such device") {
+        return Some(
+            "the capture device in capture_cmd does not exist on this machine — check its name \
+             (Linux: `cat /proc/asound/cards`; `dialf import` offers the devices it finds)"
+                .into(),
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_verdicts() {
+        assert_eq!(classify_probe(44_100, Some(44_219), &[]), CaptureProbe::Ok { rate: 44_219 });
+        // The CONNECT 6 opened as 2 channels: ~5% slow, past the 4% tolerance.
+        assert!(matches!(
+            classify_probe(44_100, Some(41_959), &[]),
+            CaptureProbe::RateMismatch { measured: 41_959, configured: 44_100, .. }
+        ));
+        // The tool died, and said why — verbatim from nixps.
+        let said = vec!["sox FAIL remix: too few input channels".to_string()];
+        let CaptureProbe::Failed { error, fix } = classify_probe(44_100, None, &said) else {
+            panic!("not failed");
+        };
+        assert_eq!(error, "sox FAIL remix: too few input channels");
+        assert!(fix.unwrap().contains("`-c <channels>`"));
+        // Died silently: still a failure, with no invented fix.
+        assert_eq!(
+            classify_probe(44_100, None, &[]),
+            CaptureProbe::Failed {
+                error: "the capture tool exited without delivering any audio".into(),
+                fix: None
+            }
+        );
+    }
+
+    #[test]
+    fn known_tool_errors_get_their_fix_and_unknown_ones_none() {
+        assert!(capture_fix("arecord: Device or resource busy").unwrap().contains("audictl card hide"));
+        assert!(capture_fix("sox FAIL formats: can't open input `plughw:9,0'").unwrap().contains("does not exist"));
+        assert_eq!(capture_fix("something new"), None);
+    }
+
+    /// The JSON clients read from `server.info.capture`.
+    #[test]
+    fn probe_json_shape() {
+        let v = serde_json::to_value(CaptureProbe::Ok { rate: 48_000 }).unwrap();
+        assert_eq!(v, serde_json::json!({"state": "ok", "rate": 48_000}));
+        let v = serde_json::to_value(CaptureProbe::Pending).unwrap();
+        assert_eq!(v, serde_json::json!({"state": "pending"}));
+        let v = serde_json::to_value(CaptureProbe::Failed { error: "x".into(), fix: None }).unwrap();
+        assert_eq!(v, serde_json::json!({"state": "failed", "error": "x"}));
+    }
 }

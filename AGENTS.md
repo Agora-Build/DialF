@@ -104,6 +104,20 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 - Channel/port selection is `remix N` in a pinned `capture_cmd` (macOS) or `plughw:CARD,DEV`
   (Linux). On multi-channel interfaces, ch 3/4 are often a **loopback** of our own playback —
   pinning the wrong channel makes tx bleed into rx.
+- **`remix N` needs sox to OPEN at least N input channels**, and sox opens an ALSA card as 2
+  unless told otherwise — the `-c {channels}` in the stock template is on the *output* side.
+  For a multichannel card put `-c <card's input count>` before the device
+  (`-t alsa -c 12 plughw:0,0`). Without it `remix 5` makes sox exit at once ("too few input
+  channels"), and opening a 12-channel card as 2 also skewed its delivered rate ~5%. A Lewitt
+  CONNECT 6 offers 12 inputs and puts a phone on its USB-C port on **channels 5–6**.
+- `audio.channels` is what DialF records (after `remix`), not the card's input count — set
+  it to the card's 12 and every rx.wav becomes a 12-channel copy of one channel.
+- **Changing cards means re-checking the channel.** A working `remix 1` on one card recorded
+  only preamp noise on the next: every rx after the switch came out silent, with the tool
+  happily delivering audio and nothing saying so. `rx_silent`/`rx_peak_dbfs` in every job result, the live 30 s warning, and
+  the startup capture probe (`server.info.capture`, printed by `dialf import`) exist for this.
+  To find the right channel: capture all of them at once (`sox -t alsa -c 12 plughw:0,0 x.wav
+  trim 0 6`) while the phone plays something, and measure each with `remix N stat`.
 - `capture_device`/`playback_device` still matter with pinned commands: `dialf import`
   verifies them (and carries renames into the argv), and the daemon uses them to reap stray
   audio processes. Keep them in sync with the pinned command.
