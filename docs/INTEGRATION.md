@@ -156,7 +156,7 @@ and keep the CLI for provisioning and diagnostics.
 is not implemented. For a scripted call that is minutes of silence followed by one large
 result. Set your read timeout from the job's own worst case — the sum of its
 `timeout_ms`/`end_timeout_ms` values plus slack — not from a default socket timeout, and if you
-need liveness in the meantime, watch the daemon log (`~/Library/Logs/dialfd.<date>.log` on
+need liveness in the meantime, watch the daemon log (`~/Library/Logs/dialfd.<UTC date>.log` on
 macOS, journald on Linux).
 
 ---

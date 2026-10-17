@@ -83,13 +83,20 @@ dialf service status|stop|start|uninstall [--user]
 install that service.)
 
 **Logs.** `dialfd` writes a **daily-rotated** plain-text log (last 7 days kept), however it's
-launched — foreground `dialf daemon` shows colored logs live *and* writes the file:
+launched — foreground `dialf daemon` shows colored logs live *and* writes the file. The date in
+the name is **UTC**, so the file rolls over at UTC midnight, not local midnight — use
+`date -u` — outside UTC the plain `$(date +%F)` names the wrong day's file for part of
+every day:
 
 ```sh
-# macOS:  ~/Library/Logs/dialfd.<date>.log      (system service: /var/log/dialfd.<date>.log)
-# Linux:  ~/.local/state/dialf/dialfd.<date>.log
-tail -f ~/Library/Logs/dialfd.$(date +%F).log
+# macOS:  ~/Library/Logs/dialfd.<UTC date>.log      (system service: /var/log/dialfd.<UTC date>.log)
+# Linux:  ~/.local/state/dialf/dialfd.<UTC date>.log
+tail -f ~/Library/Logs/dialfd.$(date -u +%F).log
+ls -t ~/.local/state/dialf/dialfd.*.log | head -1      # Linux: the current file, any time of day
 ```
+
+`tail -f` (or `-F`) stays on the old file after a rollover — the new day's file has a
+different name; re-run it with the new date to keep following.
 
 ### Upgrading
 

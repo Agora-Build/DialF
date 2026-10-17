@@ -303,7 +303,7 @@ adb shell dumpsys activity exit-info build.agora.dialf_phone | grep -E "timestam
 adb logcat -d -b crash | grep -A20 dialf_phone
 adb shell dumpsys activity services build.agora.dialf_phone | grep -E "isForeground|types="
 adb logcat -d -s DialfConn | tail -30     # discovery / connect / key-rejection log
-grep -E "phone|hello" ~/Library/Logs/dialfd.$(date +%F).log | tail   # daemon side
+grep -E "phone|hello" ~/Library/Logs/dialfd.$(date -u +%F).log | tail   # daemon side (UTC date)
 ```
 
 `types=0x40000000` is specialUse (good); `0x00000001` means an old dataSync build.
