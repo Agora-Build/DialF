@@ -76,12 +76,12 @@ pub const DBFS_FLOOR: f32 = -120.0;
 /// `dialf run`), so the advice is the same everywhere.
 pub fn silent_rx_message(peak_dbfs: Option<f32>) -> String {
     let peak = peak_dbfs.map(|p| format!("{p:.0} dBFS")).unwrap_or_else(|| "none".into());
-    format!(
-        "rx was silent (peak {peak}) — the phone's audio did not reach the capture. Check \
-         capture_cmd's channel (`remix N`, plus `-c` on its input side for a multichannel \
-         card) and the card's input routing"
-    )
+    format!("rx was silent (peak {peak}) — the phone's audio did not reach the capture. {SILENT_RX_CHECKS}")
 }
+
+/// What to check when rx is silent — shared by the live warning and the end-of-job message.
+const SILENT_RX_CHECKS: &str = "Check capture_cmd's channel (`remix N`, plus `-c` on its input \
+     side for a multichannel card), the card's input routing, and that the call is connected";
 
 /// Tracks rx loudness as it is recorded. Pure, so the thresholds are unit-testable.
 #[derive(Debug, Clone)]
@@ -485,9 +485,7 @@ impl DuplexSession {
                         tracing::warn!(
                             peak_dbfs = watch.peak_dbfs().unwrap_or(DBFS_FLOOR),
                             "rx has stayed silent for {}s — the phone's audio is not reaching \
-                             the capture. Check capture_cmd's channel (`remix N`, and `-c` on \
-                             its input side for a multichannel card), the card's input routing, \
-                             and that the call is connected",
+                             the capture. {SILENT_RX_CHECKS}",
                             SILENT_WARN_AFTER.as_secs()
                         );
                     }

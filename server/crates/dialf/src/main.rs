@@ -1237,8 +1237,13 @@ async fn print_versions() -> anyhow::Result<()> {
             {
                 print_mic_line(mic);
             }
-            if let Some(capture) = resp.data.as_ref().and_then(|d| d.get("capture")) {
-                print_capture_line(capture);
+            // Problems only: a healthy capture or sox says nothing.
+            let info = |k: &str| resp.data.as_ref().and_then(|d| d.get(k));
+            if let Some(line) = info("capture").and_then(capture_problem) {
+                println!("capture:         {line}");
+            }
+            if let Some(line) = info("sox").and_then(sox_problem) {
+                println!("sox:             {line}");
             }
             match resp
             .data
@@ -1331,37 +1336,25 @@ fn parse_autoanswer_entries(
     Ok(map)
 }
 
-/// One line for the startup capture probe when it found a problem; silent when capture is
-/// fine, still being checked, or the daemon predates the field.
-fn print_capture_line(capture: &serde_json::Value) {
-    if let Some(line) = capture_problem(capture) {
-        println!("capture:         {line}");
-    }
+/// The problem a `server.info.capture` value reports (`CaptureProbe::report`); `None` when
+/// there is none, or the daemon predates the field.
+fn capture_problem(capture: &serde_json::Value) -> Option<String> {
+    serde_json::from_value::<dialf::audio::engine::CaptureProbe>(capture.clone()).ok()?.report()
 }
 
-/// The problem a `server.info.capture` value describes, with its fix; `None` when there is
-/// none to report.
-fn capture_problem(capture: &serde_json::Value) -> Option<String> {
-    let field = |k: &str| capture.get(k).and_then(|v| v.as_str());
-    let line = match field("state")? {
-        "failed" => format!("FAILED — {}", field("error").unwrap_or("unknown error")),
-        "rate_mismatch" => format!(
-            "delivering ~{} Hz, config says {} Hz",
-            capture.get("measured").and_then(|v| v.as_u64()).unwrap_or(0),
-            capture.get("configured").and_then(|v| v.as_u64()).unwrap_or(0)
-        ),
-        _ => return None,
-    };
-    Some(match field("fix") {
-        Some(fix) => format!("{line}\n  ↳ {fix}"),
-        None => line,
-    })
+/// The problem a `server.info.sox` value reports, worded by the same `SoxCheck::report` import
+/// uses; `None` when there's no problem (sox_ng, no split card, check still running, or a
+/// daemon that predates the field). `--version` stays quiet about a split card sox_ng handles.
+fn sox_problem(sox: &serde_json::Value) -> Option<String> {
+    let check: dialf::hostcheck::SoxCheck = serde_json::from_value(sox.clone()).ok()?;
+    check.problem.is_some().then(|| check.report()).flatten()
 }
 
 /// After `dialf import` restarts the daemon: wait for its capture probe (a few seconds) and
 /// say what it found. Import is the moment a config meets a new machine — a capture command
 /// that can't run should be reported here, not discovered as an empty rx.wav later.
 async fn report_capture_probe(socket: &Path) {
+    use dialf::audio::engine::CaptureProbe;
     for _ in 0..24 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let Ok(resp) = call(socket, ControlOp::ServerInfo).await else {
@@ -1370,17 +1363,15 @@ async fn report_capture_probe(socket: &Path) {
         let Some(capture) = resp.data.as_ref().and_then(|d| d.get("capture")).cloned() else {
             return; // a daemon that predates the probe report
         };
-        match capture.get("state").and_then(|v| v.as_str()) {
-            Some("pending") => continue,
-            Some("ok") => {
-                let rate = capture.get("rate").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!("capture: ok (~{rate} Hz)");
-            }
-            _ => {
-                if let Some(problem) = capture_problem(&capture) {
+        match serde_json::from_value::<CaptureProbe>(capture) {
+            Ok(CaptureProbe::Pending) => continue,
+            Ok(CaptureProbe::Ok { rate }) => println!("capture: ok (~{rate} Hz)"),
+            Ok(other) => {
+                if let Some(problem) = other.report() {
                     println!("capture: {problem}");
                 }
             }
+            Err(_) => {}
         }
         return;
     }
@@ -1745,6 +1736,19 @@ fn ok_or_err(resp: ControlResponse) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sox_line_appears_only_for_a_problem() {
+        use serde_json::json;
+        assert_eq!(super::sox_problem(&json!(null)), None);
+        assert_eq!(super::sox_problem(&json!({"path": "sox", "flavor": "sox_ng", "split_cards": ["X"]})), None);
+        assert_eq!(super::sox_problem(&json!({"path": "sox", "flavor": "original"})), None);
+        let line = super::sox_problem(&json!({"path": "sox", "flavor": "original",
+            "split_cards": ["X"], "problem": "original sox with split card \"X\"", "fix": "use sox_ng"})).unwrap();
+        assert_eq!(line, "original sox with split card \"X\"\n  ↳ use sox_ng");
+        // sox_ng with a split card: import shows a ✓, but --version only reports problems.
+        assert_eq!(super::sox_problem(&json!({"path": "sox", "flavor": "sox_ng", "split_cards": ["X"]})), None);
+    }
+
     #[test]
     fn capture_problems_are_reported_and_health_is_quiet() {
         use serde_json::json;

@@ -46,17 +46,17 @@ const STDERR_TAIL: usize = 5;
 /// A tool's last few stderr lines, drained by a thread so a chatty tool can never fill the
 /// pipe and stall. Each line is also relayed to the daemon log: often it is the ONLY clue to
 /// a dead capture or a failed playback.
-#[derive(Clone)]
 struct StderrTail(Arc<Mutex<std::collections::VecDeque<String>>>);
 
 impl StderrTail {
-    fn drain(stderr: std::process::ChildStderr, tool: String) -> Self {
+    /// `role` ("capture"/"playback") labels the relayed log lines.
+    fn drain(stderr: std::process::ChildStderr, tool: String, role: &'static str) -> Self {
         let tail = Self(Arc::new(Mutex::new(std::collections::VecDeque::new())));
         let lines = tail.0.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             for line in io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-                tracing::warn!(target: "capture_tool", tool = %tool, "{line}");
+                tracing::warn!(target: "audio_tool", role, tool = %tool, "{line}");
                 let mut t = lines.lock().unwrap();
                 if t.len() == STDERR_TAIL {
                     t.pop_front();
@@ -168,7 +168,7 @@ impl CommandCaptureSource {
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "capture: no stdout"))?;
-        let stderr_tail = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone()));
+        let stderr_tail = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "capture"));
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             stdout,
@@ -288,7 +288,7 @@ pub fn play_file_blocking(cmd: &PlaybackCommand, force: &AtomicBool) -> io::Resu
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
-    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone()));
+    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "playback"));
     loop {
         if force.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -318,7 +318,7 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
-    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone()));
+    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "playback"));
     {
         let mut stdin = child
             .stdin

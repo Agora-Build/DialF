@@ -1,8 +1,16 @@
 //! Turning an audio tool's failure into its cause and fix.
 //!
-//! Shared by the startup capture probe, playback failures and `dialf import`, so the same
-//! failure gets the same explanation wherever it surfaces. Pure functions — every branch is
+//! Shared by the startup capture probe, playback failures and the sox check (`dialf import`
+//! and the daemon), so the same failure gets the same explanation wherever it surfaces. Pure functions — every branch is
 //! covered by the verbatim tool messages that motivated it.
+
+/// A problem line with its fix under it — how every audio diagnosis is shown.
+pub fn with_fix(problem: &str, fix: Option<&str>) -> String {
+    match fix {
+        Some(fix) => format!("{problem}\n  ↳ {fix}"),
+        None => problem.to_string(),
+    }
+}
 
 /// How several devices sharing one name relate to each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,7 +18,8 @@ pub enum NameClash {
     /// One device by that name (or none): nothing to say.
     None,
     /// macOS lists one card as an input-only and an output-only device under one name (the TI
-    /// "USB AUDIO  CODEC"). Whichever direction sox draws the wrong half for fails outright.
+    /// "USB AUDIO  CODEC"). With original sox, whichever direction draws the wrong half fails
+    /// outright; sox_ng picks the right one.
     Halves,
     /// Separate devices share a name (e.g. two identical cards). sox opens the first one it
     /// finds, which may simply be the other card — no error, just the wrong device.
@@ -32,9 +41,9 @@ pub fn name_clash(name: &str, devices: &[(&str, bool, bool)]) -> NameClash {
     }
 }
 
-/// sox's CoreAudio driver compares only the name, as a *prefix*, takes the first match and
-/// never checks direction (coreaudio.c). So no name reaches a second device of the same name,
-/// and a new name must not begin with the old one or the old one still wins.
+/// Original sox's CoreAudio driver compares only the name, as a *prefix*, takes the first
+/// match and never checks direction (coreaudio.c). So a new name must not begin with the old
+/// one, or the old one still wins.
 const PREFIX_NOTE: &str = "sox matches names by prefix, so the original would still win";
 
 /// The fix for a card split into same-named input and output halves. Original sox (14.4.2,

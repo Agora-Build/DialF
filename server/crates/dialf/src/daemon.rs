@@ -138,7 +138,11 @@ pub struct DaemonState {
     pub mdns: Arc<Mutex<discovery::Advert>>,
     /// What the startup capture probe found (`server.info.capture`).
     pub capture_probe: Arc<Mutex<crate::audio::engine::CaptureProbe>>,
+    /// Which sox the config runs, and any split card it can't handle (`server.info.sox`).
+    /// `None` until the startup check finishes, or when no sox is involved.
+    pub sox_check: Arc<Mutex<Option<crate::hostcheck::SoxCheck>>>,
 }
+
 
 /// The phone port, when `ws_bind` is reachable from the LAN at all (a loopback bind is not,
 /// so a firewall is beside the point).
@@ -479,6 +483,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     // seconds and a diagnostic must not hold up binding the sockets.
     let capture_probe = Arc::new(Mutex::new(crate::audio::engine::CaptureProbe::Pending));
     spawn_capture_probe(engine.clone(), capture_probe.clone());
+    let sox_check = Arc::new(Mutex::new(None));
+    spawn_sox_check(config.audio.clone(), sox_check.clone());
     let registry = Arc::new(Mutex::new(Registry::new()));
     let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
     // Markers left by a prior (crashed) instance name calls that may still be up — reconciled (hung
@@ -527,6 +533,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
         adb_links: Default::default(),
         mdns,
         capture_probe,
+        sox_check,
     };
     if let Some(port) = lan_ws_port(&state.config.ws_bind) {
         for f in crate::reachability::firewall_findings(port) {
@@ -732,6 +739,7 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
                 "ws_bind": state.config.ws_bind,
                 "mdns": state.mdns.lock().unwrap().report(),
                 "capture": *state.capture_probe.lock().unwrap(),
+                "sox": *state.sox_check.lock().unwrap(),
             });
             // Present only while something is overridden, so its absence is meaningful: an
             // integrator sees ambient runtime state before dispatching work.
@@ -1392,26 +1400,38 @@ fn job_needs_phone(job: &[schema::Step]) -> bool {
     })
 }
 
+/// Run the sox check (shared with `dialf import`) in the background: it may scan devices,
+/// which takes about a second on macOS. Split cards are a CoreAudio thing, so elsewhere the
+/// scan is skipped.
+fn spawn_sox_check(audio: AudioConfig, slot: Arc<Mutex<Option<crate::hostcheck::SoxCheck>>>) {
+    tokio::task::spawn_blocking(move || {
+        let devices = || {
+            if cfg!(target_os = "macos") {
+                crate::hostcheck::detect_devices()
+            } else {
+                Vec::new()
+            }
+        };
+        let check = crate::hostcheck::sox_check(&audio, devices);
+        if let Some(c) = &check {
+            if let (Some(problem), Some(fix)) = (&c.problem, &c.fix) {
+                tracing::warn!(fix = %fix, "{problem}");
+            }
+        }
+        *slot.lock().unwrap() = check;
+    });
+}
+
 /// Probe the capture in the background: log the verdict and keep it for `server.info`, so
 /// `dialf import` / `dialf --version` can report it instead of leaving it in a log.
 fn spawn_capture_probe(engine: Arc<AudioEngine>, slot: Arc<Mutex<crate::audio::engine::CaptureProbe>>) {
     use crate::audio::engine::CaptureProbe;
     tokio::task::spawn_blocking(move || {
         let probe = engine.probe_capture();
-        match &probe {
-            CaptureProbe::Ok { rate } => tracing::info!(rate, "capture rate confirmed"),
-            CaptureProbe::RateMismatch { configured, measured, fix } => tracing::warn!(
-                configured,
-                measured,
-                "the capture device is delivering ~{measured} Hz but audio.sample_rate is \
-                 {configured}: {fix}"
-            ),
-            CaptureProbe::Failed { error, fix } => tracing::warn!(
-                error = %error,
-                fix = fix.as_deref().unwrap_or("-"),
-                "capture probe failed — recordings will not work until this is fixed"
-            ),
-            CaptureProbe::Pending => {}
+        match (&probe, probe.report()) {
+            (_, Some(problem)) => tracing::warn!("capture probe: {problem}"),
+            (CaptureProbe::Ok { rate }, None) => tracing::info!(rate, "capture rate confirmed"),
+            _ => {}
         }
         *slot.lock().unwrap() = probe;
     });
@@ -1820,6 +1840,7 @@ mod tests {
             adb_links: Default::default(),
             mdns: Arc::new(Mutex::new(discovery::Advert::Loopback)),
             capture_probe: Arc::new(Mutex::new(crate::audio::engine::CaptureProbe::Pending)),
+            sox_check: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2086,6 +2107,10 @@ mod tests {
         assert_eq!(line, "record_dir=/tmp/ovr, autoanswer=2 number(s)");
     }
 
+    /// The pair is the problem: a split card with original sox. Either alone is fine.
+    
+    
+    
     #[test]
     fn card_lock_is_exclusive_and_releases_on_drop() {
         let state = test_state(BTreeMap::new());
