@@ -107,8 +107,12 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   lookup skips devices with no streams in the direction being opened
   (`DeviceHasBuffersInScope`, in the sox_ng-14.8.1 tag), and it also accepts a device number.
   Original sox is unmaintained (14.4.2, 2015); Homebrew's `sox` is still that, `sox_ng`
-  conflicts with it and installs the same `sox` command; nixpkgs' `sox` already is sox_ng. So
-  the first fix is `brew uninstall sox && brew install sox_ng`. Otherwise use an aggregate
+  conflicts with it and installs the same `sox` command; nixpkgs' `sox` already is sox_ng; a
+  **source build installs `sox_ng`/`play_ng`/`rec_ng` next to original sox**. So never pick sox
+  by name: `tool_detect::best_sox` asks each family binary on PATH for `--version` and takes the
+  newest sox_ng (any name, symlinks counted once), else original — used by auto-detection,
+  import's missing-tool repair and the sox check alike. `play`/`rec` act by the name they run
+  under, so those roles only consider play-/rec-named binaries. Otherwise use an aggregate
   device of both halves with a name of its own: `audictl aggregate create --name "DialF Codec"
   --devices "<input id>,<output id>"` (IDs from `audictl list`; audictl refuses the ambiguous
   name). The new name must **not begin with** the original — prefix matching would still pick
