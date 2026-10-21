@@ -99,8 +99,17 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 
 ### Audio devices
 - Some cards expose input and output as **two CoreAudio devices with the same name** (e.g. the
-  TI "USB AUDIO  CODEC" — note the double space). sox selects by name and may open the wrong
-  half → zero frames. Use `default` (direction-aware) or make the card the system default.
+  TI "USB AUDIO  CODEC" — note the double space): an output-only and an input-only half. sox's
+  CoreAudio driver (`coreaudio.c`) compares only the name, **as a prefix**, takes the **first**
+  match and never checks direction — so no name reaches the second half, and whichever
+  direction drew the wrong one fails with "can not get audio device properties" (seen on a
+  13.7 Intel Mac: capture got the output half, ID 109 before 115). The fix is an aggregate
+  device of both halves with a name of its own: `audictl aggregate create --name "DialF Codec"
+  --devices "<input id>,<output id>"` (IDs from `audictl list`; audictl refuses the ambiguous
+  name). The new name must **not begin with** the original — prefix matching would still pick
+  the original. `default` + making the card the system default also works but is fragile:
+  macOS moves the default when another device is plugged in. Import warns on a split card
+  (`hostcheck::is_split_device`) and the capture probe's fix names it.
 - Channel/port selection is `remix N` in a pinned `capture_cmd` (macOS) or `plughw:CARD,DEV`
   (Linux). On multi-channel interfaces, ch 3/4 are often a **loopback** of our own playback —
   pinning the wrong channel makes tx bleed into rx.

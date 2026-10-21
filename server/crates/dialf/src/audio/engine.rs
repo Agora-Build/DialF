@@ -535,9 +535,37 @@ pub fn classify_probe(configured: u32, measured: Option<u32>, stderr: &[String])
     }
 }
 
+/// How to reach a macOS card that CoreAudio lists as two same-named devices — an input-only
+/// and an output-only half (e.g. the TI "USB AUDIO  CODEC"). sox selects by name *prefix*,
+/// takes the first match and never checks direction, so no name can reach the second half:
+/// capture or playback, whichever drew the wrong half, fails ("can not get audio device
+/// properties"). An aggregate device of both halves has a name of its own.
+pub fn split_device_fix(name: &str) -> String {
+    format!(
+        "macOS lists \"{name}\" as two devices with the same name (an input-only and an \
+         output-only half), and sox opens whichever comes first. Combine both halves into one \
+         aggregate device and use its name instead: `audictl list` shows the two IDs, then \
+         `audictl aggregate create --name \"DialF Codec\" --devices \"<input id>,<output id>\"` \
+         (or Audio MIDI Setup → + → Create Aggregate Device). Don't begin the new name with \
+         \"{name}\" — sox matches names by prefix, so the original would still win"
+    )
+}
+
+/// The device name in a sox "can't open input `<name>': …" message.
+fn sox_device_name(error: &str) -> Option<&str> {
+    let start = error.find('`')? + 1;
+    let len = error[start..].find('\'')?;
+    Some(&error[start..start + len])
+}
+
 /// The fix for capture failures whose cause the tool's own message pins down.
 pub fn capture_fix(error: &str) -> Option<String> {
     let e = error.to_ascii_lowercase();
+    // Before the "not found" check: this one also says "can't open input", but the device
+    // DOES exist — sox opened the half of it that can't record.
+    if e.contains("can not get audio device properties") {
+        return Some(split_device_fix(sox_device_name(error).unwrap_or("<device>")));
+    }
     if e.contains("too few input channels") {
         return Some(
             "capture_cmd selects a channel (`remix N`) that sox did not open — sox opens a card \
@@ -553,7 +581,11 @@ pub fn capture_fix(error: &str) -> Option<String> {
                 .into(),
         );
     }
-    if e.contains("can't open input") || e.contains("cannot find card") || e.contains("no such device") {
+    if e.contains("can not open audio device")
+        || e.contains("no such file or directory")
+        || e.contains("cannot find card")
+        || e.contains("no such device")
+    {
         return Some(
             "the capture device in capture_cmd does not exist on this machine — check its name \
              (Linux: `cat /proc/asound/cards`; `dialf import` offers the devices it finds)"
@@ -566,6 +598,28 @@ pub fn capture_fix(error: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub issue #2, verbatim: the device exists — sox opened its output-only half for
+    /// capture. Must NOT be diagnosed as "does not exist", which is what 0.3.17 said.
+    #[test]
+    fn a_split_card_is_not_reported_as_missing() {
+        let err = "/usr/local/bin/sox FAIL formats: can't open input `USB AUDIO  CODEC': can not get audio device properties";
+        let fix = capture_fix(err).unwrap();
+        assert!(fix.contains("aggregate"), "{fix}");
+        assert!(fix.contains("\"USB AUDIO  CODEC\""), "names the device, double space intact: {fix}");
+        assert!(!fix.contains("does not exist"), "{fix}");
+        assert_eq!(sox_device_name(err), Some("USB AUDIO  CODEC"));
+    }
+
+    #[test]
+    fn a_missing_device_is_still_reported_as_missing() {
+        // sox coreaudio, no device by that name at all
+        let mac = "sox FAIL formats: can't open input `Nope': can not open audio device";
+        assert!(capture_fix(mac).unwrap().contains("does not exist"));
+        // sox alsa, no such card
+        let linux = "sox FAIL formats: can't open input `plughw:9,0': audio open error: No such file or directory";
+        assert!(capture_fix(linux).unwrap().contains("does not exist"));
+    }
 
     #[test]
     fn probe_verdicts() {
@@ -595,7 +649,8 @@ mod tests {
     #[test]
     fn known_tool_errors_get_their_fix_and_unknown_ones_none() {
         assert!(capture_fix("arecord: Device or resource busy").unwrap().contains("audictl card hide"));
-        assert!(capture_fix("sox FAIL formats: can't open input `plughw:9,0'").unwrap().contains("does not exist"));
+        // sox always says why after the device; a bare "can't open input" is not a diagnosis.
+        assert_eq!(capture_fix("sox FAIL formats: can't open input `plughw:9,0'"), None);
         assert_eq!(capture_fix("something new"), None);
     }
 

@@ -41,6 +41,13 @@ fn detect_macos() -> Vec<AudioDevice> {
     parse_system_profiler(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Whether more than one detected device carries `name` — macOS lists some USB cards (the TI
+/// "USB AUDIO  CODEC") as separate input-only and output-only devices under one name, and
+/// name-based selection then reaches only one of them.
+pub(crate) fn is_split_device(name: &str, devices: &[AudioDevice]) -> bool {
+    devices.iter().filter(|d| d.value == name).count() > 1
+}
+
 /// Parse `system_profiler SPAudioDataType -json` output.
 pub(crate) fn parse_system_profiler(json: &str) -> Vec<AudioDevice> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -214,16 +221,8 @@ pub(crate) fn run_with(
             .filter(|d| if dir_input { d.input } else { d.output })
             .collect();
         if usable.iter().any(|d| d.value == current) {
-            // Some cards (e.g. the TI "USB AUDIO  CODEC") expose their input and output
-            // halves as two devices with the SAME name — name-based selection can then
-            // open the wrong half and capture silence.
-            if devices.iter().filter(|d| d.value == current).count() > 1 {
-                writeln!(
-                    p.out,
-                    "{key} \"{current}\": more than one device carries this name (separate \
-                     input/output halves) — if capture is silent, remove {key} from the \
-                     config and make the card the system default instead"
-                )?;
+            if is_split_device(&current, &devices) {
+                writeln!(p.out, "{key} \"{current}\": {}", crate::audio::engine::split_device_fix(&current))?;
             } else {
                 writeln!(p.out, "{key} \"{current}\" ✓")?;
             }
@@ -248,6 +247,12 @@ pub(crate) fn run_with(
             &usable,
         )?;
         if let Some(new) = picked {
+            // Picking from the list is how a split card usually arrives (a bundle made on
+            // another machine names a device this one lacks) — warn now, not after a failed
+            // capture.
+            if is_split_device(&new, &devices) {
+                writeln!(p.out, "{key} \"{new}\": {}", crate::audio::engine::split_device_fix(&new))?;
+            }
             if new != current {
                 set_audio_str(doc, edits, key, &new);
                 renames.push((current, new));
@@ -858,5 +863,46 @@ mod tests {
         assert_eq!(doc, orig);
         assert!(edits.is_empty());
         assert!(String::from_utf8(out).unwrap().contains("\"MiniFuse 2\" ✓"));
+    }
+
+    /// GitHub issue #2, replayed: a bundle made with BlackHole lands on a Mac whose TI codec
+    /// CoreAudio lists as two same-named devices. The user picks it by number from the list —
+    /// import must explain the trap right there, for both directions.
+    #[test]
+    fn picking_a_split_card_explains_the_aggregate_fix() {
+        let yaml = "shared_key: test-key\naudio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let mut edits = Vec::new();
+        let codec = "USB AUDIO  CODEC"; // two spaces, as macOS names it
+        let dev = |input, output| AudioDevice {
+            value: codec.into(),
+            label: codec.into(),
+            input,
+            output,
+        };
+        let devices = vec![dev(false, true), dev(true, false)];
+        let mut input = std::io::Cursor::new(b"1\n1\nn\nn\n".to_vec());
+        let mut out = Vec::new();
+        let mut p = Prompter { input: &mut input, out: &mut out };
+        run_with(&mut doc, &mut edits, Path::new("/tmp"), devices, &mut p).unwrap();
+
+        let said = String::from_utf8(out).unwrap();
+        for key in ["capture_device", "playback_device"] {
+            // Without a typed answer to end the prompt line, the warning shares its line.
+            let at = said.find(&format!("{key} \"{codec}\": ")).unwrap_or_else(|| panic!("no {key} warning in:\n{said}"));
+            let line = said[at..].lines().next().unwrap();
+            assert!(line.contains("aggregate"), "{line}");
+            assert!(line.contains("audictl aggregate create"), "{line}");
+        }
+        assert_eq!(doc["audio"]["capture_device"].as_str(), Some(codec), "the pick itself still applies");
+    }
+
+    #[test]
+    fn a_name_shared_by_two_devices_is_split() {
+        let d = |v: &str, i, o| AudioDevice { value: v.into(), label: v.into(), input: i, output: o };
+        let devs = vec![d("USB AUDIO  CODEC", false, true), d("USB AUDIO  CODEC", true, false), d("MiniFuse 2", true, true)];
+        assert!(is_split_device("USB AUDIO  CODEC", &devs));
+        assert!(!is_split_device("MiniFuse 2", &devs));
+        assert!(!is_split_device("absent", &devs));
     }
 }

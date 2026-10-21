@@ -168,7 +168,7 @@ fn capture_candidates(os: Os) -> Vec<Candidate> {
                 bin: "ffmpeg",
                 template: s(&[
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation",
-                    "-i", "{device|:0}", "-ac", "{channels}", "-ar", "{rate}", "-f", "s16le",
+                    "-i", "{av_audio}", "-ac", "{channels}", "-ar", "{rate}", "-f", "s16le",
                     "-",
                 ]),
             },
@@ -229,6 +229,7 @@ fn tool_present(bin: &str) -> bool {
 /// - `{device|DEFAULT}` -> device value, or DEFAULT if no device set
 /// - `{device:-D}` -> expands to two args `["-D", <device>]` if a device is set, else drops
 /// - `{ca_dev}` -> sox CoreAudio device: `["-t","coreaudio",<device>]` if set, else `["-d"]`
+/// - `{av_audio}` -> ffmpeg AVFoundation audio-only input: `:<device>` if set, else `:0`
 fn fill(template: &[String], p: &AudioParams, file: Option<&str>) -> Vec<String> {
     let mut out = Vec::with_capacity(template.len());
     for tok in template {
@@ -240,6 +241,12 @@ fn fill(template: &[String], p: &AudioParams, file: Option<&str>) -> Vec<String>
                     out.push(f.to_string());
                 }
             }
+            // AVFoundation takes "<video>:<audio>"; an audio-only device must lead with the
+            // colon, or ffmpeg looks for a *video* device by that name.
+            "{av_audio}" => out.push(match &p.device {
+                Some(dev) => format!(":{dev}"),
+                None => ":0".to_string(),
+            }),
             "{ca_dev}" => match &p.device {
                 Some(dev) => {
                     out.push("-t".to_string());
@@ -312,6 +319,16 @@ mod tests {
         let mut p = params();
         p.device = Some("hw:0".into());
         assert_eq!(fill(&tpl, &p, None), vec!["ffmpeg", "-i", "hw:0"]);
+    }
+
+    /// ffmpeg reads `-i NAME` on AVFoundation as a VIDEO device; audio-only must be `:NAME`.
+    #[test]
+    fn avfoundation_audio_device_leads_with_a_colon() {
+        let tpl = s(&["ffmpeg", "-f", "avfoundation", "-i", "{av_audio}"]);
+        assert_eq!(fill(&tpl, &params(), None)[4], ":0");
+        let mut p = params();
+        p.device = Some("USB AUDIO  CODEC".into());
+        assert_eq!(fill(&tpl, &p, None)[4], ":USB AUDIO  CODEC");
     }
 
     #[test]
