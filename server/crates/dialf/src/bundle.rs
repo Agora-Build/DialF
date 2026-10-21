@@ -573,8 +573,17 @@ fn import_impl(
 
     // Host precheck: interactively verify/fix the key, devices, tools, and record_dir against
     // THIS machine. Without a terminal, apply safe platform rewrites and emit plain warnings.
+    // Ask before the precheck, so its questions (Enter keeps this machine's key) are only put
+    // to someone who has agreed to replace the config.
+    if dest.exists() && !override_existing {
+        confirm_override(dest)?;
+    }
     if interactive {
-        crate::hostcheck::run(&mut doc, &mut edits, &folder)?;
+        let existing_key = std::fs::read_to_string(dest)
+            .ok()
+            .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
+            .and_then(|old| old.get("shared_key")?.as_str().map(str::to_owned));
+        crate::hostcheck::run(&mut doc, &mut edits, &folder, existing_key.as_deref())?;
     } else {
         for key in crate::hostcheck::rewrite_linux_sox_commands(&mut doc, &mut edits) {
             warnings.push(format!(
@@ -656,9 +665,6 @@ fn import_impl(
     // Install, confirming before replacing an existing config.
     let mut backup_path = None;
     if dest.exists() {
-        if !override_existing {
-            confirm_override(dest)?;
-        }
         // Timestamped so backups sort by age and are never overwritten — a second import
         // must not destroy the backup of the user's original config. The numeric suffix
         // only disambiguates two imports within the same second.

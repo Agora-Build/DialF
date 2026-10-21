@@ -171,16 +171,20 @@ impl Prompter<'_> {
 
 /// Run the interactive precheck over the imported config document, recording fixes as
 /// (key, pre-rendered-YAML-value) line edits. `folder` is the bundle folder (for resolving
-/// a relative record_dir the user types).
+/// a relative record_dir the user types). `existing_key` is the shared_key of the config
+/// being replaced, if any — Enter keeps it, so a re-import never needs the key retyped.
 pub fn run(
     doc: &mut serde_yaml::Value,
     edits: &mut Vec<(String, String)>,
     folder: &Path,
+    existing_key: Option<&str>,
 ) -> Result<()> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut err = std::io::stderr();
     let mut p = Prompter { input: &mut input, out: &mut err };
+    writeln!(p.out, "\nchecking this machine against the imported config…")?;
+    check_shared_key(doc, edits, existing_key, &mut p)?;
     run_with(doc, edits, folder, detect_devices(), &mut p)
 }
 
@@ -191,9 +195,6 @@ pub(crate) fn run_with(
     devices: Vec<AudioDevice>,
     p: &mut Prompter<'_>,
 ) -> Result<()> {
-    writeln!(p.out, "\nchecking this machine against the imported config…")?;
-
-    check_shared_key(doc, edits, p)?;
     for key in rewrite_linux_sox_commands(doc, edits) {
         writeln!(
             p.out,
@@ -581,29 +582,43 @@ pub(crate) fn rewrite_unusable_tool_paths(
     changed
 }
 
+/// The key the phone app must match. Enter keeps this machine's current key when a config is
+/// being replaced, else takes the imported one; anything typed replaces either.
 fn check_shared_key(
     doc: &mut serde_yaml::Value,
     edits: &mut Vec<(String, String)>,
+    existing_key: Option<&str>,
     p: &mut Prompter<'_>,
 ) -> Result<()> {
-    let current = doc
+    let imported = doc
         .get("shared_key")
         .and_then(|v| v.as_str())
-        .unwrap_or("change-me");
-    if !shared_key_is_placeholder(current) {
-        writeln!(p.out, "shared_key is set ✓")?;
+        .unwrap_or("change-me")
+        .to_string();
+    let existing = existing_key.filter(|k| !shared_key_is_placeholder(k));
+    let question = match existing {
+        Some(k) if k == imported => {
+            "shared_key: Enter to keep this machine's key (the import has the same one), or type a new one: "
+        }
+        Some(_) => "shared_key: Enter to keep this machine's key, or type a new one (the import's key differs): ",
+        None if !shared_key_is_placeholder(&imported) => {
+            "shared_key: Enter to use the imported key, or type your own: "
+        }
+        None => {
+            "shared_key is missing or still the insecure `change-me` placeholder. Type a new key \
+             that will also be entered in the phone app, or Enter to keep it: "
+        }
+    };
+    let ans = p.ask(question)?;
+    let chosen = if ans.is_empty() { existing.unwrap_or(&imported) } else { ans.as_str() };
+    if shared_key_is_placeholder(chosen) {
+        writeln!(p.out, "warning: shared_key remains `change-me`")?;
         return Ok(());
     }
-
-    let ans = p.ask(
-        "shared_key is missing or still the insecure `change-me` placeholder. Type a new key \
-         that will also be entered in the phone app, or Enter to keep it: ",
-    )?;
-    if ans.is_empty() || shared_key_is_placeholder(&ans) {
-        writeln!(p.out, "warning: shared_key remains `change-me`")?;
-    } else {
-        set_top_level_str(doc, edits, "shared_key", &ans);
+    if chosen != imported {
+        set_top_level_str(doc, edits, "shared_key", chosen);
     }
+    writeln!(p.out, "shared_key is set ✓")?;
     Ok(())
 }
 
@@ -955,24 +970,54 @@ mod tests {
         assert_eq!(unrelated[2], "coreaudio");
     }
 
+    /// Runs the key prompt over a config holding `imported`, answering `answer`; returns the
+    /// resulting key and edits.
+    fn key_prompt(
+        imported: &str,
+        existing: Option<&str>,
+        answer: &str,
+    ) -> (Option<String>, Vec<(String, String)>) {
+        let mut doc: serde_yaml::Value =
+            serde_yaml::from_str(&format!("shared_key: {imported}\n")).unwrap();
+        let mut edits = Vec::new();
+        let mut input = std::io::Cursor::new(format!("{answer}\n").into_bytes());
+        let mut out = Vec::new();
+        let mut p = Prompter { input: &mut input, out: &mut out };
+        check_shared_key(&mut doc, &mut edits, existing, &mut p).unwrap();
+        (doc["shared_key"].as_str().map(str::to_owned), edits)
+    }
+
     #[test]
     fn precheck_replaces_placeholder_shared_key() {
-        let mut doc: serde_yaml::Value = serde_yaml::from_str("shared_key: change-me\n").unwrap();
-        let mut edits = Vec::new();
-        let mut input = std::io::Cursor::new(b"latency-eval-key\n".to_vec());
-        let mut out = Vec::new();
-        let mut p = Prompter {
-            input: &mut input,
-            out: &mut out,
-        };
+        let (key, edits) = key_prompt("change-me", None, "latency-eval-key");
+        assert_eq!(key.as_deref(), Some("latency-eval-key"));
+        assert_eq!(edits, vec![("shared_key".into(), "\"latency-eval-key\"".into())]);
+    }
 
-        check_shared_key(&mut doc, &mut edits, &mut p).unwrap();
+    #[test]
+    fn enter_keeps_the_key_of_the_config_being_replaced() {
+        let (key, edits) = key_prompt("bundle-key", Some("machine-key"), "");
+        assert_eq!(key.as_deref(), Some("machine-key"));
+        assert_eq!(edits, vec![("shared_key".into(), "\"machine-key\"".into())]);
 
-        assert_eq!(doc["shared_key"].as_str(), Some("latency-eval-key"));
-        assert_eq!(
-            edits,
-            vec![("shared_key".into(), "\"latency-eval-key\"".into())]
-        );
+        let (key, edits) = key_prompt("same-key", Some("same-key"), "");
+        assert_eq!(key.as_deref(), Some("same-key"));
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn enter_takes_the_imported_key_when_nothing_is_replaced() {
+        for existing in [None, Some("change-me")] {
+            let (key, edits) = key_prompt("bundle-key", existing, "");
+            assert_eq!(key.as_deref(), Some("bundle-key"));
+            assert!(edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_typed_key_beats_both() {
+        let (key, _) = key_prompt("bundle-key", Some("machine-key"), "typed-key");
+        assert_eq!(key.as_deref(), Some("typed-key"));
     }
 
     #[test]
