@@ -392,7 +392,7 @@ fn a_capture_delivering_the_wrong_rate_is_detected() {
 
 /// The pre-flight probe measures what the capture tool really delivers, before any job runs.
 ///
-/// Drives `measure_source_rate` rather than `probe_capture_rate`, because opening a real card
+/// Drives `measure_source_rate` rather than `probe_capture`, because opening a real card
 /// goes through the macOS microphone-consent gate that a test binary does not hold.
 #[test]
 fn the_preflight_probe_measures_the_real_capture_rate() {

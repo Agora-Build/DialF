@@ -113,7 +113,7 @@ fields; the response echoes `id` and carries `ok`, optional `data`, and `error`.
 
 | `op`           | Fields                          | Returns                                |
 |----------------|---------------------------------|----------------------------------------|
-| `server.info`  | —                               | `{version, ten_vad, microphone, capture, ws_bind, mdns, config_path, overrides?}` (the daemon's own) |
+| `server.info`  | —                               | `{version, ten_vad, microphone, capture, sox, ws_bind, mdns, config_path, overrides?}` (the daemon's own) |
 | `devices.list` | —                               | array of devices (see *Wireless adb*) |
 | `call.dial`    | `device`, `number`, `sim_sub_id?` | `{dialed, sim_sub_id}`               |
 | `call.answer`  | `device`                        | ok                                     |
@@ -191,6 +191,24 @@ At start, dialfd runs the capture command once for ~2 s and keeps the verdict:
 `error` is the capture tool's own last stderr output; `fix` is present when that message pins
 down the cause. `dialf import` waits for the verdict after restarting the daemon and prints
 it; `dialf --version` shows any problem.
+
+### sox check (`server.info.sox`)
+
+Also at start, dialfd checks which sox the config runs and whether a configured device is a
+*split card* — one macOS sound card listed as an input-only and an output-only device under
+one name (e.g. the TI "USB AUDIO  CODEC"). Original sox opens the wrong half in one direction;
+sox_ng picks the right one. So only that pair is a problem:
+
+```jsonc
+{"path": "/opt/homebrew/bin/sox", "flavor": "original"}            // fine
+{"path": "sox", "flavor": "sox_ng", "split_cards": ["USB AUDIO  CODEC"]}   // fine
+{"path": "/usr/local/bin/sox", "flavor": "original", "split_cards": ["USB AUDIO  CODEC"],
+ "problem": "original sox with split card …", "fix": "… brew install sox_ng …"}
+```
+
+`flavor` is `sox_ng`, `original` or `unknown`; `null` while the check runs or when the config
+uses no sox. `dialf import` runs the same check (and offers the sox_ng swap); `dialf
+--version` shows a `problem`.
 
 ### Capability manifest
 

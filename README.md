@@ -520,6 +520,39 @@ must emit raw little-endian s16 PCM on stdout, interleaved at `audio.channels` (
 default). Speech detection always runs on 16 kHz mono — the daemon derives that internally
 from the call channel, so recording fidelity and VAD are independent.
 
+**sox or sox_ng?** Prefer [sox_ng](https://codeberg.org/sox_ng/sox_ng), the maintained fork —
+same `sox` command and options. Original sox (14.4.2, from 2015, still what Homebrew's `sox`
+installs) has one bug that matters here: on macOS it picks a sound card by name without
+checking direction. Some USB cards — e.g. the TI "USB AUDIO  CODEC" — appear in macOS as *two*
+devices with the same name, an input-only and an output-only half, and original sox opens
+whichever comes first. One direction then fails:
+
+```
+capture: FAILED — sox FAIL formats: can't open input `USB AUDIO  CODEC': can not get audio device properties
+```
+
+sox_ng skips the half that can't go that direction, so the plain name just works:
+
+```sh
+brew uninstall sox && brew install sox_ng     # they conflict; sox_ng installs `sox` too
+sox --version                                 # should say "SoX_ng v…"
+dialf service restart --user
+```
+
+DialF finds sox by what it *is*, not what it's called: it asks every `sox`/`sox_ng` on your
+PATH for `--version` and uses the **newest sox_ng**, falling back to original sox only when
+there is none. That covers Homebrew's sox_ng (installed as plain `sox`), a `sox` symlinked to
+sox_ng, and sox_ng built from source, which installs as `sox_ng`/`play_ng`/`rec_ng` *next to*
+original sox — so with a source build there's nothing to uninstall.
+
+`dialf import` spots a split card when you pick it, checks which sox your config runs, and
+offers the fix — pointing the commands at an installed sox_ng, or Homebrew's swap. `dialf
+--version` reports the same problem if it shows up later (e.g. original sox reinstalled). If you need to keep original sox, combine the two halves into one aggregate
+device with its own name (`audictl aggregate create --name "DialF Codec" --devices "<input
+id>,<output id>"`, IDs from `audictl list`; or Audio MIDI Setup) and use that name — but don't
+begin it with the original name, since sox matches names by prefix. NixOS's `sox` already is
+sox_ng.
+
 ## Configuration
 
 `dialfd` reads `~/.config/dialf/config.yaml` (override with `dialf daemon --config <path>`, or

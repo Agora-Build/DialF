@@ -37,11 +37,66 @@ pub struct CommandCaptureSource {
     /// The tool's last few stderr lines. Also relayed to the log, but a caller that sees the
     /// capture die (the startup probe) needs the tool's own words to report, not a pointer
     /// to a log file nobody is reading.
-    stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
+    stderr_tail: Option<StderrTail>,
 }
 
-/// How many trailing stderr lines a capture source keeps.
+/// How many trailing stderr lines a tool's tail keeps.
 const STDERR_TAIL: usize = 5;
+
+/// A tool's last few stderr lines, drained by a thread so a chatty tool can never fill the
+/// pipe and stall. Each line is also relayed to the daemon log: often it is the ONLY clue to
+/// a dead capture or a failed playback.
+struct StderrTail(Arc<Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+    /// `role` ("capture"/"playback") labels the relayed log lines.
+    fn drain(stderr: std::process::ChildStderr, tool: String, role: &'static str) -> Self {
+        let tail = Self(Arc::new(Mutex::new(std::collections::VecDeque::new())));
+        let lines = tail.0.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                tracing::warn!(target: "audio_tool", role, tool = %tool, "{line}");
+                let mut t = lines.lock().unwrap();
+                if t.len() == STDERR_TAIL {
+                    t.pop_front();
+                }
+                t.push_back(line);
+            }
+        });
+        tail
+    }
+
+    /// The lines so far, oldest first. When the tool has just exited, its stdout EOF (or exit
+    /// status) can arrive before the relay thread has read the line explaining why, so this
+    /// waits up to `settle` for one. Not a join: a grandchild holding the pipe open would
+    /// block that forever.
+    fn lines(&self, settle: Duration) -> Vec<String> {
+        let deadline = std::time::Instant::now() + settle;
+        loop {
+            let t = self.0.lock().unwrap();
+            if !t.is_empty() || std::time::Instant::now() >= deadline {
+                return t.iter().cloned().collect();
+            }
+            drop(t);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// The error for a playback tool that exited non-zero: its own words, and the fix when they
+/// pin down the cause. A bare "exited with status 2" told nobody anything.
+fn playback_error(tool: &str, status: std::process::ExitStatus, said: &[String]) -> io::Error {
+    let mut msg = format!("playback tool {tool:?} exited with {status}");
+    if !said.is_empty() {
+        let joined = said.join(" / ");
+        msg.push_str(&format!(": {joined}"));
+        if let Some(fix) = super::diagnose::device_fix(&joined) {
+            msg.push_str(&format!(" — fix: {fix}"));
+        }
+    }
+    io::Error::new(io::ErrorKind::Other, msg)
+}
 
 /// Minimum capture time before judging the delivered rate. Short reads at startup are bursty
 /// (the tool's own buffering), so a snap judgement would fire on a correct setup.
@@ -113,22 +168,7 @@ impl CommandCaptureSource {
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "capture: no stdout"))?;
-        let stderr_tail = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-        if let Some(stderr) = child.stderr.take() {
-            let tool = argv[0].clone();
-            let tail = stderr_tail.clone();
-            std::thread::spawn(move || {
-                use std::io::BufRead;
-                for line in io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-                    tracing::warn!(target: "capture_tool", tool = %tool, "{line}");
-                    let mut t = tail.lock().unwrap();
-                    if t.len() == STDERR_TAIL {
-                        t.pop_front();
-                    }
-                    t.push_back(line);
-                }
-            });
-        }
+        let stderr_tail = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "capture"));
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             stdout,
@@ -143,20 +183,10 @@ impl CommandCaptureSource {
         })
     }
 
-    /// The tool's last few stderr lines, oldest first.
-    ///
-    /// When the tool exits, stdout's EOF can reach the reader before the relay thread has
-    /// read the stderr line explaining why, so this waits up to `settle` for one to appear.
+    /// The tool's last few stderr lines, oldest first, waiting up to `settle` for one (see
+    /// [`StderrTail::lines`]).
     pub fn stderr_tail(&self, settle: Duration) -> Vec<String> {
-        let deadline = std::time::Instant::now() + settle;
-        loop {
-            let t = self.stderr_tail.lock().unwrap();
-            if !t.is_empty() || std::time::Instant::now() >= deadline {
-                return t.iter().cloned().collect();
-            }
-            drop(t);
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        self.stderr_tail.as_ref().map(|t| t.lines(settle)).unwrap_or_default()
     }
 
     /// A handle that can kill the capture child from another thread. Killing the child
@@ -255,9 +285,10 @@ pub fn play_file_blocking(cmd: &PlaybackCommand, force: &AtomicBool) -> io::Resu
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
+    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "playback"));
     loop {
         if force.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -267,10 +298,8 @@ pub fn play_file_blocking(cmd: &PlaybackCommand, force: &AtomicBool) -> io::Resu
         match child.try_wait()? {
             Some(status) if status.success() => return Ok(()),
             Some(status) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("playback tool {:?} exited with {status}", argv[0]),
-                ))
+                let lines = said.as_ref().map(|t| t.lines(STDERR_SETTLE)).unwrap_or_default();
+                return Err(playback_error(&argv[0], status, &lines));
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -286,9 +315,10 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("spawn playback tool `{}`: {e}", argv[0])))?;
+    let said = child.stderr.take().map(|e| StderrTail::drain(e, argv[0].clone(), "playback"));
     {
         let mut stdin = child
             .stdin
@@ -303,17 +333,51 @@ pub fn play_pcm_blocking(cmd: &PlaybackCommand, pcm: &[i16]) -> io::Result<()> {
     }
     let status = child.wait()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("playback tool {:?} exited with {status}", argv[0]),
-        ));
+        let lines = said.as_ref().map(|t| t.lines(STDERR_SETTLE)).unwrap_or_default();
+        return Err(playback_error(&argv[0], status, &lines));
     }
     Ok(())
 }
 
+/// How long a failed tool's stderr may take to reach its tail after the exit is seen.
+const STDERR_SETTLE: Duration = Duration::from_millis(500);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh(script: &str) -> PlaybackCommand {
+        PlaybackCommand { argv: vec!["sh".into(), "-c".into(), script.into()], via_stdin: false }
+    }
+
+    /// Playback used to discard stderr: a failure read "exited with exit status: 2" and nothing
+    /// else. Now the tool's words and — for a split card — the fix come with it.
+    #[test]
+    fn a_failed_playback_says_why_and_how_to_fix_it() {
+        let cmd = sh("echo \"sox FAIL formats: can't open output \\`USB AUDIO  CODEC': can not get audio device properties\" >&2; exit 2");
+        let err = play_file_blocking(&cmd, &AtomicBool::new(false)).unwrap_err().to_string();
+        assert!(err.contains("can not get audio device properties"), "{err}");
+        assert!(err.contains("— fix:") && err.contains("aggregate"), "{err}");
+        assert!(err.contains("\"USB AUDIO  CODEC\""), "{err}");
+    }
+
+    #[test]
+    fn an_unrecognised_failure_still_shows_the_tools_words() {
+        let err = play_file_blocking(&sh("echo 'something odd' >&2; exit 3"), &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.ends_with(": something odd"), "no invented fix: {err}");
+    }
+
+    /// Piping stderr is only safe because a thread drains it: ~200 KB of stderr would fill an
+    /// undrained pipe and wedge the tool forever.
+    #[test]
+    fn a_chatty_tool_cannot_stall_playback() {
+        let cmd = sh("i=0; while [ $i -lt 4000 ]; do echo 'progress line padding padding padding padding' >&2; i=$((i+1)); done; exit 0");
+        let started = std::time::Instant::now();
+        play_file_blocking(&cmd, &AtomicBool::new(false)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(20), "stalled on a full stderr pipe");
+    }
 
     /// The probe reports the tool's own last words, so they must survive the tool's death
     /// even though stdout's EOF can beat the stderr relay to the reader.

@@ -12,6 +12,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::audio::diagnose::NameClash;
+pub use crate::audio::tool_detect::SoxFlavor;
+use crate::audio::tool_detect::SoxIdentity;
 use crate::bundle::{yaml_flow, yaml_quote};
 
 /// One audio endpoint on this machine. `value` is what goes in the config
@@ -41,6 +44,20 @@ fn detect_macos() -> Vec<AudioDevice> {
     parse_system_profiler(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Advice when separate devices share `name` (twin cards). Split cards — one card listed as
+/// same-named input and output halves — get none here: whether they work depends on which sox
+/// runs them, so [`sox_check`] judges them once the tool paths are final.
+fn twin_advice(name: &str, devices: &[AudioDevice]) -> Option<String> {
+    (clash(name, devices) == NameClash::Duplicates)
+        .then(|| crate::audio::diagnose::duplicate_device_fix(name))
+}
+
+/// How the devices called `name` relate (see [`crate::audio::diagnose::NameClash`]).
+fn clash(name: &str, devices: &[AudioDevice]) -> crate::audio::diagnose::NameClash {
+    let seen: Vec<(&str, bool, bool)> =
+        devices.iter().map(|d| (d.value.as_str(), d.input, d.output)).collect();
+    crate::audio::diagnose::name_clash(name, &seen)
+}
 /// Parse `system_profiler SPAudioDataType -json` output.
 pub(crate) fn parse_system_profiler(json: &str) -> Vec<AudioDevice> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -214,17 +231,9 @@ pub(crate) fn run_with(
             .filter(|d| if dir_input { d.input } else { d.output })
             .collect();
         if usable.iter().any(|d| d.value == current) {
-            // Some cards (e.g. the TI "USB AUDIO  CODEC") expose their input and output
-            // halves as two devices with the SAME name — name-based selection can then
-            // open the wrong half and capture silence.
-            if devices.iter().filter(|d| d.value == current).count() > 1 {
-                writeln!(
-                    p.out,
-                    "{key} \"{current}\": more than one device carries this name (separate \
-                     input/output halves) — if capture is silent, remove {key} from the \
-                     config and make the card the system default instead"
-                )?;
-            } else {
+            if let Some(advice) = twin_advice(&current, &devices) {
+                writeln!(p.out, "{key} \"{current}\": {advice}")?;
+            } else if clash(&current, &devices) == NameClash::None {
                 writeln!(p.out, "{key} \"{current}\" ✓")?;
             }
             continue;
@@ -248,6 +257,9 @@ pub(crate) fn run_with(
             &usable,
         )?;
         if let Some(new) = picked {
+            if let Some(advice) = twin_advice(&new, &devices) {
+                writeln!(p.out, "{key} \"{new}\": {advice}")?;
+            }
             if new != current {
                 set_audio_str(doc, edits, key, &new);
                 renames.push((current, new));
@@ -300,6 +312,184 @@ pub(crate) fn run_with(
         // alsa-utils on Linux (arecord + aplay).
         offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
     }
+
+    if let Some(check) = sox_check(&audio_config(doc), || devices.clone()) {
+        if let Some(report) = check.report() {
+            writeln!(p.out, "{report}")?;
+        }
+        if check.problem.is_some() {
+            offer_sox_ng(doc, edits, p, &check)?;
+        }
+    }
+    Ok(())
+}
+
+/// The doc's `audio:` section as the daemon will read it, so import judges the config the
+/// same way the running daemon does (missing keys take the daemon's defaults).
+pub(crate) fn audio_config(doc: &serde_yaml::Value) -> crate::config::AudioConfig {
+    doc.get("audio")
+        .and_then(|a| serde_yaml::from_value(a.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The names that are split cards on this machine (macOS lists them as an input-only and an
+/// output-only device under one name).
+pub fn split_cards_among(names: &[String], devices: &[AudioDevice]) -> Vec<String> {
+    names.iter().filter(|n| clash(n, devices) == NameClash::Halves).cloned().collect()
+}
+
+/// Which sox an audio config runs and whether a device it names is a split card that sox
+/// can't handle. One check for every caller — `dialf import` (both modes), the daemon at
+/// start (`server.info.sox`) and `dialf --version` — so they can't disagree.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SoxCheck {
+    pub path: String,
+    pub flavor: SoxFlavor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_cards: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+impl SoxCheck {
+    /// Combine what was found. The pair is the problem — a split card with original sox;
+    /// either alone is fine. Pure, so every case is testable without sox or a card.
+    pub fn judge(path: String, flavor: SoxFlavor, split_cards: Vec<String>) -> Self {
+        let which = match flavor {
+            SoxFlavor::SoxNg => None,
+            SoxFlavor::Original => Some("original sox"),
+            SoxFlavor::Unknown => Some("a sox whose version couldn't be read"),
+        };
+        let (problem, fix) = match (which, split_cards.first()) {
+            (Some(which), Some(name)) => (
+                Some(format!(
+                    "{which} with split card \"{name}\" — one direction will fail (\"can not \
+                     get audio device properties\")"
+                )),
+                Some(crate::audio::diagnose::split_device_fix(name)),
+            ),
+            _ => (None, None),
+        };
+        Self { path, flavor, split_cards, problem, fix }
+    }
+
+    /// What to print: the problem and its fix, or a ✓ when sox_ng handles a split card;
+    /// `None` when there is nothing worth saying.
+    pub fn report(&self) -> Option<String> {
+        match &self.problem {
+            Some(problem) => Some(crate::audio::diagnose::with_fix(problem, self.fix.as_deref())),
+            None => self.split_cards.first().map(|name| {
+                format!("\"{name}\" is a split card — fine with sox_ng, which picks the half matching each direction ✓")
+            }),
+        }
+    }
+}
+
+/// The sox binary `audio` runs, if any: a pinned command whose tool is from the SoX family,
+/// else — for a direction left unpinned on macOS, where auto-detection prefers sox —
+/// `auto_detected` (the sox auto-detection would pick: sox_ng first).
+pub fn configured_sox(
+    audio: &crate::config::AudioConfig,
+    macos: bool,
+    auto_detected: Option<String>,
+) -> Option<String> {
+    use crate::audio::tool_detect::is_sox_family;
+    let is_sox = |p: &str| Path::new(p).file_name().and_then(|n| n.to_str()).is_some_and(is_sox_family);
+    for cmd in [&audio.capture_cmd, &audio.playback_cmd].into_iter().flatten() {
+        if let Some(tool) = cmd.first().filter(|t| is_sox(t)) {
+            return Some(tool.clone());
+        }
+    }
+    let unpinned = audio.capture_cmd.is_none() || audio.playback_cmd.is_none();
+    if unpinned && macos { auto_detected } else { None }
+}
+
+/// Every CoreAudio device name `audio` can make sox open: the device keys, and the name after
+/// `coreaudio` in a pinned command — normally the same, but the command's is the one sox
+/// actually uses if someone edited only one of them.
+pub fn configured_device_names(audio: &crate::config::AudioConfig) -> Vec<String> {
+    let mut names: Vec<String> = [&audio.capture_device, &audio.playback_device]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    for cmd in [&audio.capture_cmd, &audio.playback_cmd].into_iter().flatten() {
+        if let Some(i) = cmd.iter().position(|a| a == "coreaudio") {
+            if let Some(name) = cmd.get(i + 1) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The sox check for `audio`; `None` when it runs no sox. `devices` is only called when there
+/// is a sox and a device name to look up (scanning takes about a second on macOS).
+pub fn sox_check(
+    audio: &crate::config::AudioConfig,
+    devices: impl FnOnce() -> Vec<AudioDevice>,
+) -> Option<SoxCheck> {
+    let auto = crate::audio::tool_detect::find_tool("sox").map(|p| p.to_string_lossy().into_owned());
+    let path = configured_sox(audio, cfg!(target_os = "macos"), auto)?;
+    let flavor = SoxIdentity::probe(Path::new(&path)).flavor;
+    let names = configured_device_names(audio);
+    let split = if names.is_empty() { Vec::new() } else { split_cards_among(&names, &devices()) };
+    Some(SoxCheck::judge(path, flavor, split))
+}
+
+/// Offer the sox_ng fix for a split card. A source-built sox_ng (installed as `sox_ng`, next
+/// to original sox) just needs the commands pointed at it; otherwise offer Homebrew's swap.
+/// Either way, re-check rather than assume it worked.
+fn offer_sox_ng(
+    doc: &mut serde_yaml::Value,
+    edits: &mut Vec<(String, String)>,
+    p: &mut Prompter<'_>,
+    check: &SoxCheck,
+) -> Result<()> {
+    let installed_ng = crate::audio::tool_detect::best_sox("sox")
+        .filter(|(_, id)| id.flavor == SoxFlavor::SoxNg)
+        .map(|(path, _)| path.to_string_lossy().into_owned());
+    if let Some(ng) = installed_ng.filter(|ng| *ng != check.path) {
+        if p.yes(&format!("sox_ng is installed at {ng} — use it instead of {}?", check.path))? {
+            for key in ["capture_cmd", "playback_cmd"] {
+                if let Some(mut argv) = audio_argv(doc, key).filter(|a| a.first() == Some(&check.path)) {
+                    argv[0] = ng.clone();
+                    set_audio_argv(doc, edits, key, &argv);
+                    writeln!(p.out, "{key} tool → {ng} ✓")?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !cfg!(target_os = "macos") || which::which("brew").is_err() {
+        return Ok(());
+    }
+    if !p.yes("replace sox with sox_ng now? (`brew uninstall sox && brew install sox_ng`)")? {
+        return Ok(());
+    }
+    for args in [&["uninstall", "sox"][..], &["install", "sox_ng"][..]] {
+        let status = Command::new("brew").args(args).status().context("run brew")?;
+        if !status.success() {
+            writeln!(
+                p.out,
+                "`brew {}` failed ({status}) — sox is unchanged; the aggregate device above still works",
+                args.join(" ")
+            )?;
+            return Ok(());
+        }
+    }
+    match SoxIdentity::probe(Path::new(&check.path)).flavor {
+        SoxFlavor::SoxNg => writeln!(p.out, "sox is now sox_ng — split cards will work as configured ✓")?,
+        _ => writeln!(
+            p.out,
+            "sox_ng installed, but `{}` still isn't it — check which sox that path runs",
+            check.path
+        )?,
+    }
     Ok(())
 }
 
@@ -313,7 +503,7 @@ fn rewrite_sox_coreaudio_for_alsa(argv: &mut [String]) -> bool {
     else {
         return false;
     };
-    if !matches!(tool, "sox" | "play" | "rec") {
+    if !crate::audio::tool_detect::is_sox_family(tool) {
         return false;
     }
 
@@ -377,8 +567,8 @@ pub(crate) fn rewrite_unusable_tool_paths(
         let Some(base) = path.file_name().map(|b| b.to_string_lossy().into_owned()) else {
             continue;
         };
-        // A tool present under a different prefix is better named outright.
-        let replacement = which::which(&base)
+        // A tool present under a different prefix (or, for sox, sox_ng) is better named outright.
+        let replacement = crate::audio::tool_detect::find_tool(&base)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(base);
         if replacement == argv0 {
@@ -431,8 +621,9 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
         return Ok(None);
     }
     let base = path.file_name().map(|b| b.to_string_lossy().into_owned());
-    if let Some(found) = base.as_deref().and_then(|b| which::which(b).ok()) {
-        // Same tool, different home (e.g. /opt/homebrew vs /usr/local).
+    let find = |b: &str| crate::audio::tool_detect::find_tool(b);
+    if let Some(found) = base.as_deref().and_then(find) {
+        // Same tool, different home (/opt/homebrew vs /usr/local) — or, for sox, sox_ng.
         let found = found.to_string_lossy().into_owned();
         if p.yes(&format!("{key} tool {argv0} not found, but {found} exists — use it?"))? {
             return Ok(Some(found));
@@ -452,7 +643,7 @@ fn ensure_tool(argv0: &str, key: &str, p: &mut Prompter<'_>) -> Result<Option<St
             writeln!(p.out, "{key} tool {argv0} ✓ (installed)")?;
             return Ok(None);
         }
-        if let Some(found) = base.as_deref().and_then(|b| which::which(b).ok()) {
+        if let Some(found) = base.as_deref().and_then(find) {
             let found = found.to_string_lossy().into_owned();
             writeln!(p.out, "{key} tool installed at {found} ✓")?;
             return Ok(Some(found));
@@ -858,5 +1049,142 @@ mod tests {
         assert_eq!(doc, orig);
         assert!(edits.is_empty());
         assert!(String::from_utf8(out).unwrap().contains("\"MiniFuse 2\" ✓"));
+    }
+
+    /// A stand-in `sox` that answers `--version` like the given flavor, so import can be
+    /// tested against both without installing either.
+    fn fake_sox(tag: &str, version_line: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dialf-fakesox-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("sox");
+        std::fs::write(&bin, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// GitHub issue #2, replayed: a BlackHole bundle lands on a Mac whose TI codec is split
+    /// into same-named halves; the user picks it from the list for both directions.
+    fn import_split_card(sox_version: &str, tag: &str) -> String {
+        let sox = fake_sox(tag, sox_version);
+        let yaml = format!(
+            "shared_key: test-key\naudio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n  capture_cmd: [\"{s}\", \"-q\", \"-t\", \"coreaudio\", \"BlackHole 2ch\", \"-\"]\n  playback_cmd: [\"{s}\", \"-q\", \"{{file}}\", \"-t\", \"coreaudio\", \"BlackHole 16ch\"]\n",
+            s = sox.display()
+        );
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let mut edits = Vec::new();
+        let codec = "USB AUDIO  CODEC";
+        let dev = |input, output| AudioDevice { value: codec.into(), label: codec.into(), input, output };
+        // Picks 1 and 1; every later question (the sox_ng offer, if this host has brew) gets
+        // "n" — a test must never run brew.
+        let mut input = std::io::Cursor::new(b"1\n1\nn\nn\nn\nn\n".to_vec());
+        let mut out = Vec::new();
+        let mut p = Prompter { input: &mut input, out: &mut out };
+        run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![dev(false, true), dev(true, false)], &mut p).unwrap();
+        let _ = std::fs::remove_dir_all(sox.parent().unwrap());
+        assert_eq!(doc["audio"]["capture_device"].as_str(), Some(codec), "the pick itself still applies");
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn original_sox_with_a_split_card_gets_the_fix_once() {
+        let said = import_split_card("sox:      SoX v14.4.2", "orig");
+        assert!(said.contains("original sox with split card \"USB AUDIO  CODEC\""), "{said}");
+        assert!(said.contains("↳ ") && said.contains("brew install sox_ng") && said.contains("aggregate"), "{said}");
+        assert_eq!(said.matches("input-only and an output-only half").count(), 1, "one card, one message:\n{said}");
+    }
+
+    #[test]
+    fn sox_ng_with_a_split_card_is_fine() {
+        let said = import_split_card("sox:      SoX_ng v14.8.1", "ng");
+        assert!(said.contains("\"USB AUDIO  CODEC\" is a split card — fine with sox_ng"), "{said}");
+        assert!(!said.contains("brew install sox_ng"), "no nagging once sox_ng is in place:\n{said}");
+        assert!(!said.contains("replace sox with sox_ng now?"), "{said}");
+    }
+
+
+    /// Two identical full-duplex cards: no halves to combine, so different advice, given at
+    /// pick time and independent of the sox flavor.
+    #[test]
+    fn twin_cards_get_pick_one_advice() {
+        let yaml = "shared_key: test-key\naudio:\n  capture_device: \"MiniFuse 2\"\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let mut edits = Vec::new();
+        let d = || AudioDevice { value: "MiniFuse 2".into(), label: "MiniFuse 2".into(), input: true, output: true };
+        let mut input = std::io::Cursor::new(b"n\nn\nn\n".to_vec());
+        let mut out = Vec::new();
+        let mut p = Prompter { input: &mut input, out: &mut out };
+        run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![d(), d()], &mut p).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("more than one device is named \"MiniFuse 2\""), "{said}");
+        assert!(!said.contains("half"), "{said}");
+    }
+
+    /// The pair is the problem: a split card with original sox. Either alone is fine.
+    #[test]
+    fn the_check_flags_only_original_sox_with_a_split_card() {
+        use SoxFlavor::*;
+        let split = || vec!["USB AUDIO  CODEC".to_string()];
+        let bad = SoxCheck::judge("/usr/local/bin/sox".into(), Original, split());
+        assert!(bad.problem.as_deref().unwrap().starts_with("original sox with split card \"USB AUDIO  CODEC\""));
+        assert!(bad.report().unwrap().contains("\n  ↳ ") && bad.fix.as_deref().unwrap().contains("brew install sox_ng"));
+        assert!(SoxCheck::judge("sox".into(), Unknown, split()).problem.is_some(), "can't tell: still worth saying");
+        let ng = SoxCheck::judge("sox".into(), SoxNg, split());
+        assert_eq!(ng.problem, None);
+        assert!(ng.report().unwrap().ends_with("✓"));
+        assert_eq!(SoxCheck::judge("sox".into(), Original, vec![]).report(), None, "nothing to say");
+    }
+
+    /// What the daemon serves is what the CLI decodes — same struct, same wording.
+    #[test]
+    fn the_check_survives_the_trip_through_server_info() {
+        let c = SoxCheck::judge("/usr/local/bin/sox".into(), SoxFlavor::Original, vec!["X".into()]);
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["flavor"], "original");
+        let back: SoxCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(back, c);
+        let quiet = serde_json::to_value(SoxCheck::judge("sox".into(), SoxFlavor::SoxNg, vec![])).unwrap();
+        assert_eq!(quiet, serde_json::json!({"path": "sox", "flavor": "sox_ng"}));
+    }
+
+    #[test]
+    fn the_sox_in_use_is_found_pinned_or_auto() {
+        let mut a = crate::config::AudioConfig::default();
+        let auto = |p: &str| Some(p.to_string());
+        // Unpinned on macOS: whatever detection picks — sox_ng first (find_tool's job).
+        assert_eq!(configured_sox(&a, true, auto("/usr/local/bin/sox_ng")).as_deref(), Some("/usr/local/bin/sox_ng"));
+        assert_eq!(configured_sox(&a, true, None), None);
+        assert_eq!(configured_sox(&a, false, auto("sox")), None, "Linux auto-detects arecord first");
+        // A pinned SoX-family tool wins, original or sox_ng, path and all.
+        for tool in ["/usr/local/bin/sox", "/usr/local/bin/sox_ng", "play_ng"] {
+            a.capture_cmd = Some(vec![tool.into(), "-q".into()]);
+            a.playback_cmd = Some(vec![tool.into()]);
+            assert_eq!(configured_sox(&a, true, None).as_deref(), Some(tool));
+        }
+        a.capture_cmd = Some(vec!["ffmpeg".into()]);
+        a.playback_cmd = Some(vec!["afplay".into()]);
+        assert_eq!(configured_sox(&a, true, auto("sox")), None, "no sox involved");
+    }
+
+    #[test]
+    fn device_names_come_from_keys_and_pinned_commands() {
+        let mut a = crate::config::AudioConfig::default();
+        a.capture_device = Some("USB AUDIO  CODEC".into());
+        a.capture_cmd = Some(["sox", "-q", "-t", "coreaudio", "Edited Name", "-"].map(String::from).to_vec());
+        a.playback_cmd = Some(["sox", "{file}", "-t", "coreaudio", "USB AUDIO  CODEC"].map(String::from).to_vec());
+        assert_eq!(configured_device_names(&a), vec!["Edited Name", "USB AUDIO  CODEC"]);
+    }
+
+    /// Import reads its YAML through the daemon's own AudioConfig, so both judge one config.
+    #[test]
+    fn import_reads_the_audio_section_like_the_daemon() {
+        let doc: serde_yaml::Value = serde_yaml::from_str(
+            "audio:\n  capture_device: \"X\"\n  capture_cmd: [\"/usr/local/bin/sox\", \"-q\"]\n",
+        )
+        .unwrap();
+        let a = audio_config(&doc);
+        assert_eq!(a.capture_device.as_deref(), Some("X"));
+        assert_eq!(a.capture_cmd.unwrap()[0], "/usr/local/bin/sox");
+        assert!(audio_config(&serde_yaml::from_str("{}").unwrap()).capture_cmd.is_none());
     }
 }

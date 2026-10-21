@@ -99,8 +99,31 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
 
 ### Audio devices
 - Some cards expose input and output as **two CoreAudio devices with the same name** (e.g. the
-  TI "USB AUDIO  CODEC" — note the double space). sox selects by name and may open the wrong
-  half → zero frames. Use `default` (direction-aware) or make the card the system default.
+  TI "USB AUDIO  CODEC" — note the double space): an output-only and an input-only half. sox's
+  CoreAudio driver (`coreaudio.c`) compares only the name, **as a prefix**, takes the **first**
+  match and never checks direction — so no name reaches the second half, and whichever
+  direction drew the wrong one fails with "can not get audio device properties" (seen on a
+  13.7 Intel Mac: capture got the output half, ID 109 before 115). **sox_ng fixes it**: its
+  lookup skips devices with no streams in the direction being opened
+  (`DeviceHasBuffersInScope`, in the sox_ng-14.8.1 tag), and it also accepts a device number.
+  Original sox is unmaintained (14.4.2, 2015); Homebrew's `sox` is still that, `sox_ng`
+  conflicts with it and installs the same `sox` command; nixpkgs' `sox` already is sox_ng; a
+  **source build installs `sox_ng`/`play_ng`/`rec_ng` next to original sox**. So never pick sox
+  by name: `tool_detect::best_sox` asks each family binary on PATH for `--version` and takes the
+  newest sox_ng (any name, symlinks counted once), else original — used by auto-detection,
+  import's missing-tool repair and the sox check alike. `play`/`rec` act by the name they run
+  under, so those roles only consider play-/rec-named binaries. Otherwise use an aggregate
+  device of both halves with a name of its own: `audictl aggregate create --name "DialF Codec"
+  --devices "<input id>,<output id>"` (IDs from `audictl list`; audictl refuses the ambiguous
+  name). The new name must **not begin with** the original — prefix matching would still pick
+  the original. `default` + making the card the system default also works but is fragile:
+  macOS moves the default when another device is plugged in. `audio/diagnose.rs` tells this
+  apart from separate devices that merely share a name (two identical cards — no error, sox
+  just opens the first): different advice, since "combine the halves" is wrong there. Import
+  warns on either at pick time; the capture probe and failed playbacks carry the fix.
+- **Playback used to discard the tool's stderr** — a failure read only "exited with exit
+  status: 2". Both directions now keep a drained stderr tail (`StderrTail`; drained by a
+  thread, since a full pipe would wedge the tool) and attach `diagnose::device_fix`.
 - Channel/port selection is `remix N` in a pinned `capture_cmd` (macOS) or `plughw:CARD,DEV`
   (Linux). On multi-channel interfaces, ch 3/4 are often a **loopback** of our own playback —
   pinning the wrong channel makes tx bleed into rx.

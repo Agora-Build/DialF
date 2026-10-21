@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod command_backend;
+pub mod diagnose;
 pub mod engine;
 pub mod mic_permission;
 pub mod record;

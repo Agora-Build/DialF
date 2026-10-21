@@ -591,6 +591,13 @@ fn import_impl(
                  resolves once the tool is installed"
             ));
         }
+        // No terminal to offer the sox_ng swap on — say what's wrong and how to fix it.
+        let audio = crate::hostcheck::audio_config(&doc);
+        if let Some(check) = crate::hostcheck::sox_check(&audio, crate::hostcheck::detect_devices) {
+            if check.problem.is_some() {
+                warnings.extend(check.report());
+            }
+        }
         if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
             warnings.push(
                 "config shared_key is still the insecure `change-me` placeholder — set it to a \

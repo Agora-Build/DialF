@@ -74,7 +74,7 @@ impl AudioEngine {
 
     /// Time a live capture source and report the frame rate it actually delivers.
     ///
-    /// Split out from [`Self::probe_capture_rate`] so it can be exercised without the
+    /// Split out from [`Self::probe_capture`] so it can be exercised without the
     /// microphone-consent gate that opening a real card goes through.
     pub fn measure_source_rate(src: &mut impl super::backend::CaptureSource) -> Option<u32> {
     // Discard the opening burst — a tool's first buffers arrive all at once, so measuring
@@ -498,7 +498,7 @@ pub fn run_wait_for_speech<S: CaptureSource>(
 /// What the startup capture probe found. Reported by `server.info` (`capture`) so `dialf
 /// import` and `dialf --version` can say it — a log line alone reached nobody: on one
 /// NixOS box the probe logged the exact failure while every recording came out empty.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CaptureProbe {
     /// Not run yet (the daemon just started).
@@ -507,9 +507,25 @@ pub enum CaptureProbe {
     RateMismatch { configured: u32, measured: u32, fix: String },
     Failed {
         error: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         fix: Option<String>,
     },
+}
+
+impl CaptureProbe {
+    /// The problem this verdict reports, with its fix; `None` while pending or when capture is
+    /// fine. The one wording for the daemon log, `dialf --version` and `dialf import`.
+    pub fn report(&self) -> Option<String> {
+        use super::diagnose::with_fix;
+        match self {
+            CaptureProbe::Failed { error, fix } => Some(with_fix(&format!("FAILED — {error}"), fix.as_deref())),
+            CaptureProbe::RateMismatch { configured, measured, fix } => Some(with_fix(
+                &format!("delivering ~{measured} Hz, config says {configured} Hz"),
+                Some(fix),
+            )),
+            CaptureProbe::Pending | CaptureProbe::Ok { .. } => None,
+        }
+    }
 }
 
 /// Turn a probe's raw outcome into a verdict. Pure, so every branch is testable without a card.
@@ -530,37 +546,9 @@ pub fn classify_probe(configured: u32, measured: Option<u32>, stderr: &[String])
             } else {
                 stderr.join(" / ")
             };
-            CaptureProbe::Failed { fix: capture_fix(&error), error }
+            CaptureProbe::Failed { fix: super::diagnose::device_fix(&error), error }
         }
     }
-}
-
-/// The fix for capture failures whose cause the tool's own message pins down.
-pub fn capture_fix(error: &str) -> Option<String> {
-    let e = error.to_ascii_lowercase();
-    if e.contains("too few input channels") {
-        return Some(
-            "capture_cmd selects a channel (`remix N`) that sox did not open — sox opens a card \
-             with 2 channels unless told otherwise, so add `-c <channels>` before the device, \
-             matching what the card offers (Linux: `grep Channels /proc/asound/card*/stream0`)"
-                .into(),
-        );
-    }
-    if e.contains("busy") {
-        return Some(
-            "another program holds the sound card — on Linux usually PipeWire; release the card \
-             for direct access, e.g. `audictl card hide <card>`"
-                .into(),
-        );
-    }
-    if e.contains("can't open input") || e.contains("cannot find card") || e.contains("no such device") {
-        return Some(
-            "the capture device in capture_cmd does not exist on this machine — check its name \
-             (Linux: `cat /proc/asound/cards`; `dialf import` offers the devices it finds)"
-                .into(),
-        );
-    }
-    None
 }
 
 #[cfg(test)]
@@ -592,13 +580,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn known_tool_errors_get_their_fix_and_unknown_ones_none() {
-        assert!(capture_fix("arecord: Device or resource busy").unwrap().contains("audictl card hide"));
-        assert!(capture_fix("sox FAIL formats: can't open input `plughw:9,0'").unwrap().contains("does not exist"));
-        assert_eq!(capture_fix("something new"), None);
-    }
-
+    
     /// The JSON clients read from `server.info.capture`.
     #[test]
     fn probe_json_shape() {
