@@ -621,10 +621,11 @@ config is now active. `--no-restart` skips that. Host-specific settings generall
 tools/devices (`audio.capture_cmd`, device names) that don't exist on the new machine.
 
 On a terminal, `import` runs an **interactive host precheck** instead of just warning. It asks
-for the shared key first: when it replaces an existing config, Enter **keeps this machine's
-key** (so re-importing never means retyping it, and the paired phone stays paired); on a fresh
-install Enter takes the bundle's key. Typing a key overrides either, and a missing/empty/
-`change-me` key gets a warning. It then detects this machine's audio devices
+for the shared key first. When it replaces an existing config it shows that key masked
+(`ma••••ey`): **Enter keeps it** (so re-importing never means retyping it, and the paired phone
+stays paired), **Tab** takes the bundle's key, or type a new one. On a fresh install Enter takes
+the bundle's key. A scripted `--override` import does what Enter does and keeps this machine's
+key, with a warning. It then detects this machine's audio devices
 (`system_profiler` on macOS, `/proc/asound` on Linux), and lets you pick replacements for device
 names that don't exist here. It also confirms `record_dir`, translates SoX commands from
 CoreAudio to ALSA when importing a macOS config on Linux, fixes a pinned tool path that moved

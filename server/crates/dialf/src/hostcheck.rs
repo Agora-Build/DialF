@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::audio::diagnose::NameClash;
 pub use crate::audio::tool_detect::SoxFlavor;
@@ -134,6 +134,45 @@ pub(crate) fn parse_asound_dir(root: &Path) -> Vec<AudioDevice> {
 pub struct Prompter<'a> {
     pub input: &'a mut dyn BufRead,
     pub out: &'a mut dyn Write,
+    /// `input` is the terminal, so `ask_key` can switch it to raw mode and echo itself.
+    pub tty: bool,
+}
+
+pub(crate) enum KeyAnswer {
+    Enter,
+    Tab,
+    Typed(String),
+}
+
+/// Unechoed, unbuffered terminal input, so a lone Enter or Tab can be told apart; the saved
+/// settings are restored on drop. ISIG is off too, so Ctrl+C arrives as a byte and is handled
+/// with the terminal restored rather than killing the process in raw mode.
+struct RawTerminal(libc::termios);
+
+impl RawTerminal {
+    fn enter() -> Option<Self> {
+        // SAFETY: tcgetattr/tcsetattr on fd 0 with a properly sized termios.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) != 0 {
+                return None;
+            }
+            let saved = t;
+            t.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+            t.c_cc[libc::VMIN] = 1;
+            t.c_cc[libc::VTIME] = 0;
+            (libc::tcsetattr(0, libc::TCSANOW, &t) == 0).then_some(Self(saved))
+        }
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        // SAFETY: restores the termios captured in `enter`.
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &self.0);
+        }
+    }
 }
 
 impl Prompter<'_> {
@@ -143,6 +182,58 @@ impl Prompter<'_> {
         let mut line = String::new();
         self.input.read_line(&mut line)?;
         Ok(line.trim().to_string())
+    }
+
+    /// Like `ask`, but the first keypress can answer on its own: Enter, or Tab when `tab` is
+    /// offered. Anything else starts a typed answer, finished with Enter.
+    fn ask_key(&mut self, q: &str, tab: bool) -> Result<KeyAnswer> {
+        write!(self.out, "{q}")?;
+        self.out.flush()?;
+        let raw = if self.tty { RawTerminal::enter() } else { None };
+        let echo = raw.is_some();
+        let mut typed: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        while self.input.read(&mut byte)? == 1 {
+            match byte[0] {
+                b'\r' | b'\n' => break,
+                b'\t' if tab && typed.is_empty() => {
+                    writeln!(self.out, "(imported key)")?;
+                    return Ok(KeyAnswer::Tab);
+                }
+                0x03 => {
+                    writeln!(self.out)?;
+                    bail!("aborted");
+                }
+                0x7f | 0x08 => {
+                    if typed.is_empty() {
+                        continue;
+                    }
+                    while typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
+                    if echo {
+                        write!(self.out, "\x08 \x08")?;
+                    }
+                }
+                // Arrow keys and friends: ESC [ … final byte. Drop the whole sequence.
+                0x1b => {
+                    if self.input.read(&mut byte)? == 1 && matches!(byte[0], b'[' | b'O') {
+                        while self.input.read(&mut byte)? == 1 && !(0x40..=0x7e).contains(&byte[0]) {}
+                    }
+                }
+                b if b < 0x20 => {}
+                b => {
+                    typed.push(b);
+                    if echo {
+                        self.out.write_all(&[b])?;
+                    }
+                }
+            }
+            self.out.flush()?;
+        }
+        if echo {
+            writeln!(self.out)?;
+        }
+        let line = String::from_utf8_lossy(&typed).trim().to_string();
+        Ok(if line.is_empty() { KeyAnswer::Enter } else { KeyAnswer::Typed(line) })
     }
 
     fn yes(&mut self, q: &str) -> Result<bool> {
@@ -182,7 +273,7 @@ pub fn run(
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut err = std::io::stderr();
-    let mut p = Prompter { input: &mut input, out: &mut err };
+    let mut p = Prompter { input: &mut input, out: &mut err, tty: true };
     writeln!(p.out, "\nchecking this machine against the imported config…")?;
     check_shared_key(doc, edits, existing_key, &mut p)?;
     run_with(doc, edits, folder, detect_devices(), &mut p)
@@ -582,8 +673,9 @@ pub(crate) fn rewrite_unusable_tool_paths(
     changed
 }
 
-/// The key the phone app must match. Enter keeps this machine's current key when a config is
-/// being replaced, else takes the imported one; anything typed replaces either.
+/// The key the phone app must match. When a config is being replaced, Enter keeps its key
+/// (Tab takes the imported one instead); on a fresh install Enter takes the imported key.
+/// Anything typed beats both.
 fn check_shared_key(
     doc: &mut serde_yaml::Value,
     edits: &mut Vec<(String, String)>,
@@ -593,33 +685,55 @@ fn check_shared_key(
     let imported = doc
         .get("shared_key")
         .and_then(|v| v.as_str())
-        .unwrap_or("change-me")
-        .to_string();
-    let existing = existing_key.filter(|k| !shared_key_is_placeholder(k));
-    let question = match existing {
-        Some(k) if k == imported => {
-            "shared_key: Enter to keep this machine's key (the import has the same one), or type a new one: "
-        }
-        Some(_) => "shared_key: Enter to keep this machine's key, or type a new one (the import's key differs): ",
-        None if !shared_key_is_placeholder(&imported) => {
-            "shared_key: Enter to use the imported key, or type your own: "
+        .filter(|k| !shared_key_is_placeholder(k))
+        .map(str::to_owned);
+    let chosen = match existing_key.filter(|k| !shared_key_is_placeholder(k)) {
+        Some(mine) => {
+            let tab = imported.as_deref().is_some_and(|k| k != mine);
+            let q = format!(
+                "shared_key — this machine: {}\n  Enter = keep it · {}or type a new one: ",
+                mask_key(mine),
+                if tab { "Tab = use the imported key · " } else { "" }
+            );
+            match p.ask_key(&q, tab)? {
+                KeyAnswer::Enter => Some(mine.to_string()),
+                KeyAnswer::Tab => imported.clone(),
+                KeyAnswer::Typed(k) => Some(k),
+            }
         }
         None => {
-            "shared_key is missing or still the insecure `change-me` placeholder. Type a new key \
-             that will also be entered in the phone app, or Enter to keep it: "
+            let q = if imported.is_some() {
+                "shared_key: Enter to use the imported key, or type your own: "
+            } else {
+                "shared_key is missing or still the insecure `change-me` placeholder. Type a new \
+                 key that will also be entered in the phone app, or Enter to keep it: "
+            };
+            match p.ask_key(q, false)? {
+                KeyAnswer::Typed(k) => Some(k),
+                _ => imported.clone(),
+            }
         }
     };
-    let ans = p.ask(question)?;
-    let chosen = if ans.is_empty() { existing.unwrap_or(&imported) } else { ans.as_str() };
-    if shared_key_is_placeholder(chosen) {
-        writeln!(p.out, "warning: shared_key remains `change-me`")?;
-        return Ok(());
+    match chosen.filter(|k| !shared_key_is_placeholder(k)) {
+        None => writeln!(p.out, "warning: shared_key remains `change-me`")?,
+        Some(k) => {
+            if Some(&k) != imported.as_ref() {
+                set_top_level_str(doc, edits, "shared_key", &k);
+            }
+            writeln!(p.out, "shared_key is set ✓")?;
+        }
     }
-    if chosen != imported {
-        set_top_level_str(doc, edits, "shared_key", chosen);
-    }
-    writeln!(p.out, "shared_key is set ✓")?;
     Ok(())
+}
+
+/// Enough of a key to recognise it without revealing it.
+pub(crate) fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() < 8 {
+        return "••••".into();
+    }
+    let ends = |r: std::ops::Range<usize>| chars[r].iter().collect::<String>();
+    format!("{}••••{}", ends(0..2), ends(chars.len() - 2..chars.len()))
 }
 
 pub(crate) fn shared_key_is_placeholder(key: &str) -> bool {
@@ -802,7 +916,7 @@ fn set_audio_argv(
     }
 }
 
-fn set_top_level_str(
+pub(crate) fn set_top_level_str(
     doc: &mut serde_yaml::Value,
     edits: &mut Vec<(String, String)>,
     key: &str,
@@ -824,10 +938,7 @@ mod tests {
     fn run_ensure_tool(argv0: &str, answers: &str) -> (Option<String>, String) {
         let mut input = std::io::Cursor::new(answers.as_bytes().to_vec());
         let mut out: Vec<u8> = Vec::new();
-        let mut p = Prompter {
-            input: &mut input,
-            out: &mut out,
-        };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         let got = ensure_tool(argv0, "capture_cmd", &mut p).unwrap();
         (got, String::from_utf8_lossy(&out).into_owned())
     }
@@ -982,8 +1093,12 @@ mod tests {
         let mut edits = Vec::new();
         let mut input = std::io::Cursor::new(format!("{answer}\n").into_bytes());
         let mut out = Vec::new();
-        let mut p = Prompter { input: &mut input, out: &mut out };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         check_shared_key(&mut doc, &mut edits, existing, &mut p).unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        if let Some(mine) = existing.filter(|k| *k != "change-me") {
+            assert!(!printed.contains(mine), "key printed unmasked: {printed}");
+        }
         (doc["shared_key"].as_str().map(str::to_owned), edits)
     }
 
@@ -992,6 +1107,28 @@ mod tests {
         let (key, edits) = key_prompt("change-me", None, "latency-eval-key");
         assert_eq!(key.as_deref(), Some("latency-eval-key"));
         assert_eq!(edits, vec![("shared_key".into(), "\"latency-eval-key\"".into())]);
+    }
+
+    #[test]
+    fn tab_takes_the_imported_key_over_this_machines() {
+        let (key, edits) = key_prompt("bundle-key", Some("machine-key"), "\t");
+        assert_eq!(key.as_deref(), Some("bundle-key"));
+        assert!(edits.is_empty());
+        // Tab only answers as the first key; mid-word it is ignored.
+        let (key, _) = key_prompt("bundle-key", Some("machine-key"), "ab\tc");
+        assert_eq!(key.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn typed_keys_honour_backspace_and_skip_arrow_keys() {
+        let (key, _) = key_prompt("bundle-key", Some("machine-key"), "abx\x7fc\x1b[Dd");
+        assert_eq!(key.as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn masked_keys_show_only_their_ends() {
+        assert_eq!(mask_key("machine-key"), "ma••••ey");
+        assert_eq!(mask_key("short"), "••••");
     }
 
     #[test]
@@ -1055,7 +1192,7 @@ mod tests {
         // Answers: capture pick 1, playback pick 1, then decline whatever tool prompts come.
         let mut input = std::io::Cursor::new(b"1\n1\nn\nn\n".to_vec());
         let mut out = Vec::new();
-        let mut p = Prompter { input: &mut input, out: &mut out };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         run_with(&mut doc, &mut edits, Path::new("/tmp"), devices, &mut p).unwrap();
 
         assert_eq!(doc["audio"]["capture_device"].as_str(), Some("MiniFuse 2"));
@@ -1089,7 +1226,7 @@ mod tests {
         }];
         let mut input = std::io::Cursor::new(b"\n\n\n\n".to_vec());
         let mut out = Vec::new();
-        let mut p = Prompter { input: &mut input, out: &mut out };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         run_with(&mut doc, &mut edits, Path::new("/tmp"), devices, &mut p).unwrap();
         assert_eq!(doc, orig);
         assert!(edits.is_empty());
@@ -1124,7 +1261,7 @@ mod tests {
         // "n" — a test must never run brew.
         let mut input = std::io::Cursor::new(b"1\n1\nn\nn\nn\nn\n".to_vec());
         let mut out = Vec::new();
-        let mut p = Prompter { input: &mut input, out: &mut out };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![dev(false, true), dev(true, false)], &mut p).unwrap();
         let _ = std::fs::remove_dir_all(sox.parent().unwrap());
         assert_eq!(doc["audio"]["capture_device"].as_str(), Some(codec), "the pick itself still applies");
@@ -1158,7 +1295,7 @@ mod tests {
         let d = || AudioDevice { value: "MiniFuse 2".into(), label: "MiniFuse 2".into(), input: true, output: true };
         let mut input = std::io::Cursor::new(b"n\nn\nn\n".to_vec());
         let mut out = Vec::new();
-        let mut p = Prompter { input: &mut input, out: &mut out };
+        let mut p = Prompter { input: &mut input, out: &mut out, tty: false };
         run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![d(), d()], &mut p).unwrap();
         let said = String::from_utf8(out).unwrap();
         assert!(said.contains("more than one device is named \"MiniFuse 2\""), "{said}");

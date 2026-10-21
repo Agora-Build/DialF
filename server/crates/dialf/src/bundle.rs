@@ -578,11 +578,12 @@ fn import_impl(
     if dest.exists() && !override_existing {
         confirm_override(dest)?;
     }
+    let existing_key = std::fs::read_to_string(dest)
+        .ok()
+        .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
+        .and_then(|old| old.get("shared_key")?.as_str().map(str::to_owned))
+        .filter(|k| !crate::hostcheck::shared_key_is_placeholder(k));
     if interactive {
-        let existing_key = std::fs::read_to_string(dest)
-            .ok()
-            .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
-            .and_then(|old| old.get("shared_key")?.as_str().map(str::to_owned));
         crate::hostcheck::run(&mut doc, &mut edits, &folder, existing_key.as_deref())?;
     } else {
         for key in crate::hostcheck::rewrite_linux_sox_commands(&mut doc, &mut edits) {
@@ -607,7 +608,18 @@ fn import_impl(
                 warnings.extend(check.report());
             }
         }
-        if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
+        // What Enter does on a terminal: a replaced config keeps its key, so the paired phone
+        // stays paired.
+        if let Some(mine) = existing_key.as_deref() {
+            if mine != cfg.shared_key {
+                crate::hostcheck::set_top_level_str(&mut doc, &mut edits, "shared_key", mine);
+                warnings.push(format!(
+                    "shared_key: kept this machine's key ({}), not the bundle's — import on a \
+                     terminal or edit the config to change it",
+                    crate::hostcheck::mask_key(mine)
+                ));
+            }
+        } else if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
             warnings.push(
                 "config shared_key is still the insecure `change-me` placeholder — set it to a \
                  private value that matches the phone app"
@@ -1092,29 +1104,35 @@ mod tests {
     fn import_override_backs_up_existing_config() {
         let root = tempdir("override");
         let bundle = root.join("bundle");
-        write(&bundle.join("config.yaml"), "shared_key: new\n");
+        write(&bundle.join("config.yaml"), "shared_key: bundle-key\nws_bind: \"0.0.0.0:9999\"\n");
         write(&bundle.join("job.yaml"), "- type: wait\n  ms: 1\n");
 
         let dest = root.join("cfg/config.yaml");
-        write(&dest, "shared_key: old\n");
+        write(&dest, "shared_key: machine-key\n");
 
         // Without --override on a non-tty stdin (tests), it refuses.
         let err = import_to(&bundle, &dest, false).unwrap_err().to_string();
         assert!(err.contains("--override"), "{err}");
-        assert!(std::fs::read_to_string(&dest).unwrap().contains("old"));
+        assert!(!std::fs::read_to_string(&dest).unwrap().contains("9999"));
 
-        // With --override: replaced, old config backed up.
+        // With --override: replaced, old config backed up — but this machine's key is kept,
+        // as Enter would on a terminal.
         let report = import_to(&bundle, &dest, true).unwrap();
         let bak = report.backup_path.unwrap();
-        assert!(std::fs::read_to_string(&bak).unwrap().contains("old"));
-        assert!(std::fs::read_to_string(&dest).unwrap().contains("new"));
+        assert!(!std::fs::read_to_string(&bak).unwrap().contains("9999"));
+        let installed: crate::config::Config =
+            serde_yaml::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(installed.ws_bind, "0.0.0.0:9999");
+        assert_eq!(installed.shared_key, "machine-key");
+        assert!(report.warnings.iter().any(|w| w.contains("kept this machine's key")));
+        assert!(!report.warnings.iter().any(|w| w.contains("machine-key")), "key leaked");
 
         // A further import must NOT clobber the original backup — it gets its own name
         // (same-second imports are disambiguated with a counter suffix).
         let report2 = import_to(&bundle, &dest, true).unwrap();
         let bak2 = report2.backup_path.unwrap();
         assert_ne!(bak, bak2);
-        assert!(std::fs::read_to_string(&bak).unwrap().contains("old"));
+        assert!(!std::fs::read_to_string(&bak).unwrap().contains("9999"));
     }
 
     #[test]
