@@ -591,6 +591,12 @@ fn import_impl(
                  resolves once the tool is installed"
             ));
         }
+        // No terminal to offer the sox_ng swap on — say what's wrong and how to fix it.
+        for finding in crate::hostcheck::split_cards_in_config(&doc) {
+            if finding.flavor != crate::hostcheck::SoxFlavor::Ng {
+                warnings.push(finding.message());
+            }
+        }
         if crate::hostcheck::shared_key_is_placeholder(&cfg.shared_key) {
             warnings.push(
                 "config shared_key is still the insecure `change-me` placeholder — set it to a \

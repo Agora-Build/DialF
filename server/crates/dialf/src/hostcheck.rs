@@ -12,6 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::audio::diagnose::NameClash;
 use crate::bundle::{yaml_flow, yaml_quote};
 
 /// One audio endpoint on this machine. `value` is what goes in the config
@@ -41,20 +42,12 @@ fn detect_macos() -> Vec<AudioDevice> {
     parse_system_profiler(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// What to tell someone about to use `name`, when other detected devices share it. Two
-/// different situations need different advice: a card split into input and output halves
-/// (combine them) versus separate devices that happen to share a name (pick one).
-pub(crate) fn name_clash_advice(name: &str, devices: &[AudioDevice]) -> Option<String> {
-    use crate::audio::diagnose::{self, NameClash};
+/// How the devices called `name` relate (see [`crate::audio::diagnose::NameClash`]).
+fn clash(name: &str, devices: &[AudioDevice]) -> crate::audio::diagnose::NameClash {
     let seen: Vec<(&str, bool, bool)> =
         devices.iter().map(|d| (d.value.as_str(), d.input, d.output)).collect();
-    match diagnose::name_clash(name, &seen) {
-        NameClash::None => None,
-        NameClash::Halves => Some(diagnose::split_device_fix(name)),
-        NameClash::Duplicates => Some(diagnose::duplicate_device_fix(name)),
-    }
+    crate::audio::diagnose::name_clash(name, &seen)
 }
-
 /// Parse `system_profiler SPAudioDataType -json` output.
 pub(crate) fn parse_system_profiler(json: &str) -> Vec<AudioDevice> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -221,6 +214,9 @@ pub(crate) fn run_with(
         )?;
     }
     let mut renames: Vec<(String, String)> = Vec::new();
+    // Split cards are judged after the tool section below: whether one works depends on which
+    // sox the commands end up running, and that path can still change there.
+    let mut split: Vec<(&'static str, String)> = Vec::new();
     for (key, dir_input) in [("capture_device", true), ("playback_device", false)] {
         let Some(current) = audio_str(doc, key) else { continue };
         let usable: Vec<&AudioDevice> = devices
@@ -228,10 +224,13 @@ pub(crate) fn run_with(
             .filter(|d| if dir_input { d.input } else { d.output })
             .collect();
         if usable.iter().any(|d| d.value == current) {
-            if let Some(advice) = name_clash_advice(&current, &devices) {
-                writeln!(p.out, "{key} \"{current}\": {advice}")?;
-            } else {
-                writeln!(p.out, "{key} \"{current}\" ✓")?;
+            match clash(&current, &devices) {
+                NameClash::Halves => split.push((key, current.clone())),
+                NameClash::Duplicates => {
+                    let advice = crate::audio::diagnose::duplicate_device_fix(&current);
+                    writeln!(p.out, "{key} \"{current}\": {advice}")?;
+                }
+                NameClash::None => writeln!(p.out, "{key} \"{current}\" ✓")?,
             }
             continue;
         }
@@ -257,8 +256,13 @@ pub(crate) fn run_with(
             // Picking from the list is how a split card usually arrives (a bundle made on
             // another machine names a device this one lacks) — warn now, not after a failed
             // capture.
-            if let Some(advice) = name_clash_advice(&new, &devices) {
-                writeln!(p.out, "{key} \"{new}\": {advice}")?;
+            match clash(&new, &devices) {
+                NameClash::Halves => split.push((key, new.clone())),
+                NameClash::Duplicates => {
+                    let advice = crate::audio::diagnose::duplicate_device_fix(&new);
+                    writeln!(p.out, "{key} \"{new}\": {advice}")?;
+                }
+                NameClash::None => {}
             }
             if new != current {
                 set_audio_str(doc, edits, key, &new);
@@ -311,6 +315,138 @@ pub(crate) fn run_with(
         // One package covers whatever is missing: sox on macOS (capture + `play`),
         // alsa-utils on Linux (arecord + aplay).
         offer_install(p, if cfg!(target_os = "macos") { "sox" } else { "alsa-utils" })?;
+    }
+
+    for finding in split_card_findings(doc, &split) {
+        writeln!(p.out, "{}", finding.message())?;
+        if finding.flavor != SoxFlavor::Ng {
+            offer_sox_ng(p, &finding)?;
+        }
+    }
+    Ok(())
+}
+
+/// Which sox implementation a binary is. They differ exactly where split cards are concerned:
+/// original sox (14.4.2, 2015 — still Homebrew's `sox`) takes the first CoreAudio name match
+/// in either direction; sox_ng skips devices with no streams in the direction being opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoxFlavor {
+    Ng,
+    Original,
+    /// Couldn't run it, or it said something else.
+    Unknown,
+}
+
+/// Read a `sox --version` line: sox_ng prints "SoX_ng v…" (sox_ng.c), original "SoX v…".
+pub fn sox_flavor(version_output: &str) -> SoxFlavor {
+    if version_output.contains("SoX_ng v") {
+        SoxFlavor::Ng
+    } else if version_output.contains("SoX v") {
+        SoxFlavor::Original
+    } else {
+        SoxFlavor::Unknown
+    }
+}
+
+fn probe_sox_flavor(bin: &str) -> SoxFlavor {
+    match Command::new(bin).arg("--version").output() {
+        Ok(o) => sox_flavor(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )),
+        Err(_) => SoxFlavor::Unknown,
+    }
+}
+
+/// The sox binary a config's command for `device_key` runs, if it runs sox at all.
+fn sox_bin_for(doc: &serde_yaml::Value, device_key: &str) -> Option<String> {
+    let cmd_key = if device_key == "capture_device" { "capture_cmd" } else { "playback_cmd" };
+    match audio_argv(doc, cmd_key) {
+        Some(argv) => {
+            let is_sox = Path::new(&argv[0]).file_name().is_some_and(|n| n == "sox");
+            is_sox.then(|| argv[0].clone())
+        }
+        // Unpinned: on macOS auto-detection prefers sox.
+        None => (cfg!(target_os = "macos") && which::which("sox").is_ok()).then(|| "sox".to_string()),
+    }
+}
+
+/// One split card in use, and how the configured sox copes with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCardFinding {
+    pub name: String,
+    pub keys: Vec<&'static str>,
+    pub sox: String,
+    pub flavor: SoxFlavor,
+}
+
+impl SplitCardFinding {
+    pub fn message(&self) -> String {
+        let keys = self.keys.join(" + ");
+        match self.flavor {
+            SoxFlavor::Ng => format!(
+                "{keys} \"{}\": split into input and output halves — fine with sox_ng, which \
+                 picks the half matching each direction ✓",
+                self.name
+            ),
+            _ => format!("{keys} \"{}\": {}", self.name, crate::audio::diagnose::split_device_fix(&self.name)),
+        }
+    }
+}
+
+/// The split cards in `split` that a sox command will actually open, one finding per card.
+pub fn split_card_findings(doc: &serde_yaml::Value, split: &[(&'static str, String)]) -> Vec<SplitCardFinding> {
+    let mut out: Vec<SplitCardFinding> = Vec::new();
+    for (key, name) in split {
+        let Some(sox) = sox_bin_for(doc, key) else { continue };
+        if let Some(f) = out.iter_mut().find(|f| &f.name == name && f.sox == sox) {
+            f.keys.push(key);
+            continue;
+        }
+        let flavor = probe_sox_flavor(&sox);
+        out.push(SplitCardFinding { name: name.clone(), keys: vec![key], sox, flavor });
+    }
+    out
+}
+
+/// Split cards for a config as it stands (non-interactive import), using this machine's devices.
+pub fn split_cards_in_config(doc: &serde_yaml::Value) -> Vec<SplitCardFinding> {
+    let devices = detect_devices();
+    let split: Vec<(&'static str, String)> = ["capture_device", "playback_device"]
+        .into_iter()
+        .filter_map(|k| audio_str(doc, k).map(|v| (k, v)))
+        .filter(|(_, v)| clash(v, &devices) == NameClash::Halves)
+        .collect();
+    split_card_findings(doc, &split)
+}
+
+/// Offer to swap Homebrew's sox for sox_ng, then re-check rather than assume it worked.
+fn offer_sox_ng(p: &mut Prompter<'_>, finding: &SplitCardFinding) -> Result<()> {
+    if !cfg!(target_os = "macos") || which::which("brew").is_err() {
+        return Ok(());
+    }
+    if !p.yes("replace sox with sox_ng now? (`brew uninstall sox && brew install sox_ng`)")? {
+        return Ok(());
+    }
+    for args in [&["uninstall", "sox"][..], &["install", "sox_ng"][..]] {
+        let status = Command::new("brew").args(args).status().context("run brew")?;
+        if !status.success() {
+            writeln!(
+                p.out,
+                "`brew {}` failed ({status}) — sox is unchanged; the aggregate device above still works",
+                args.join(" ")
+            )?;
+            return Ok(());
+        }
+    }
+    match probe_sox_flavor(&finding.sox) {
+        SoxFlavor::Ng => writeln!(p.out, "sox is now sox_ng — \"{}\" will work as configured ✓", finding.name)?,
+        _ => writeln!(
+            p.out,
+            "sox_ng installed, but `{}` still isn't it — check which sox that path runs",
+            finding.sox
+        )?,
     }
     Ok(())
 }
@@ -872,46 +1008,81 @@ mod tests {
         assert!(String::from_utf8(out).unwrap().contains("\"MiniFuse 2\" ✓"));
     }
 
-    /// GitHub issue #2, replayed: a bundle made with BlackHole lands on a Mac whose TI codec
-    /// CoreAudio lists as two same-named devices. The user picks it by number from the list —
-    /// import must explain the trap right there, for both directions.
-    #[test]
-    fn picking_a_split_card_explains_the_aggregate_fix() {
-        let yaml = "shared_key: test-key\naudio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n";
-        let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    /// A stand-in `sox` that answers `--version` like the given flavor, so import can be
+    /// tested against both without installing either.
+    fn fake_sox(tag: &str, version_line: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dialf-fakesox-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("sox");
+        std::fs::write(&bin, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// GitHub issue #2, replayed: a BlackHole bundle lands on a Mac whose TI codec is split
+    /// into same-named halves; the user picks it from the list for both directions.
+    fn import_split_card(sox_version: &str, tag: &str) -> String {
+        let sox = fake_sox(tag, sox_version);
+        let yaml = format!(
+            "shared_key: test-key\naudio:\n  capture_device: \"BlackHole 2ch\"\n  playback_device: \"BlackHole 16ch\"\n  capture_cmd: [\"{s}\", \"-q\", \"-t\", \"coreaudio\", \"BlackHole 2ch\", \"-\"]\n  playback_cmd: [\"{s}\", \"-q\", \"{{file}}\", \"-t\", \"coreaudio\", \"BlackHole 16ch\"]\n",
+            s = sox.display()
+        );
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let mut edits = Vec::new();
-        let codec = "USB AUDIO  CODEC"; // two spaces, as macOS names it
-        let dev = |input, output| AudioDevice {
-            value: codec.into(),
-            label: codec.into(),
-            input,
-            output,
-        };
-        let devices = vec![dev(false, true), dev(true, false)];
-        let mut input = std::io::Cursor::new(b"1\n1\nn\nn\n".to_vec());
+        let codec = "USB AUDIO  CODEC";
+        let dev = |input, output| AudioDevice { value: codec.into(), label: codec.into(), input, output };
+        // Picks 1 and 1; every later question (the sox_ng offer, if this host has brew) gets
+        // "n" — a test must never run brew.
+        let mut input = std::io::Cursor::new(b"1\n1\nn\nn\nn\nn\n".to_vec());
         let mut out = Vec::new();
         let mut p = Prompter { input: &mut input, out: &mut out };
-        run_with(&mut doc, &mut edits, Path::new("/tmp"), devices, &mut p).unwrap();
-
-        let said = String::from_utf8(out).unwrap();
-        for key in ["capture_device", "playback_device"] {
-            // Without a typed answer to end the prompt line, the warning shares its line.
-            let at = said.find(&format!("{key} \"{codec}\": ")).unwrap_or_else(|| panic!("no {key} warning in:\n{said}"));
-            let line = said[at..].lines().next().unwrap();
-            assert!(line.contains("aggregate"), "{line}");
-            assert!(line.contains("audictl aggregate create"), "{line}");
-        }
+        run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![dev(false, true), dev(true, false)], &mut p).unwrap();
+        let _ = std::fs::remove_dir_all(sox.parent().unwrap());
         assert_eq!(doc["audio"]["capture_device"].as_str(), Some(codec), "the pick itself still applies");
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
-    fn import_gives_halves_and_twins_different_advice() {
-        let d = |v: &str, i, o| AudioDevice { value: v.into(), label: v.into(), input: i, output: o };
-        let codec = "USB AUDIO  CODEC";
-        let devs = vec![d(codec, false, true), d(codec, true, false), d("MiniFuse 2", true, true), d("MiniFuse 2", true, true)];
-        assert!(name_clash_advice(codec, &devs).unwrap().contains("input-only and an output-only half"));
-        let twins = name_clash_advice("MiniFuse 2", &devs).unwrap();
-        assert!(twins.contains("only the one you want") && !twins.contains("half"), "{twins}");
-        assert_eq!(name_clash_advice("absent", &devs), None);
+    fn original_sox_with_a_split_card_gets_the_fix_once() {
+        let said = import_split_card("sox:      SoX v14.4.2", "orig");
+        let line = said.lines().find(|l| l.contains("capture_device + playback_device \"USB AUDIO  CODEC\": ")).unwrap_or_else(|| panic!("no combined finding in:\n{said}"));
+        assert!(line.contains("brew install sox_ng") && line.contains("aggregate"), "{line}");
+        assert_eq!(said.matches("input-only and an output-only half").count(), 1, "one card, one message:\n{said}");
+    }
+
+    #[test]
+    fn sox_ng_with_a_split_card_is_fine() {
+        let said = import_split_card("sox:      SoX_ng v14.8.1", "ng");
+        assert!(said.contains("fine with sox_ng") && said.contains("✓"), "{said}");
+        assert!(!said.contains("brew install sox_ng"), "no nagging once sox_ng is in place:\n{said}");
+        assert!(!said.contains("replace sox with sox_ng now?"), "{said}");
+    }
+
+    /// Verbatim `--version` first lines: Homebrew's original sox really prints an empty
+    /// version ("SoX v"), sox_ng prints "SoX_ng v".
+    #[test]
+    fn sox_flavors_from_their_version_lines() {
+        assert_eq!(sox_flavor("/opt/homebrew/bin/sox:      SoX v\n"), SoxFlavor::Original);
+        assert_eq!(sox_flavor("sox:      SoX v14.4.2\n"), SoxFlavor::Original);
+        assert_eq!(sox_flavor("sox:      SoX_ng v14.8.1\n"), SoxFlavor::Ng);
+        assert_eq!(sox_flavor("ffmpeg version 7"), SoxFlavor::Unknown);
+    }
+
+    /// Two identical full-duplex cards: no halves to combine, so different advice, given at
+    /// pick time and independent of the sox flavor.
+    #[test]
+    fn twin_cards_get_pick_one_advice() {
+        let yaml = "shared_key: test-key\naudio:\n  capture_device: \"MiniFuse 2\"\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let mut edits = Vec::new();
+        let d = || AudioDevice { value: "MiniFuse 2".into(), label: "MiniFuse 2".into(), input: true, output: true };
+        let mut input = std::io::Cursor::new(b"n\nn\nn\n".to_vec());
+        let mut out = Vec::new();
+        let mut p = Prompter { input: &mut input, out: &mut out };
+        run_with(&mut doc, &mut edits, Path::new("/tmp"), vec![d(), d()], &mut p).unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("more than one device is named \"MiniFuse 2\""), "{said}");
+        assert!(!said.contains("half"), "{said}");
     }
 }
