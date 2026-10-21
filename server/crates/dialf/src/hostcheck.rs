@@ -41,11 +41,18 @@ fn detect_macos() -> Vec<AudioDevice> {
     parse_system_profiler(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Whether more than one detected device carries `name` — macOS lists some USB cards (the TI
-/// "USB AUDIO  CODEC") as separate input-only and output-only devices under one name, and
-/// name-based selection then reaches only one of them.
-pub(crate) fn is_split_device(name: &str, devices: &[AudioDevice]) -> bool {
-    devices.iter().filter(|d| d.value == name).count() > 1
+/// What to tell someone about to use `name`, when other detected devices share it. Two
+/// different situations need different advice: a card split into input and output halves
+/// (combine them) versus separate devices that happen to share a name (pick one).
+pub(crate) fn name_clash_advice(name: &str, devices: &[AudioDevice]) -> Option<String> {
+    use crate::audio::diagnose::{self, NameClash};
+    let seen: Vec<(&str, bool, bool)> =
+        devices.iter().map(|d| (d.value.as_str(), d.input, d.output)).collect();
+    match diagnose::name_clash(name, &seen) {
+        NameClash::None => None,
+        NameClash::Halves => Some(diagnose::split_device_fix(name)),
+        NameClash::Duplicates => Some(diagnose::duplicate_device_fix(name)),
+    }
 }
 
 /// Parse `system_profiler SPAudioDataType -json` output.
@@ -221,8 +228,8 @@ pub(crate) fn run_with(
             .filter(|d| if dir_input { d.input } else { d.output })
             .collect();
         if usable.iter().any(|d| d.value == current) {
-            if is_split_device(&current, &devices) {
-                writeln!(p.out, "{key} \"{current}\": {}", crate::audio::engine::split_device_fix(&current))?;
+            if let Some(advice) = name_clash_advice(&current, &devices) {
+                writeln!(p.out, "{key} \"{current}\": {advice}")?;
             } else {
                 writeln!(p.out, "{key} \"{current}\" ✓")?;
             }
@@ -250,8 +257,8 @@ pub(crate) fn run_with(
             // Picking from the list is how a split card usually arrives (a bundle made on
             // another machine names a device this one lacks) — warn now, not after a failed
             // capture.
-            if is_split_device(&new, &devices) {
-                writeln!(p.out, "{key} \"{new}\": {}", crate::audio::engine::split_device_fix(&new))?;
+            if let Some(advice) = name_clash_advice(&new, &devices) {
+                writeln!(p.out, "{key} \"{new}\": {advice}")?;
             }
             if new != current {
                 set_audio_str(doc, edits, key, &new);
@@ -898,11 +905,13 @@ mod tests {
     }
 
     #[test]
-    fn a_name_shared_by_two_devices_is_split() {
+    fn import_gives_halves_and_twins_different_advice() {
         let d = |v: &str, i, o| AudioDevice { value: v.into(), label: v.into(), input: i, output: o };
-        let devs = vec![d("USB AUDIO  CODEC", false, true), d("USB AUDIO  CODEC", true, false), d("MiniFuse 2", true, true)];
-        assert!(is_split_device("USB AUDIO  CODEC", &devs));
-        assert!(!is_split_device("MiniFuse 2", &devs));
-        assert!(!is_split_device("absent", &devs));
+        let codec = "USB AUDIO  CODEC";
+        let devs = vec![d(codec, false, true), d(codec, true, false), d("MiniFuse 2", true, true), d("MiniFuse 2", true, true)];
+        assert!(name_clash_advice(codec, &devs).unwrap().contains("input-only and an output-only half"));
+        let twins = name_clash_advice("MiniFuse 2", &devs).unwrap();
+        assert!(twins.contains("only the one you want") && !twins.contains("half"), "{twins}");
+        assert_eq!(name_clash_advice("absent", &devs), None);
     }
 }

@@ -103,13 +103,23 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   CoreAudio driver (`coreaudio.c`) compares only the name, **as a prefix**, takes the **first**
   match and never checks direction — so no name reaches the second half, and whichever
   direction drew the wrong one fails with "can not get audio device properties" (seen on a
-  13.7 Intel Mac: capture got the output half, ID 109 before 115). The fix is an aggregate
+  13.7 Intel Mac: capture got the output half, ID 109 before 115). **sox_ng fixes it**: its
+  lookup skips devices with no streams in the direction being opened
+  (`DeviceHasBuffersInScope`, in the sox_ng-14.8.1 tag), and it also accepts a device number.
+  Original sox is unmaintained (14.4.2, 2015); Homebrew's `sox` is still that, `sox_ng`
+  conflicts with it and installs the same `sox` command; nixpkgs' `sox` already is sox_ng. So
+  the first fix is `brew uninstall sox && brew install sox_ng`. Otherwise use an aggregate
   device of both halves with a name of its own: `audictl aggregate create --name "DialF Codec"
   --devices "<input id>,<output id>"` (IDs from `audictl list`; audictl refuses the ambiguous
   name). The new name must **not begin with** the original — prefix matching would still pick
   the original. `default` + making the card the system default also works but is fragile:
-  macOS moves the default when another device is plugged in. Import warns on a split card
-  (`hostcheck::is_split_device`) and the capture probe's fix names it.
+  macOS moves the default when another device is plugged in. `audio/diagnose.rs` tells this
+  apart from separate devices that merely share a name (two identical cards — no error, sox
+  just opens the first): different advice, since "combine the halves" is wrong there. Import
+  warns on either at pick time; the capture probe and failed playbacks carry the fix.
+- **Playback used to discard the tool's stderr** — a failure read only "exited with exit
+  status: 2". Both directions now keep a drained stderr tail (`StderrTail`; drained by a
+  thread, since a full pipe would wedge the tool) and attach `diagnose::device_fix`.
 - Channel/port selection is `remix N` in a pinned `capture_cmd` (macOS) or `plughw:CARD,DEV`
   (Linux). On multi-channel interfaces, ch 3/4 are often a **loopback** of our own playback —
   pinning the wrong channel makes tx bleed into rx.
