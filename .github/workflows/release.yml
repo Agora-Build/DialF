@@ -3,7 +3,9 @@
 # Release, the npm wrapper, and mirror to Cloudflare R2 (dl.agora.build).
 #
 # dialf/dialfd ARE shipped as prebuilt binaries; ten-vad inside them is always compiled
-# from source (ONNX path). Linux aarch64 is cross-compiled on the x86_64 runner. The APK is
+# from source (ONNX path). Linux aarch64 builds natively on GitHub's ARM runner — cross-compiling
+# meant downloading a cross toolchain from Ubuntu's mirror, which once stalled a release for
+# 20+ minutes. The APK is
 # release-built but debug-signed (no release keystore configured yet — sideload only).
 name: release
 
@@ -35,7 +37,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: linux-x86_64
             ort_plat: linux-x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: linux-aarch64
             ort_plat: linux-aarch64
@@ -58,19 +60,12 @@ jobs:
 
       - name: Linux deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update && sudo apt-get install -y patchelf
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          fi
+        # A stalled mirror should fail fast, not hold the whole release.
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y patchelf
 
       - name: Build (ten-vad from source; auto-downloads onnxruntime for the target)
         working-directory: server
-        env:
-          # Cross-compile linux-aarch64 on the x86_64 runner (no-op for other targets).
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Stage + bundle onnxruntime + model + fix rpath
@@ -81,11 +76,7 @@ jobs:
           mkdir -p "$stage"
           cp "server/target/${{ matrix.target }}/release/dialf" "$stage/dialf"
           cp third_party/ten-vad/src/onnx_model/ten-vad.onnx "$stage/ten-vad.onnx"
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            aarch64-linux-gnu-strip "$stage/dialf" || true
-          else
-            strip "$stage/dialf" || true
-          fi
+          strip "$stage/dialf" || true
           if [ "${{ runner.os }}" = "macOS" ]; then
             cp -a "$ortlib"/libonnxruntime*.dylib "$stage/"
             install_name_tool -add_rpath @loader_path "$stage/dialf"
