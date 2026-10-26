@@ -77,31 +77,18 @@ impl AudioEngine {
     /// Split out from [`Self::probe_capture`] so it can be exercised without the
     /// microphone-consent gate that opening a real card goes through.
     pub fn measure_source_rate(src: &mut impl super::backend::CaptureSource) -> Option<u32> {
-    // Discard the opening burst — a tool's first buffers arrive all at once, so measuring
-    // from the very first sample reads as a wildly wrong rate on a healthy card.
-    const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
     const MEASURE: std::time::Duration = std::time::Duration::from_millis(1_500);
 
     let mut buf = vec![0i16; 4096];
     let ch = src.channels().max(1) as u64;
-
-    let start = std::time::Instant::now();
-    while start.elapsed() < SETTLE {
-        if matches!(src.read(&mut buf), Ok(0) | Err(_)) {
-            return None;
-        }
-    }
-
-    let measure_from = std::time::Instant::now();
-    let mut frames: u64 = 0;
-    while measure_from.elapsed() < MEASURE {
+    let mut clock = super::capture_clock::CaptureClock::new(src.sample_rate());
+    while clock.elapsed() < MEASURE {
         match src.read(&mut buf) {
             Ok(0) | Err(_) => return None,
-            Ok(n) => frames += n as u64 / ch,
+            Ok(n) => clock.observe(n as u64 / ch),
         }
     }
-    let elapsed = measure_from.elapsed().as_secs_f64();
-    (elapsed > 0.0 && frames > 0).then(|| (frames as f64 / elapsed).round() as u32)
+    clock.rate()
 }
 
 /// Briefly run the capture tool: does it start, deliver audio, and at the rate configured?

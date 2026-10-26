@@ -961,7 +961,8 @@ async fn try_handle(state: &DaemonState, req: ControlRequest) -> anyhow::Result<
             // `t_start_ms`/`t_end_ms` counts from — the two are only meaningful together.
             let recording = out.recording.map(|r| {
                 json!({ "rx": r.rx, "tx": r.tx, "mix": r.mix, "t0_epoch_ms": out.t0_epoch_ms,
-                        "rx_peak_dbfs": r.rx_peak_dbfs, "rx_silent": r.rx_silent })
+                        "rx_peak_dbfs": r.rx_peak_dbfs, "rx_silent": r.rx_silent,
+                        "rx_lost_s": r.rx_lost_s })
             });
             Ok(ok_data(
                 &id,

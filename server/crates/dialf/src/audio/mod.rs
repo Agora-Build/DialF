@@ -5,6 +5,7 @@
 //! (trait + WAV file backend), [`command_backend`] (subprocess), and [`engine`].
 
 pub mod backend;
+pub mod capture_clock;
 pub mod command_backend;
 pub mod diagnose;
 pub mod engine;

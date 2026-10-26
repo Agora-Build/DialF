@@ -597,7 +597,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let resp = call_run(&socket, op).await?;
                 print_response(&resp);
-                if let Some(warning) = silent_rx_warning(&resp) {
+                for warning in recording_warnings(&resp) {
                     eprintln!("\nwarning: {warning}");
                 }
                 if job_ended_on_hangup(&resp) {
@@ -1704,14 +1704,21 @@ fn print_response(resp: &ControlResponse) {
 
 /// True if a `job.run` response stopped early because the far end hung up (the runner records a
 /// marker outcome). Used to print a one-shot "exiting" hint.
-/// The silent-rx warning for a `job.run` response, if its recording came out silent.
-fn silent_rx_warning(resp: &ControlResponse) -> Option<String> {
-    let rec = resp.data.as_ref()?.get("recording")?;
-    if rec.get("rx_silent").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
+/// What went wrong with a `job.run` response's recording: rx silent, rx missing audio.
+fn recording_warnings(resp: &ControlResponse) -> Vec<String> {
+    use dialf::audio::record::{lost_rx_message, silent_rx_message};
+    let Some(rec) = resp.data.as_ref().and_then(|d| d.get("recording")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if rec.get("rx_silent").and_then(|v| v.as_bool()) == Some(true) {
+        let peak = rec.get("rx_peak_dbfs").and_then(|v| v.as_f64()).map(|p| p as f32);
+        out.push(silent_rx_message(peak));
     }
-    let peak = rec.get("rx_peak_dbfs").and_then(|v| v.as_f64()).map(|p| p as f32);
-    Some(dialf::audio::record::silent_rx_message(peak))
+    if let Some(lost) = rec.get("rx_lost_s").and_then(|v| v.as_f64()) {
+        out.push(lost_rx_message(lost as f32));
+    }
+    out
 }
 
 fn job_ended_on_hangup(resp: &ControlResponse) -> bool {
@@ -1767,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn dialf_run_warns_only_on_a_silent_recording() {
+    fn dialf_run_warns_only_about_a_damaged_recording() {
         use dialf::protocol::ControlResponse;
         let resp = |rec: serde_json::Value| ControlResponse {
             id: "1".into(),
@@ -1777,11 +1784,15 @@ mod tests {
             data: Some(serde_json::json!({ "steps": [], "recording": rec })),
         };
         let silent = resp(serde_json::json!({"rx_silent": true, "rx_peak_dbfs": -55.2}));
-        assert!(super::silent_rx_warning(&silent).unwrap().contains("-55 dBFS"));
-        let fine = resp(serde_json::json!({"rx_silent": false, "rx_peak_dbfs": -14.0}));
-        assert_eq!(super::silent_rx_warning(&fine), None);
-        // Older daemon: no field, no warning.
-        assert_eq!(super::silent_rx_warning(&resp(serde_json::json!({"rx": "/x"}))), None);
+        let w = super::recording_warnings(&silent);
+        assert!(w.len() == 1 && w[0].contains("-55 dBFS"), "{w:?}");
+        let lost = resp(serde_json::json!({"rx_silent": false, "rx_lost_s": 48.5}));
+        let w = super::recording_warnings(&lost);
+        assert!(w.len() == 1 && w[0].contains("48.5s"), "{w:?}");
+        let fine = resp(serde_json::json!({"rx_silent": false, "rx_peak_dbfs": -14.0, "rx_lost_s": null}));
+        assert!(super::recording_warnings(&fine).is_empty());
+        // Older daemon: no fields, no warnings.
+        assert!(super::recording_warnings(&resp(serde_json::json!({"rx": "/x"}))).is_empty());
     }
 
     #[test]

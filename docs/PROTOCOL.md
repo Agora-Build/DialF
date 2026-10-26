@@ -152,7 +152,8 @@ returns what it has recorded.
   "recording": { "rx": "…-rx.wav", "tx": "…-tx.wav", "mix": "…-mix.wav",
                  "t0_epoch_ms": 1758412800123,    // wall clock at t=0
                  "rx_peak_dbfs": -14.2,           // loudest rx sample
-                 "rx_silent": false },            // true = the phone's audio never arrived
+                 "rx_silent": false,              // true = the phone's audio never arrived
+                 "rx_lost_s": null },             // seconds of rx the capture dropped
   "call": { "answer_latency_ms": 4200, "duration_ms": 63500,
             "end_reason": "completed",            // completed|far_end_hangup|no_answer
             "remote_number": "+1555…", "sim": "…" }
@@ -176,6 +177,12 @@ the phone's audio did not reach the capture (wrong `remix` channel, a card's inp
 no call connected). Real speech sits far above −40; a dead channel's preamp noise far below
 it. dialfd also logs a warning live, 30 s into a still-silent recording, and `dialf run`
 prints one at the end. `rx_peak_dbfs` is floored at −120 for digital silence.
+
+**`rx_lost_s`** is set when the capture delivered noticeably less audio than wall time passed
+(at least 1 s and 2% of the run). rx is the timeline's clock, so missing audio shortens it:
+replies land early against tx and **this run's latency figures are wrong** — rerun it. It is
+`null` when nothing worth reporting went missing. dialfd logs it live as soon as it crosses
+the threshold, and `dialf run` prints it at the end.
 
 ### Capture probe (`server.info.capture`)
 

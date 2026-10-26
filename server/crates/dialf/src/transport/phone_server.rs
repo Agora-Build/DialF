@@ -462,11 +462,14 @@ async fn trigger_autoanswer(
             .await
         {
             Ok(out) => {
-                if let Some(rec) = out.recording.as_ref().filter(|r| r.rx_silent) {
-                    state.emit(format!(
-                        "{n} → warning: {}",
-                        crate::audio::record::silent_rx_message(rec.rx_peak_dbfs)
-                    ));
+                if let Some(rec) = out.recording.as_ref() {
+                    use crate::audio::record::{lost_rx_message, silent_rx_message};
+                    if rec.rx_silent {
+                        state.emit(format!("{n} → warning: {}", silent_rx_message(rec.rx_peak_dbfs)));
+                    }
+                    if let Some(lost) = rec.rx_lost_s {
+                        state.emit(format!("{n} → warning: {}", lost_rx_message(lost)));
+                    }
                 }
                 let outcomes = out.outcomes;
                 match outcomes

@@ -349,11 +349,13 @@ fn a_named_run_writes_recognisable_recordings() {
 ///
 /// This is the silent-corruption case: the config's rate is substituted into the capture
 /// command and then stamped into the WAV header, with nothing checking the tool honoured it.
-/// Mislabelled audio plays back at the wrong speed with no error anywhere.
+/// Mislabelled audio plays back at the wrong speed with no error anywhere. The recording
+/// thread feeds every chunk through a [`CaptureClock`]; this drives one over a real process.
 #[test]
 fn a_capture_delivering_the_wrong_rate_is_detected() {
     use dialf::audio::backend::CaptureSource;
-    use dialf::audio::command_backend::{measured_rate_mismatch, CommandCaptureSource};
+    use dialf::audio::capture_clock::CaptureClock;
+    use dialf::audio::command_backend::CommandCaptureSource;
     use dialf::audio::tool_detect::CaptureCommand;
 
     // Paced by the shell rather than sox: `sox -n synth` generates its whole buffer as fast
@@ -366,28 +368,29 @@ fn a_capture_delivering_the_wrong_rate_is_detected() {
             "while :; do /usr/bin/head -c 4800 /dev/zero; sleep 0.1; done".into(),
         ],
     };
+    let measure = |claimed: u32| {
+        let mut src = CommandCaptureSource::spawn(&cmd, claimed, 1).expect("spawn capture");
+        let mut clock = CaptureClock::new(claimed);
+        let mut buf = vec![0i16; 4096];
+        while clock.elapsed() < std::time::Duration::from_millis(3_000) {
+            match src.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => clock.observe(n as u64), // mono: one sample per frame
+            }
+        }
+        // The source still reports the configured rate — which is the trap: the WAV header
+        // would say `claimed` while the samples arrive at another rate entirely.
+        assert_eq!(src.sample_rate(), claimed);
+        clock
+    };
 
     // Claim a rate far from what arrives, so shell-pacing jitter cannot blur the verdict.
-    const CLAIMED: u32 = 8_000;
-    let mut src = CommandCaptureSource::spawn(&cmd, CLAIMED, 1).expect("spawn capture");
-    let started = std::time::Instant::now();
-    let mut frames: u64 = 0;
-    let mut buf = vec![0i16; 4096];
-    // Past RATE_CHECK_AFTER, which deliberately waits out the tool's startup burst.
-    while started.elapsed() < std::time::Duration::from_millis(3_500) {
-        match src.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => frames += n as u64, // mono: one sample per frame
-            Err(_) => break,
-        }
-    }
+    let wrong = measure(8_000);
+    assert!(wrong.rate().unwrap() > 15_000, "measured {:?} Hz", wrong.rate());
+    assert!(wrong.reportable_drift().expect("flagged") < 0.0, "more audio than time");
 
-    let measured = measured_rate_mismatch(CLAIMED, frames, started.elapsed())
-        .expect("a ~24kHz stream labelled 8000 Hz must be flagged");
-    assert!(measured > 15_000, "measured {measured} Hz, expected well above the claimed 8000");
-    // The source still reports the configured rate — which is the trap: the WAV header would
-    // say 8000 while the samples arrive at another rate entirely.
-    assert_eq!(src.sample_rate(), CLAIMED);
+    // Claimed right: nothing to report, however the startup burst landed.
+    assert_eq!(measure(24_000).reportable_drift(), None);
 }
 
 /// The pre-flight probe measures what the capture tool really delivers, before any job runs.

@@ -30,6 +30,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 
 use crate::audio::backend::{CaptureSource, PlaybackSink, WavFileSink};
+use crate::audio::capture_clock::CaptureClock;
 use crate::audio::resample::Resampler16k;
 
 /// Default rate for [`DuplexRecorder`] and tests. NOT the live recording rate — a session
@@ -58,6 +59,9 @@ pub struct RecordOutput {
     pub rx_peak_dbfs: Option<f32>,
     /// rx never rose above [`SILENT_BELOW_DBFS`] over at least [`SILENT_MIN`] of recording.
     pub rx_silent: bool,
+    /// Seconds of the run that rx has no audio for (see [`CaptureClock`]); `None` unless
+    /// enough went missing to report.
+    pub rx_lost_s: Option<f32>,
 }
 
 /// rx that never peaks above this is treated as "the phone's audio isn't arriving". A dead
@@ -79,9 +83,47 @@ pub fn silent_rx_message(peak_dbfs: Option<f32>) -> String {
     format!("rx was silent (peak {peak}) — the phone's audio did not reach the capture. {SILENT_RX_CHECKS}")
 }
 
+/// The explanation shown wherever lost rx audio is reported (the live log, auto-answer events,
+/// `dialf run`).
+pub fn lost_rx_message(lost_s: f32) -> String {
+    format!(
+        "rx is missing {lost_s:.1}s of audio — the capture tool did not deliver it, so rx is \
+         shorter than the run and replies land early against tx: latency figures from this \
+         run are wrong. Usually the host's audio system dropping buffers (heavy load, or audio \
+         devices plugged or switched mid-run) — rerun it"
+    )
+}
+
 /// What to check when rx is silent — shared by the live warning and the end-of-job message.
 const SILENT_RX_CHECKS: &str = "Check capture_cmd's channel (`remix N`, plus `-c` on its input \
      side for a multichannel card), the card's input routing, and that the call is connected";
+
+/// What the capture thread hands back: the rx sink, its frame count, and what it measured.
+type CaptureEnd = (WavFileSink, u64, SilenceWatch, CaptureClock);
+
+/// The live warning, once rx has drifted from wall time. Missing audio and a tool running
+/// faster than configured need different fixes, so they get different words.
+fn warn_capture_drift(drift: f64, clock: &CaptureClock, configured: u32) {
+    let span = clock.elapsed().as_secs_f64();
+    if drift > 0.0 {
+        tracing::warn!(
+            lost_s = drift,
+            share = drift / span,
+            "{} ({:.0}% of the {span:.0}s so far)",
+            lost_rx_message(drift as f32),
+            100.0 * drift / span
+        );
+    } else {
+        tracing::warn!(
+            configured,
+            measured = clock.rate(),
+            "capture is delivering ~{} Hz but config says {configured} Hz — recordings are \
+             labelled {configured} Hz and play back at the wrong speed; set audio.sample_rate \
+             to what the card actually runs",
+            clock.rate().unwrap_or_default()
+        );
+    }
+}
 
 /// Tracks rx loudness as it is recorded. Pure, so the thresholds are unit-testable.
 #[derive(Debug, Clone)]
@@ -313,9 +355,10 @@ impl DuplexRecorder {
             rx: rx_path,
             tx: tx_path,
             mix: mix_path,
-            // The passive recorder doesn't measure loudness; say "unknown", not "fine".
+            // The passive recorder doesn't measure loudness or timing; say "unknown", not "fine".
             rx_peak_dbfs: None,
             rx_silent: false,
+            rx_lost_s: None,
         })
     }
 }
@@ -396,7 +439,7 @@ pub struct DuplexSession {
     vad_rx: Receiver<Vec<i16>>,
     /// Stops the capture (kills the child) so the bg thread's blocked read returns EOF.
     unblock: Box<dyn Fn() + Send>,
-    join: Option<JoinHandle<io::Result<(WavFileSink, u64, SilenceWatch)>>>,
+    join: Option<JoinHandle<io::Result<CaptureEnd>>>,
     silence: Vec<i16>,
 }
 
@@ -438,7 +481,7 @@ impl DuplexSession {
 
         let join = std::thread::Builder::new()
             .name("dialf-capture".into())
-            .spawn(move || -> io::Result<(WavFileSink, u64, SilenceWatch)> {
+            .spawn(move || -> io::Result<CaptureEnd> {
                 // Best-effort: raise this thread's scheduling priority so the capture pipe is
                 // drained promptly on a loaded host. Non-fatal if denied (Linux needs
                 // privileges/rtprio; macOS raises the QoS class).
@@ -456,6 +499,8 @@ impl DuplexSession {
                 let mut total: u64 = 0;
                 let mut was_active = false;
                 let mut watch = SilenceWatch::new(src_rate);
+                let mut clock = CaptureClock::new(src_rate);
+                let mut drift_warned = false;
                 loop {
                     let n = capture.read(&mut buf)?;
                     if n == 0 {
@@ -478,7 +523,15 @@ impl DuplexSession {
                         continue;
                     }
                     rx.write(chunk)?;
-                    total += (chunk.len() / src_channels) as u64;
+                    let frames = (chunk.len() / src_channels) as u64;
+                    total += frames;
+                    clock.observe(frames);
+                    if !drift_warned {
+                        if let Some(drift) = clock.reportable_drift() {
+                            drift_warned = true;
+                            warn_capture_drift(drift, &clock, src_rate);
+                        }
+                    }
                     if watch.observe(chunk, src_channels) {
                         // Live, while the call is still going: a dead capture otherwise shows
                         // up only as an empty rx.wav after the fact.
@@ -510,7 +563,7 @@ impl DuplexSession {
                         }
                     }
                 }
-                Ok((rx, total, watch))
+                Ok((rx, total, watch, clock))
             })
             .context("spawn capture thread")?;
 
@@ -584,7 +637,7 @@ impl DuplexSession {
     pub fn finish(mut self) -> anyhow::Result<RecordOutput> {
         self.vad_active.store(false, Ordering::Relaxed);
         (self.unblock)(); // kill the capture so the bg read returns EOF
-        let (mut rx, rx_len, watch) = match self.join.take() {
+        let (mut rx, rx_len, watch, clock) = match self.join.take() {
             Some(h) => h
                 .join()
                 .map_err(|_| anyhow!("capture thread panicked"))??,
@@ -611,6 +664,10 @@ impl DuplexSession {
             mix: mix_path,
             rx_peak_dbfs: watch.peak_dbfs(),
             rx_silent: watch.silent_overall(),
+            rx_lost_s: clock
+                .reportable_drift()
+                .filter(|d| *d > 0.0)
+                .map(|d| (d * 10.0).round() as f32 / 10.0),
         })
     }
 }

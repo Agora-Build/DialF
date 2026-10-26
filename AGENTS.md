@@ -149,12 +149,20 @@ GitHub release. Verify with `npm view @agora-build/dialf version` and
   sox does honour it — it opens the card natively and inserts a `rate` effect (verified: 48k
   card, `-r 32000` out gives exactly 32000 Hz), so any rate is correctly labelled. A tool or
   driver that *ignored* the request would yield audio labelled wrong: slow, low-pitched,
-  every duration off, no error. The capture source measures what actually arrives and warns
-  after 3s if it drifts >4% (`measured_rate_mismatch`); set the
-  rate to what the card really runs. A pre-flight probe (`measure_source_rate`, run in the
+  every duration off, no error. A pre-flight probe (`measure_source_rate`, run in the
   background at daemon start) reports the real rate before the first job, so the mismatch
   surfaces in the log rather than in a recording. VAD is unaffected — a non-integer ratio like 44100->16000
   just falls back to the linear resampler instead of the decimator.
+- **rx is the master clock, so audio the capture drops silently shortens it.** tx is placed
+  by rx frame count; frames that never arrive move every later reply earlier against its
+  prompt, and the latency figures are wrong while both files play fine. Seen on WebDuT001
+  (Intel, macOS 13.7) while cables and default devices were being changed mid-run: 48.5 s of
+  281 s missing, located with a 440 Hz marker tone; it did not reproduce once the setup
+  settled, and sox_ng alone kept exact time. `CaptureClock` compares delivered frames with
+  wall time from just after the first frame; the recording thread logs once when the gap
+  reaches 1 s and 2% (more audio than time instead = a tool ignoring `sample_rate`), and the
+  job result carries `rx_lost_s`. Never measure from the tool's spawn: its startup reads as
+  ~5% missing, which is how the old 3 s rate check cried wolf on every healthy run.
 - **Don't add dialf-side resampling to the recording path.** sox already converts when asked
   (`{rate}` in `capture_cmd`), and dialf's resampler is linear for non-integer ratios like
   48000->32000 — worse than the tool's. Recording at the card's native rate and converting
